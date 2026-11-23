@@ -1,4 +1,5 @@
 use super::*;
+use appkit_shell::normalize_paste_text;
 
 // ── Selection helpers ───────────────────────────────────────────
 

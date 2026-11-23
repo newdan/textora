@@ -204,6 +204,7 @@ pub(crate) fn augment_delete_forward(
     }
     delete_forward_remove_inline_html_break(source, current_byte)
         .or_else(|| delete_forward_join_reopened_inline_elements(source, current_byte))
+        .or_else(|| delete_forward_join_hard_break_line(source, current_byte))
         .or_else(|| {
             let grapheme = source.get(current_byte..)?.graphemes(true).next()?;
             editable_paragraph_edit::erase_last_grapheme(source, current_byte + grapheme.len())
@@ -456,21 +457,74 @@ fn merge_disjoint_erasure_ranges(
     augmentation
 }
 
+const MAX_INLINE_HTML_BREAK_LEN: usize = 16;
+
+fn cursor_preceded_by_inline_opening(source: &str, cursor: usize) -> bool {
+    let Some(prev) = source.as_bytes().get(cursor.wrapping_sub(1)).copied() else {
+        return false;
+    };
+    matches!(prev, b'*' | b'_' | b'~' | b'[' | b'`')
+        || (prev == b' ' && source[..cursor].trim_end_matches(' ').ends_with('`'))
+}
+
+fn cursor_followed_by_inline_closing(source: &str, cursor: usize) -> bool {
+    let Some(next) = source.as_bytes().get(cursor).copied() else {
+        return false;
+    };
+    matches!(next, b'*' | b'_' | b'~' | b']' | b'`')
+        || (next == b' ' && source[cursor..].trim_start_matches(' ').starts_with('`'))
+}
+
+pub(in crate::augmenter) fn inline_html_break_ending_at(
+    source: &str,
+    current_byte: usize,
+) -> Option<std::ops::Range<usize>> {
+    if !cfg!(feature = "rich-markdown") {
+        return None;
+    }
+    let prefix = source.get(..current_byte)?;
+    if !prefix.ends_with('>') {
+        return None;
+    }
+    let scan_start = prefix.len().saturating_sub(MAX_INLINE_HTML_BREAK_LEN);
+    let open_rel = prefix.as_bytes()[scan_start..].iter().rposition(|&byte| byte == b'<')?;
+    let break_start = scan_start + open_rel;
+    if !crate::parser::is_inline_html_break(&source[break_start..current_byte]) {
+        return None;
+    }
+    let candidate = break_start..current_byte;
+    is_inline_html_break_range(source, candidate.clone()).then_some(candidate)
+}
+
+pub(in crate::augmenter) fn inline_html_break_starting_at(
+    source: &str,
+    current_byte: usize,
+) -> Option<std::ops::Range<usize>> {
+    if !cfg!(feature = "rich-markdown") {
+        return None;
+    }
+    let suffix = source.get(current_byte..)?;
+    if !suffix.starts_with('<') {
+        return None;
+    }
+    let scan_end = suffix.len().min(MAX_INLINE_HTML_BREAK_LEN);
+    let close_rel = suffix.as_bytes()[..scan_end].iter().position(|&byte| byte == b'>')?;
+    let break_end = current_byte + close_rel + 1;
+    if !crate::parser::is_inline_html_break(&source[current_byte..break_end]) {
+        return None;
+    }
+    let candidate = current_byte..break_end;
+    is_inline_html_break_range(source, candidate.clone()).then_some(candidate)
+}
+
 pub(in crate::augmenter) fn delete_forward_remove_inline_html_break(
     source: &str,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
-    const INLINE_HTML_BREAKS: [&str; 3] = ["<br>", "<br/>", "<br />"];
-    let suffix = source.get(current_byte..)?;
-    let html_break =
-        INLINE_HTML_BREAKS.into_iter().find(|html_break| suffix.starts_with(html_break))?;
-    let replace_end = current_byte + html_break.len();
-    if !is_inline_html_break_range(source, current_byte..replace_end) {
-        return None;
-    }
+    let break_range = inline_html_break_starting_at(source, current_byte)?;
     let augmentation = EditAugmentation {
         insert_text: Some(String::new()),
-        replace_range: Some(current_byte..replace_end),
+        replace_range: Some(break_range),
         cursor_byte_after: current_byte,
     };
     debug_assert_augmentation(&augmentation, source);
@@ -481,6 +535,9 @@ pub(in crate::augmenter) fn delete_forward_join_reopened_inline_elements(
     source: &str,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
+    if !cursor_followed_by_inline_closing(source, current_byte) {
+        return None;
+    }
     let frames = inline_wrapper_frames(source);
     let mut previous_frames = frames
         .iter()
@@ -500,23 +557,32 @@ pub(in crate::augmenter) fn delete_forward_join_reopened_inline_elements(
         ""
     };
 
-    let next_line_start =
-        if let Some(hard_break) = hard_break_boundary_after(source, boundary_start) {
-            hard_break.end
-        } else {
-            let mut probe = boundary_start;
-            let mut newline_count = 0;
-            while let Some(newline_width) = newline_sequence_width_at(source, probe) {
-                probe += newline_width;
-                newline_count += 1;
-            }
-            if newline_count == 0 {
-                return None;
-            }
-            probe
-        };
-    let (_, _, next_line_end) = locate_source_line_bounds(source, next_line_start)?;
-    let opening_start = container_content_start_on_line(source, next_line_start, next_line_end);
+    let (next_line_end, opening_start) = if let Some(br_range) =
+        inline_html_break_starting_at(source, boundary_start)
+    {
+        let opening_start = br_range.end;
+        let (_, _, line_end) = locate_source_line_bounds(source, opening_start)?;
+        (line_end, opening_start)
+    } else {
+        let next_line_start =
+            if let Some(hard_break) = hard_break_boundary_after(source, boundary_start) {
+                hard_break.end
+            } else {
+                let mut probe = boundary_start;
+                let mut newline_count = 0;
+                while let Some(newline_width) = newline_sequence_width_at(source, probe) {
+                    probe += newline_width;
+                    newline_count += 1;
+                }
+                if newline_count == 0 {
+                    return None;
+                }
+                probe
+            };
+        let (_, _, next_line_end) = locate_source_line_bounds(source, next_line_start)?;
+        let opening_start = container_content_start_on_line(source, next_line_start, next_line_end);
+        (next_line_end, opening_start)
+    };
     let mut current_frames = frames
         .iter()
         .filter(|frame| {
@@ -543,6 +609,85 @@ pub(in crate::augmenter) fn delete_forward_join_reopened_inline_elements(
     };
     debug_assert_augmentation(&augmentation, source);
     Some(augmentation)
+}
+
+fn delete_forward_join_hard_break_line(
+    source: &str,
+    current_byte: usize,
+) -> Option<EditAugmentation> {
+    let boundary = hard_break_boundary_after(source, current_byte)?;
+    if boundary.start != current_byte {
+        return None;
+    }
+    if boundary.end < source.len() && newline_sequence_width_at(source, boundary.end).is_some() {
+        return None;
+    }
+    let (cur_line_start, _, _) = locate_source_line_bounds(source, current_byte)?;
+    let current_content_start =
+        container_content_start_on_line(source, cur_line_start, current_byte);
+    let current_prefix = canonical_container_prefix(source, current_content_start);
+    if boundary.end < source.len() {
+        let (_, _, next_line_end) = locate_source_line_bounds(source, boundary.end)?;
+        let next_is_blank = blank_source_line_width(source, boundary.end).is_some();
+        let is_terminal_container_continuation =
+            next_line_end == source.len() && !current_prefix.is_empty();
+        if next_is_blank && !is_terminal_container_continuation {
+            return None;
+        }
+    }
+
+    let context = classify_enter_context(source, current_byte);
+    if matches!(
+        context,
+        EnterContext::CodeBlock
+            | EnterContext::IndentedCodeBlock { .. }
+            | EnterContext::CodeBlockFenceLine { .. }
+            | EnterContext::LiteralBlockLine { .. }
+            | EnterContext::Heading { .. }
+            | EnterContext::SetextHeading { .. }
+            | EnterContext::TableCell { .. }
+            | EnterContext::HorizontalRuleEnd
+    ) {
+        return None;
+    }
+
+    if boundary.end == source.len() {
+        let aug = EditAugmentation {
+            insert_text: Some(String::new()),
+            replace_range: Some(boundary),
+            cursor_byte_after: current_byte,
+        };
+        debug_assert_augmentation(&aug, source);
+        return Some(aug);
+    }
+
+    let next_line_start = boundary.end;
+    let (_, _, next_line_end) = locate_source_line_bounds(source, next_line_start)?;
+    let next_content_end = source_line_content_end(source, next_line_end);
+    let container_path = container_path(&current_prefix);
+    if line_starts_new_sibling_block(source, next_line_start)
+        || line_starts_independent_block(source, next_line_start, &container_path)
+    {
+        return Some(consume_edit(current_byte));
+    }
+
+    let next_prefix_width = source[next_line_start..next_content_end]
+        .bytes()
+        .take_while(|&byte| matches!(byte, b' ' | b'\t' | b'>'))
+        .count();
+    let next_prefix_end = next_line_start + next_prefix_width;
+    let next_joinable_prefix = &source[next_line_start..next_prefix_end];
+    if !continuation_prefix_matches_prefix(Some(&current_prefix), next_joinable_prefix) {
+        return Some(consume_edit(current_byte));
+    }
+    let delete_end = next_prefix_end.min(next_content_end);
+    let aug = EditAugmentation {
+        insert_text: Some(String::new()),
+        replace_range: Some(boundary.start..delete_end),
+        cursor_byte_after: current_byte,
+    };
+    debug_assert_augmentation(&aug, source);
+    Some(aug)
 }
 
 /// Delete(前向删除)的块边界护栏,与 Backspace 侧的
@@ -639,6 +784,29 @@ pub(in crate::augmenter) fn delete_forward_block_boundary(
                 insert_text: Some(String::new()),
                 replace_range: Some(delete_start..delete_end),
                 cursor_byte_after: current_byte.min(delete_start),
+            };
+            debug_assert_augmentation(&augmentation, source);
+            Some(augmentation)
+        }
+        EnterContext::BlockQuoteLine { .. } | EnterContext::ListItem { .. } => {
+            if line_starts_independent_block(source, newline_run_end, &container_path) {
+                return consume_boundary();
+            }
+            let (_, _, next_line_end) = locate_source_line_bounds(source, newline_run_end)?;
+            let next_content_end = source_line_content_end(source, next_line_end);
+            let container_content = matching_container_position(
+                source,
+                newline_run_end,
+                next_content_end,
+                &container_path,
+            )
+            .map_or(newline_run_end, |position| position.byte_offset);
+            let delete_end =
+                delete_forward_folded_leading_whitespace_end(source, container_content, false);
+            let augmentation = EditAugmentation {
+                insert_text: Some(String::new()),
+                replace_range: Some(boundary_end..delete_end),
+                cursor_byte_after: current_byte.min(boundary_end),
             };
             debug_assert_augmentation(&augmentation, source);
             Some(augmentation)
@@ -856,18 +1024,12 @@ pub(in crate::augmenter) fn backspace_remove_inline_html_break(
     source: &str,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
-    const INLINE_HTML_BREAKS: [&str; 3] = ["<br>", "<br/>", "<br />"];
-    let prefix = source.get(..current_byte)?;
-    let html_break =
-        INLINE_HTML_BREAKS.into_iter().find(|html_break| prefix.ends_with(html_break))?;
-    let replace_start = current_byte - html_break.len();
-    if !is_inline_html_break_range(source, replace_start..current_byte) {
-        return None;
-    }
+    let break_range = inline_html_break_ending_at(source, current_byte)?;
+    let cursor_after = break_range.start;
     let augmentation = EditAugmentation {
         insert_text: Some(String::new()),
-        replace_range: Some(replace_start..current_byte),
-        cursor_byte_after: replace_start,
+        replace_range: Some(break_range),
+        cursor_byte_after: cursor_after,
     };
     debug_assert_augmentation(&augmentation, source);
     Some(augmentation)
@@ -882,8 +1044,11 @@ pub(in crate::augmenter) fn is_inline_html_break_range(
     }
     let parsed = crate::parser::parse_markdown(source);
     parsed.events.iter().zip(&parsed.event_ranges).any(|(event, event_range)| {
-        matches!(event, crate::parser::MarkdownEvent::InlineHtml(_))
-            && *event_range == candidate_range
+        matches!(
+            event,
+            crate::parser::MarkdownEvent::InlineHtml(html)
+                if crate::parser::is_inline_html_break(html)
+        ) && *event_range == candidate_range
     })
 }
 
@@ -891,6 +1056,9 @@ pub(in crate::augmenter) fn backspace_join_reopened_inline_elements(
     source: &str,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
+    if !cursor_preceded_by_inline_opening(source, current_byte) {
+        return None;
+    }
     let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
     if current_byte == line_start {
         return None;
@@ -908,29 +1076,41 @@ pub(in crate::augmenter) fn backspace_join_reopened_inline_elements(
     current_frames.sort_by_key(|frame| frame.source_range.start);
     let current_outer = current_frames.first()?;
     let opening_start = current_outer.source_range.start;
-    if container_content_start_on_line(source, line_start, line_end) != opening_start {
-        return None;
-    }
 
-    let mut previous_wrapper_end = line_start;
-    let mut newline_count = 0;
-    while let Some(newline_width) = newline_sequence_width_before(source, previous_wrapper_end) {
-        previous_wrapper_end -= newline_width;
-        newline_count += 1;
-    }
-    if newline_count == 0 {
-        return None;
-    }
-    if let Some(marker) = hard_break_marker_ending_at(source, previous_wrapper_end) {
-        previous_wrapper_end = marker.start;
-    }
-
-    let separator = if source.as_bytes().get(previous_wrapper_end.wrapping_sub(1)) == Some(&b' ') {
-        previous_wrapper_end -= 1;
-        " "
-    } else {
-        ""
-    };
+    let (previous_wrapper_end, separator) =
+        if let Some(br_range) = inline_html_break_ending_at(source, opening_start) {
+            let mut prev_end = br_range.start;
+            let sep = if source.as_bytes().get(prev_end.wrapping_sub(1)) == Some(&b' ') {
+                prev_end -= 1;
+                " "
+            } else {
+                ""
+            };
+            (prev_end, sep)
+        } else {
+            if container_content_start_on_line(source, line_start, line_end) != opening_start {
+                return None;
+            }
+            let mut prev_end = line_start;
+            let mut newline_count = 0;
+            while let Some(newline_width) = newline_sequence_width_before(source, prev_end) {
+                prev_end -= newline_width;
+                newline_count += 1;
+            }
+            if newline_count == 0 {
+                return None;
+            }
+            if let Some(marker) = hard_break_marker_ending_at(source, prev_end) {
+                prev_end = marker.start;
+            }
+            let sep = if source.as_bytes().get(prev_end.wrapping_sub(1)) == Some(&b' ') {
+                prev_end -= 1;
+                " "
+            } else {
+                ""
+            };
+            (prev_end, sep)
+        };
 
     let previous_outer = frames
         .iter()

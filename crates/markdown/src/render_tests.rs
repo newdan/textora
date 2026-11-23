@@ -7,7 +7,7 @@ fn render_layout_emits_inline_math_image_and_keeps_adjacent_text() {
     let style = crate::test_utils::default_style();
     let markdown =
         crate::builder::MarkdownDoc::build(&crate::parser::parse_markdown(source), &style);
-    let text_document = core::document::StringDocView::new(source);
+    let text_document = textora_core::document::StringDocView::new(source);
     let mut shaper = shaping::Shaper::new().expect("test font");
     let layout = crate::layout::layout_doc_with_shaper_for_rendering(
         &markdown.blocks,
@@ -30,7 +30,7 @@ fn render_layout_emits_display_math_and_mermaid_images() {
         let style = crate::test_utils::default_style();
         let markdown =
             crate::builder::MarkdownDoc::build(&crate::parser::parse_markdown(source), &style);
-        let text_document = core::document::StringDocView::new(source);
+        let text_document = textora_core::document::StringDocView::new(source);
         let mut shaper = shaping::Shaper::new().expect("test font");
         let layout = crate::layout::layout_doc_with_shaper_for_rendering(
             &markdown.blocks,
@@ -148,7 +148,7 @@ fn build_and_render(md: &str) -> DrawList {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let doc_view = core::document::StringDocView::new(md);
+    let doc_view = textora_core::document::StringDocView::new(md);
     let layout =
         layout_doc_with_shaper_for_rendering(&doc.blocks, &style, 400.0, None, None, &doc_view);
     let mut dl = DrawList::new();
@@ -172,7 +172,7 @@ fn build_and_render_editing(md: &str, cursor_byte: usize) -> (DrawList, Markdown
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let doc_view = core::document::StringDocView::new(md);
+    let doc_view = textora_core::document::StringDocView::new(md);
     let mut layout = LazyLayout::from_doc(doc, &style, 400.0, &doc_view);
     layout.set_edit_source(Some(md.to_string()));
     layout.set_edit_ctx(Some(crate::edit::EditContext {
@@ -209,7 +209,7 @@ fn build_and_render_with_highlighter(md: &str, highlighter: &dyn CodeHighlighter
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let doc_view = core::document::StringDocView::new(md);
+    let doc_view = textora_core::document::StringDocView::new(md);
     let mut shaper = shaping::Shaper::new().expect("need shaper for render tests");
     let layout = layout_doc_with_shaper_for_rendering(
         &doc.blocks,
@@ -239,7 +239,7 @@ fn build_laid_out(md: &str) -> MarkdownLayout {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let doc_view = core::document::StringDocView::new(md);
+    let doc_view = textora_core::document::StringDocView::new(md);
     layout_doc_with_shaper_for_rendering(&doc.blocks, &style, 400.0, None, None, &doc_view)
 }
 
@@ -1238,7 +1238,8 @@ fn render_inline_code_color_differs_from_base() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     let mut dl = DrawList::new();
     let mut test_shaper = shaping::Shaper::new().unwrap();
     render_doc(&laid_out, &style, &mut dl, 0.0, 600.0, Some(&mut test_shaper));
@@ -1266,8 +1267,12 @@ fn render_strikethrough_thickness_scales_with_high_dpi_font_size() {
     let mut style = default_style();
     style.body_font_size *= 2.0;
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out =
-        layout_doc(&doc.blocks, &style, 800.0, &core::document::StringDocView::new(markdown));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &style,
+        800.0,
+        &textora_core::document::StringDocView::new(markdown),
+    );
     let mut draw_list = DrawList::new();
     let mut shaper = shaping::Shaper::new().expect("render test requires a text shaper");
     render_doc(&laid_out, &style, &mut draw_list, 0.0, 600.0, Some(&mut shaper));
@@ -1345,7 +1350,7 @@ fn table_inline_code_delimiters_follow_focus_and_keep_source_anchors() {
     let code_start = source.find('`').expect("fixture contains inline code");
     let code_end = code_start + "`中文`".len();
     let next_code_cursor = source.find("next").expect("fixture contains adjacent code");
-    let document = core::document::StringDocView::new(source);
+    let document = textora_core::document::StringDocView::new(source);
     let mut editor = crate::view::MarkdownView::new();
     editor.set_source(source.to_owned(), 1);
     editor.engine_mut().set_edit_source(Some(source.to_owned()));
@@ -1414,7 +1419,8 @@ fn render_table_single_row_no_extra_stripe() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     let mut dl = DrawList::new();
     render_doc(&laid_out, &style, &mut dl, 0.0, 600.0, None);
     // Single body row (row_idx=0, even) should NOT get stripe bg
@@ -1587,7 +1593,8 @@ fn render_table_cell_text_no_chars_lost_at_different_widths() {
         let parsed = parse_markdown(md);
         let style = default_style();
         let doc = MarkdownDoc::build(&parsed, &style);
-        let laid_out = layout_doc(&doc.blocks, &style, w, &core::document::StringDocView::new(md));
+        let laid_out =
+            layout_doc(&doc.blocks, &style, w, &textora_core::document::StringDocView::new(md));
         let mut dl = DrawList::new();
         let mut shaper = shaping::Shaper::new().expect("need shaper");
         render_doc(&laid_out, &style, &mut dl, 0.0, 600.0, Some(&mut shaper));
@@ -1616,7 +1623,8 @@ fn first_visible_block_idx_finds_block() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     assert!(laid_out.blocks.len() >= 2);
 
     // At top: first block visible
@@ -1637,7 +1645,8 @@ fn culling_excludes_block_above_viewport() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     // Scroll past first heading
     let scroll_y = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h + 10.0;
     let mut dl = DrawList::new();
@@ -1674,7 +1683,8 @@ fn culling_excludes_block_below_viewport() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     let small_vp = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h + 5.0;
     let mut dl = DrawList::new();
     let mut shaper = shaping::Shaper::new().unwrap();
@@ -1710,7 +1720,8 @@ fn blockquote_border_rendered_even_when_child_culled() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     let blockquote = &laid_out.blocks[0];
     // Scroll to show only the bottom half of the blockquote
     let scroll_y = blockquote.rect.y + blockquote.rect.h * 0.5;
@@ -1741,7 +1752,8 @@ fn culling_excludes_codeblock_line_above_viewport() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     let block = &laid_out.blocks[0];
     // Extract line positions
     if let LaidOutBlockKind::CodeBlock { lines, .. } = &block.kind {
@@ -1790,7 +1802,8 @@ fn culling_excludes_listitem_line_above_viewport() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     assert!(laid_out.blocks.len() >= 2, "need at least 2 list items");
     // Scroll past first item
     let scroll_y = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h + 1.0;
@@ -1832,7 +1845,8 @@ fn empty_doc_renders_nothing() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     let mut dl = DrawList::new();
     let mut shaper = shaping::Shaper::new().unwrap();
     render_doc_with_offset(
@@ -1959,7 +1973,8 @@ fn blockquote_height_includes_vertical_padding() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     let blockquote = &laid_out.blocks[0];
     // Block height should include top + bottom padding
     assert!(
@@ -1990,7 +2005,8 @@ fn list_items_have_uniform_height() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     assert!(laid_out.blocks.len() >= 3, "need 3 list items");
     // All single-line list items should have the same rect height.
     // Spacing between items is handled externally, not baked into rect.h.
@@ -2033,7 +2049,7 @@ fn debug_spacing_draws_each_resolved_boundary_once() {
     let source = "before\n\nafter";
     let style = default_style();
     let document = MarkdownDoc::build(&parse_markdown(source), &style);
-    let document_view = core::document::StringDocView::new(source);
+    let document_view = textora_core::document::StringDocView::new(source);
     let layout = LazyLayout::from_doc(document, &style, 400.0, &document_view);
     let first_block = layout.laid_out[0].as_ref().expect("first block is materialized");
     let second_block = layout.laid_out[1].as_ref().expect("second block is materialized");
@@ -2062,7 +2078,7 @@ fn debug_spacing_uses_sparse_slot_neighbors_without_document_edge_bands() {
     let source = (0..80).map(|index| format!("paragraph {index}")).collect::<Vec<_>>().join("\n\n");
     let style = default_style();
     let document = MarkdownDoc::build(&parse_markdown(&source), &style);
-    let document_view = core::document::StringDocView::new(&source);
+    let document_view = textora_core::document::StringDocView::new(&source);
     let mut layout = LazyLayout::new(document, &style, VIEWPORT_WIDTH, &document_view);
     let materialization_scroll_y = layout.total_height * 0.5;
     let mut shaper = shaping::Shaper::new().expect("sparse debug test requires a shaper");
@@ -2170,7 +2186,8 @@ fn horizontal_rule_content_matches_drawn_line_and_neighbor_spacing() {
     let parsed = parse_markdown(md);
     let style = default_style();
     let doc = MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     let hr = laid_out
         .blocks
         .iter()

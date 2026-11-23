@@ -470,30 +470,12 @@ impl App {
     }
 
     fn apply_active_mindmap_theme(&mut self, theme_id: String) -> AppEffect {
-        let edit_executed = {
-            let Some(session) = self.active_tab_session_mut() else {
-                return AppEffect::NONE;
-            };
-            if session.plugin_name() != ui::plugin::PLUGIN_MINDMAP {
-                return AppEffect::NONE;
-            }
-
-            let source_generation = session.document.generation();
-            let Some(plan) = session.plan_mindmap_theme(theme_id, source_generation) else {
-                return AppEffect::NONE;
-            };
-
-            crate::edit_transaction::execute_edit_plan(plan, session.document)
-                .map(|outcome| outcome.edit_outcome.executed)
-                .unwrap_or(false)
-        };
-
-        if !edit_executed {
-            return AppEffect::NONE;
+        let outcome = self.editor_runtime.apply_active_mindmap_theme(theme_id);
+        if outcome.shell_effect != AppEffect::NONE {
+            let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+            self.update_document_edited(dirty);
         }
-
-        self.sync_plugin_state();
-        AppEffect::REDRAW
+        outcome.shell_effect
     }
 
     pub(crate) fn dispatch_settings_view_action(
@@ -747,15 +729,7 @@ impl App {
     }
 
     fn dispatch_canvas_viewport_action(&mut self, action: CanvasViewportAction) -> AppEffect {
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return AppEffect::NONE;
-        };
-        if !tab.is_canvas() || !tab.has_canvas_viewport_snapshot() {
-            return AppEffect::NONE;
-        }
-
-        tab.apply_canvas_viewport_action(action);
-        AppEffect::REDRAW
+        self.apply_canvas_viewport_action(action)
     }
 
     fn active_canvas_viewport_has_snapshot(&self) -> bool {
@@ -856,7 +830,7 @@ pub(crate) mod canvas_drag_test_support {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -873,7 +847,11 @@ pub(crate) mod canvas_drag_test_support {
             true
         }
 
-        fn query(&self, query: PluginQuery, _doc: &dyn core::document::DocView) -> PluginResponse {
+        fn query(
+            &self,
+            query: PluginQuery,
+            _doc: &dyn textora_core::document::DocView,
+        ) -> PluginResponse {
             match query {
                 PluginQuery::NeedsSourceUpdate(_) => PluginResponse::Bool(false),
                 PluginQuery::HitTestEditTarget { .. } => {
@@ -889,7 +867,7 @@ pub(crate) mod canvas_drag_test_support {
         fn handle_message(
             &mut self,
             _message: PluginMessage,
-            _doc: &mut dyn core::document::DocViewMut,
+            _doc: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             false
         }
@@ -897,7 +875,7 @@ pub(crate) mod canvas_drag_test_support {
         fn handle_canvas_drag(
             &mut self,
             request: CanvasDragRequest,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
         ) -> CanvasDragResponse {
             self.state.borrow_mut().requests.push(request);
             CanvasDragResponse::Ignore
@@ -950,7 +928,7 @@ mod tests {
     use super::*;
     use crate::document_view::DocumentView;
 
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::rc::Rc;
 
     fn app_with_focused_search(replace: bool) -> App {
@@ -1057,7 +1035,7 @@ mod tests {
     #[derive(Default)]
     struct MindmapStyleDispatchState {
         plan_queries: RefCell<Vec<(String, u32)>>,
-        sync_queries: Cell<usize>,
+        synchronized_sources: RefCell<Vec<String>>,
     }
 
     struct MindmapStyleDispatchPlugin {
@@ -1073,7 +1051,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1082,10 +1060,22 @@ mod tests {
             ui::core::paint::DrawList::new()
         }
 
+        fn handle_message(
+            &mut self,
+            message: ui::plugin::PluginMessage,
+            _document: &mut dyn textora_core::document::DocViewMut,
+        ) -> bool {
+            let ui::plugin::PluginMessage::UpdateSource { text, .. } = message else {
+                return false;
+            };
+            self.state.synchronized_sources.borrow_mut().push(text);
+            true
+        }
+
         fn query(
             &self,
             query: ui::plugin::PluginQuery,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             use ui::plugin::{EditPlan, EditTransaction, PluginQuery, PluginResponse};
 
@@ -1122,10 +1112,6 @@ mod tests {
                     };
                     PluginResponse::EditPlan(plan)
                 }
-                PluginQuery::NeedsSourceUpdate(_) => {
-                    self.state.sync_queries.set(self.state.sync_queries.get() + 1);
-                    PluginResponse::Bool(false)
-                }
                 _ => PluginResponse::None,
             }
         }
@@ -1141,6 +1127,7 @@ mod tests {
         let document = DocumentView::new(vec!["root".to_owned()], 80, 10.0);
         app.push_entry_for_test(document, Box::new(plugin));
         app.switch_workspace_for_test(0);
+        state.synchronized_sources.borrow_mut().clear();
         (app, state)
     }
 
@@ -1161,13 +1148,15 @@ mod tests {
         assert_eq!(app.reduce_action(AppAction::ToggleMindmapStylePanel, None), AppEffect::REDRAW);
         assert_eq!(
             app.active_tab_session().expect("active mmap tab").mindmap_style_panel(),
-            crate::tab::MindmapStylePanelSession::Open { presets_expanded: true }
+            appkit_shell::mindmap_style_panel::MindmapStylePanelSession::Open {
+                presets_expanded: true
+            }
         );
 
         assert_eq!(app.reduce_action(AppAction::ToggleMindmapStylePanel, None), AppEffect::REDRAW);
         assert_eq!(
             app.active_tab_session().expect("active mmap tab").mindmap_style_panel(),
-            crate::tab::MindmapStylePanelSession::Closed
+            appkit_shell::mindmap_style_panel::MindmapStylePanelSession::Closed
         );
     }
 
@@ -1200,7 +1189,9 @@ mod tests {
         );
         assert_eq!(
             app.active_tab_session().expect("second active tab").mindmap_style_panel(),
-            crate::tab::MindmapStylePanelSession::Open { presets_expanded: false }
+            appkit_shell::mindmap_style_panel::MindmapStylePanelSession::Open {
+                presets_expanded: false
+            }
         );
         assert_eq!(
             reduce_mindmap_style_action(&mut app, ui::core::widget::MindmapStylePanelAction::Close,),
@@ -1208,11 +1199,13 @@ mod tests {
         );
         assert_eq!(
             app.tab_session(first_tab_id).expect("first tab").mindmap_style_panel(),
-            crate::tab::MindmapStylePanelSession::Open { presets_expanded: true }
+            appkit_shell::mindmap_style_panel::MindmapStylePanelSession::Open {
+                presets_expanded: true
+            }
         );
         assert_eq!(
             app.tab_session(second_tab_id).expect("second tab").mindmap_style_panel(),
-            crate::tab::MindmapStylePanelSession::Closed
+            appkit_shell::mindmap_style_panel::MindmapStylePanelSession::Closed
         );
         assert_eq!(
             reduce_mindmap_style_action(
@@ -1243,7 +1236,7 @@ mod tests {
         assert_eq!(entry.document.generation(), generation_before + 1);
         assert!(entry.document.dirty);
         assert_eq!(state.plan_queries.borrow().as_slice(), &[("tide".into(), generation_before)]);
-        assert_eq!(state.sync_queries.get(), 1);
+        assert_eq!(*state.synchronized_sources.borrow(), ["theme=tide"]);
     }
 
     #[test]
@@ -1416,7 +1409,7 @@ mod tests {
         assert_eq!(entry.document.full_text(), "root");
         assert_eq!(entry.document.generation(), generation_before);
         assert!(!entry.document.dirty);
-        assert_eq!(state.sync_queries.get(), 0);
+        assert!(state.synchronized_sources.borrow().is_empty());
     }
 
     #[test]
@@ -1436,7 +1429,7 @@ mod tests {
         assert_eq!(stale_entry.document.full_text(), "root");
         assert_eq!(stale_entry.document.generation(), stale_generation);
         assert!(!stale_entry.document.dirty);
-        assert_eq!(stale_state.sync_queries.get(), 0);
+        assert!(stale_state.synchronized_sources.borrow().is_empty());
 
         let (mut editor_app, editor_state) = app_with_mindmap_style_plugin(
             ui::plugin::PLUGIN_EDITOR,
@@ -1516,7 +1509,7 @@ mod tests {
         };
 
         let without_panel = projected_editor_rect(1_200.0, 800.0, &inputs, 0.0);
-        let panel_thickness = ui::mindmap_style_panel::PANEL_WIDTH_LOGICAL;
+        let panel_thickness = appkit_shell::mindmap_style_panel::PANEL_WIDTH_LOGICAL;
         let with_panel = projected_editor_rect(1_200.0, 800.0, &inputs, panel_thickness);
 
         assert_eq!(without_panel, ui::core::geom::Rect::new(0.0, 36.0, 1_188.0, 740.0));
@@ -1534,7 +1527,7 @@ mod tests {
         }
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1553,7 +1546,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,

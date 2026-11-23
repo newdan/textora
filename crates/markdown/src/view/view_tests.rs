@@ -37,7 +37,7 @@ mod dpi_style_tests {
         for dpi_scale in [1.0, 1.5, 2.0] {
             let mut view = MarkdownView::new();
             view.set_source("before\n\n---\n\nafter".into(), 1);
-            let document = core::document::StringDocView::new("");
+            let document = textora_core::document::StringDocView::new("");
             let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
             ViewPlugin::render(
                 &mut view,
@@ -81,7 +81,7 @@ mod dpi_style_tests {
         for dpi_scale in [1.0, 1.5, 2.0] {
             let mut view = MarkdownEditorView::new();
             view.set_source("before\n\n---\n\nafter".into(), 1);
-            let document = core::document::StringDocView::new("before\n\n---\n\nafter");
+            let document = textora_core::document::StringDocView::new("before\n\n---\n\nafter");
             let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
             ViewPlugin::render(
                 &mut view,
@@ -124,7 +124,7 @@ mod dpi_style_tests {
 
         for dpi_scale in [1.0, 1.5, 2.0] {
             let mut view = NovelView::new();
-            let document = core::document::StringDocView::new("chapter text");
+            let document = textora_core::document::StringDocView::new("chapter text");
             let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
             ViewPlugin::render(
                 &mut view,
@@ -2909,7 +2909,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         }
     }
 
-    impl core::document::DocView for StubDoc {
+    impl textora_core::document::DocView for StubDoc {
         fn line_count(&self) -> usize {
             self.text.lines().count().max(1)
         }
@@ -2948,7 +2948,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         }
     }
 
-    impl core::document::DocViewMut for StubDoc {}
+    impl textora_core::document::DocViewMut for StubDoc {}
 
     fn render_editor_once(view: &mut MarkdownEditorView, doc: &StubDoc) {
         use ui::plugin::ViewPlugin;
@@ -3151,6 +3151,53 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             };
             let (restored, _) = apply_single_replacement(&edited, &view.plan_edit(&backspace));
             assert_eq!(restored, source);
+        }
+    }
+
+    #[cfg(feature = "rich-markdown")]
+    #[test]
+    fn shift_enter_in_heading_and_table_cell_keeps_continuation_caret_and_restores_on_backspace() {
+        use super::tests::apply_single_replacement;
+        use ui::plugin::{EditIntent, EditPolicy, EditRequest};
+
+        for (source, cursor_before) in [
+            ("# Title", "# Title".len()),
+            ("| a |\n| --- |\n| cell |", "| a |\n| --- |\n| cell".len()),
+        ] {
+            let mut view = MarkdownEditorView::new();
+            view.set_source(source.to_owned(), 1);
+            let insert_br = EditRequest {
+                source_generation: 1,
+                cursor_byte: cursor_before,
+                selection: None,
+                intent: EditIntent::InsertLineBreak,
+            };
+            let (edited, cursor_after) =
+                apply_single_replacement(source, &view.plan_edit(&insert_br));
+            view.set_source(edited.clone(), 2);
+            view.engine.handle_set_cursor_byte(cursor_after);
+            render_editor_once(&mut view, &StubDoc::new(&edited));
+
+            let lines = view.engine.flat_lines();
+            let continuation = lines.last().expect("br continuation row");
+            assert_eq!(continuation.text, "", "source={edited:?}");
+            let (cursor_x, cursor_y, _, _) =
+                view.engine.cursor_screen_pos().expect("continuation caret after <br>");
+            assert_eq!(
+                view.engine.hit_test_byte(cursor_x, cursor_y + continuation.rect.h * 0.5, 0.0, 0.0),
+                Some(cursor_after)
+            );
+
+            let backspace = EditRequest {
+                source_generation: 2,
+                cursor_byte: cursor_after,
+                selection: None,
+                intent: EditIntent::DeleteBackward,
+            };
+            let (restored, restored_cursor) =
+                apply_single_replacement(&edited, &view.plan_edit(&backspace));
+            assert_eq!(restored, source);
+            assert_eq!(restored_cursor, cursor_before);
         }
     }
 
@@ -6732,7 +6779,7 @@ mod tests {
             600.0,
             None,
             &crate::view::AppCodeHighlighter { theme: &theme },
-            &core::document::StringDocView::new(text),
+            &textora_core::document::StringDocView::new(text),
             true,
             true,
         );
@@ -6899,7 +6946,7 @@ mod tests {
         );
         let mut view = MarkdownEditorView::new();
         view.set_source(source.to_owned(), 1);
-        let document = core::document::StringDocView::new(source);
+        let document = textora_core::document::StringDocView::new(source);
         let theme = ui::theme::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
         let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
         let narrow_bounds = ui::core::geom::Rect::new(0.0, 0.0, 260.0, 600.0);

@@ -137,6 +137,7 @@ pub fn extract_prose_ranges(parsed: &ParsedMarkdown) -> ProseRanges {
             MarkdownEvent::Code(_)
             | MarkdownEvent::InlineMath(_)
             | MarkdownEvent::DisplayMath(_)
+            | MarkdownEvent::HtmlBlock(_)
             | MarkdownEvent::InlineHtml(_)
             | MarkdownEvent::SoftBreak
             | MarkdownEvent::HardBreak
@@ -240,7 +241,7 @@ fn html_ranges(parsed: &ParsedMarkdown) -> Vec<SourceRange> {
     let mut protected = Vec::new();
     let mut block_cursor = 0;
     for (event, range) in parsed.events.iter().zip(&parsed.event_ranges) {
-        if !matches!(event, MarkdownEvent::InlineHtml(_)) {
+        if !matches!(event, MarkdownEvent::HtmlBlock(_) | MarkdownEvent::InlineHtml(_)) {
             continue;
         }
         let Some(raw) = parsed.source.get(range.clone()) else { continue };

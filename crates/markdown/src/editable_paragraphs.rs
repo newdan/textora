@@ -88,7 +88,8 @@ fn anchor_empty_headings(blocks: &mut [BlockNode], source: &str) {
     for block in blocks {
         anchor_empty_headings(&mut block.children, source);
         if !matches!(block.kind, BlockKind::Heading { .. })
-            || !block.text_lines.iter().all(String::is_empty)
+            || block.text_lines.len() != 1
+            || !block.text_lines[0].is_empty()
             || !crate::augmenter::heading_source_is_atx(source, block.block_range.start)
         {
             continue;
@@ -104,6 +105,12 @@ fn anchor_empty_headings(blocks: &mut [BlockNode], source: &str) {
     }
 }
 
+struct TerminalHardBreak {
+    marker_start: usize,
+    continuation_byte: usize,
+    strip_trailing_backslash: bool,
+}
+
 // CommonMark treats a break at a leaf's end as literal text. Editing still needs
 // its empty continuation row before the user types the next character.
 fn retain_terminal_hard_breaks(blocks: &mut [BlockNode], source: &str, quote_depth: usize) {
@@ -111,53 +118,50 @@ fn retain_terminal_hard_breaks(blocks: &mut [BlockNode], source: &str, quote_dep
         let child_quote_depth =
             quote_depth + usize::from(matches!(block.kind, BlockKind::BlockQuote));
         retain_terminal_hard_breaks(&mut block.children, source, child_quote_depth);
-        let Some((marker_start, continuation_byte)) =
-            terminal_hard_break(block, source, child_quote_depth)
-        else {
+        let Some(terminal) = terminal_hard_break(block, source, child_quote_depth) else {
             continue;
         };
-        project_terminal_hard_break(block, marker_start, continuation_byte);
+        project_terminal_hard_break(block, terminal);
     }
 }
 
-fn project_terminal_hard_break(
-    block: &mut BlockNode,
-    marker_start: usize,
-    continuation_byte: usize,
-) {
-    let projection = block.projected_lines.last_mut().expect("terminal break has a projected line");
-    let visual_end = projection.text.len() - 1;
-    projection.text.truncate(visual_end);
-    projection.boundaries.pop();
-    projection.spans.retain_mut(|span| {
-        if span.visual_range.start >= visual_end {
-            return false;
-        }
-        if span.visual_range.end > visual_end {
-            span.visual_range.end = visual_end;
-            span.source_range.end = marker_start;
-        }
-        true
-    });
-    *block.text_lines.last_mut().expect("projection has a matching text line") =
-        projection.text.clone();
-    if let Some(styles) = block.text_styles.last_mut() {
-        styles.retain_mut(|span| {
-            span.len = span.len.min(visual_end.saturating_sub(span.start));
-            span.len > 0
+fn project_terminal_hard_break(block: &mut BlockNode, terminal: TerminalHardBreak) {
+    if terminal.strip_trailing_backslash {
+        let projection =
+            block.projected_lines.last_mut().expect("terminal break has a projected line");
+        let visual_end = projection.text.len() - 1;
+        projection.text.truncate(visual_end);
+        projection.boundaries.pop();
+        projection.spans.retain_mut(|span| {
+            if span.visual_range.start >= visual_end {
+                return false;
+            }
+            if span.visual_range.end > visual_end {
+                span.visual_range.end = visual_end;
+                span.source_range.end = terminal.marker_start;
+            }
+            true
         });
+        *block.text_lines.last_mut().expect("projection has a matching text line") =
+            projection.text.clone();
+        if let Some(styles) = block.text_styles.last_mut() {
+            styles.retain_mut(|span| {
+                span.len = span.len.min(visual_end.saturating_sub(span.start));
+                span.len > 0
+            });
+        }
     }
     block.text_lines.push(String::new());
     block.text_styles.push(Vec::new());
-    block.projected_lines.push(ProjectedText::direct("", continuation_byte));
-    block.block_range.end = block.block_range.end.max(continuation_byte);
+    block.projected_lines.push(ProjectedText::direct("", terminal.continuation_byte));
+    block.block_range.end = block.block_range.end.max(terminal.continuation_byte);
 }
 
 fn terminal_hard_break(
     block: &BlockNode,
     source: &str,
     quote_depth: usize,
-) -> Option<(usize, usize)> {
+) -> Option<TerminalHardBreak> {
     if !matches!(
         block.kind,
         BlockKind::Paragraph | BlockKind::ListItem { .. } | BlockKind::BlockQuote
@@ -165,26 +169,63 @@ fn terminal_hard_break(
         return None;
     }
     let projection = block.projected_lines.last()?;
-    if !projection.text.ends_with('\\') {
+    if projection.text.ends_with('\\') {
+        let marker_start =
+            projection.boundaries.get(projection.boundaries.len().checked_sub(2)?)?.byte;
+        let after_marker = source.get(marker_start..)?.strip_prefix('\\')?;
+        let after_newline =
+            after_marker.strip_prefix("\r\n").or_else(|| after_marker.strip_prefix('\n'))?;
+        let backslash_count =
+            source[..=marker_start].bytes().rev().take_while(|&byte| byte == b'\\').count();
+        if backslash_count.is_multiple_of(2) {
+            return None;
+        }
+        let continuation = after_newline.split('\n').next()?.trim_end_matches('\r');
+        if !continuation.bytes().all(|byte| matches!(byte, b' ' | b'\t' | b'>'))
+            || continuation.bytes().filter(|&byte| byte == b'>').count() != quote_depth
+        {
+            return None;
+        }
+        let continuation_byte = source.len() - after_newline.len() + continuation.len();
+        return Some(TerminalHardBreak {
+            marker_start,
+            continuation_byte,
+            strip_trailing_backslash: true,
+        });
+    }
+
+    if projection.text.is_empty() {
         return None;
     }
-    let marker_start = projection.boundaries.get(projection.boundaries.len().checked_sub(2)?)?.byte;
-    let after_marker = source.get(marker_start..)?.strip_prefix('\\')?;
+    let line_content_end = block
+        .text_styles
+        .last()
+        .and_then(|spans| spans.iter().map(|span| span.source_range.end).max())
+        .unwrap_or(0)
+        .max(projection.source_extent().end);
+    let suffix = source.get(line_content_end..)?;
+    let trailing_spaces = suffix.bytes().take_while(|&byte| byte == b' ').count();
+    if trailing_spaces < crate::augmenter::HARD_BREAK_MIN_SPACES {
+        return None;
+    }
+    let after_spaces = &suffix[trailing_spaces..];
     let after_newline =
-        after_marker.strip_prefix("\r\n").or_else(|| after_marker.strip_prefix('\n'))?;
-    let backslash_count =
-        source[..=marker_start].bytes().rev().take_while(|&byte| byte == b'\\').count();
-    if backslash_count.is_multiple_of(2) {
+        after_spaces.strip_prefix("\r\n").or_else(|| after_spaces.strip_prefix('\n'))?;
+    if after_newline.contains('\n') {
         return None;
     }
-    let continuation = after_newline.split('\n').next()?.trim_end_matches('\r');
+    let continuation = after_newline.trim_end_matches('\r');
     if !continuation.bytes().all(|byte| matches!(byte, b' ' | b'\t' | b'>'))
         || continuation.bytes().filter(|&byte| byte == b'>').count() != quote_depth
     {
         return None;
     }
     let continuation_byte = source.len() - after_newline.len() + continuation.len();
-    Some((marker_start, continuation_byte))
+    Some(TerminalHardBreak {
+        marker_start: line_content_end,
+        continuation_byte,
+        strip_trailing_backslash: false,
+    })
 }
 
 fn collect_candidates(blocks: &[BlockNode], source: &str) -> Vec<EmptySourceLine> {
@@ -314,7 +355,7 @@ fn resolve_owner(
     let block = &blocks[block_index];
     let block_quote_depth = quote_depth + usize::from(matches!(block.kind, BlockKind::BlockQuote));
     if terminal_hard_break(block, source, block_quote_depth)
-        .is_some_and(|(_, continuation)| continuation == line.line_end)
+        .is_some_and(|terminal| terminal.continuation_byte == line.line_end)
     {
         return false;
     }
@@ -484,6 +525,39 @@ mod tests {
                 paragraphs.runs().is_empty(),
                 "hard-break continuation is not an empty paragraph: source={source:?}"
             );
+        }
+    }
+
+    #[test]
+    fn terminal_double_space_hard_break_keeps_continuation_line_and_skips_code_and_paragraphs() {
+        fn text_rows(blocks: &[BlockNode]) -> Vec<&str> {
+            blocks
+                .iter()
+                .flat_map(|block| {
+                    block.text_lines.iter().map(String::as_str).chain(text_rows(&block.children))
+                })
+                .collect()
+        }
+
+        for source in
+            ["first  \n", "first  \r\n", "**first**  \n", "- first  \n  ", "> first  \n> "]
+        {
+            let document = build(source);
+            assert_eq!(text_rows(&document.blocks), vec!["first", ""], "source={source:?}");
+            let raw = MarkdownDoc::build(&parse_markdown(source), &default_style());
+            let paragraphs = super::EditableParagraphMap::from_blocks(&raw.blocks, source);
+            assert!(
+                paragraphs.runs().is_empty(),
+                "terminal double-space continuation must not create empty paragraph: {source:?}"
+            );
+        }
+
+        for excluded in ["`first  `\n", "first  \n\nsecond"] {
+            let parsed = parse_markdown(excluded);
+            let original = MarkdownDoc::build(&parsed, &default_style());
+            let mut edited = original.clone();
+            super::retain_terminal_hard_breaks(&mut edited.blocks, excluded, 0);
+            assert_eq!(format!("{edited:?}"), format!("{original:?}"), "excluded={excluded:?}");
         }
     }
 

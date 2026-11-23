@@ -51,7 +51,7 @@ pub(crate) fn detach_deleted_document(
     document.dirty = true;
     if document.dirty_snapshot_id.is_none() {
         document.dirty_snapshot_id =
-            Some(crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::untitled_id()));
+            Some(appkit_core::snapshot::snapshot_filename(&appkit_core::snapshot::untitled_id()));
     }
 
     let file_name = original_path.file_name().and_then(|name| name.to_str()).unwrap_or("untitled");

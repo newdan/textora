@@ -4,11 +4,14 @@ use std::path::Path;
 
 use appkit_core::workspace::types::TabId;
 
+use crate::cursor_motion::{CursorContext, PageDirection};
+use crate::edit_transaction::{build_edit_request, default_edit_plan, execute_edit_plan};
 use crate::editor_runtime::{
     CloseConfirmation, DocumentTextEditError, DocumentTextReplacement, DocumentTextSnapshot,
     EditorDocumentSummary, EditorNotification, EditorOutcome, EditorTabSnapshot,
     EditorWorkspaceSnapshot, OpenDisposition, SemanticEditResult,
 };
+use crate::input_mapper::EditCommand;
 use crate::prepared_tab::{PreparedTab, placeholder_display_entries};
 use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
 use crate::tab_session::{TabSession, TabSessionMut};
@@ -21,12 +24,6 @@ pub(crate) struct ModelSession {
 }
 
 impl ModelSession {
-    pub(crate) fn from_parts(workspace: Workspace, runtimes: TabRuntimeStore) -> Self {
-        let session = Self { workspace, runtimes };
-        debug_assert_eq!(session.workspace.tab_ids(), session.runtimes.ids());
-        session
-    }
-
     pub(crate) fn replace_parts(&mut self, workspace: Workspace, runtimes: TabRuntimeStore) {
         self.workspace = workspace;
         self.runtimes = runtimes;
@@ -247,29 +244,14 @@ impl ModelSession {
             request.replacement,
             cursor_after,
         ));
-        let Some(mut tab) = self.tab_session_mut(previous_summary.tab_id) else {
-            return Err(DocumentTextEditError::UnknownTab { tab_id: previous_summary.tab_id });
-        };
-        if !apply_edit_plan(tab.document, plan) {
-            return Err(DocumentTextEditError::InvalidByteRange {
+        self.apply_session_edit(previous_summary.tab_id, plan, line_height).ok_or(
+            DocumentTextEditError::InvalidByteRange {
                 range: cursor_after..cursor_after,
-                text_length: tab.document.buffer_len(),
-            });
-        }
-        refresh_presentation_after_edit(&mut tab, line_height);
-        let source = tab.document.full_text();
-        let source_generation = tab.document.generation();
-        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
-            text: source,
-            generation: source_generation,
-        });
-        Ok(edit_outcome(
-            previous_summary.tab_id,
-            previous_summary.content_revision,
-            previous_summary.dirty,
-            tab.document.content_revision(),
-            tab.document.dirty,
-        ))
+                text_length: self
+                    .tab_session(previous_summary.tab_id)
+                    .map_or(0, |tab| tab.document.buffer_len()),
+            },
+        )
     }
 
     pub(crate) fn edit_active_document(
@@ -280,17 +262,23 @@ impl ModelSession {
         let Some(tab_id) = self.active_tab_id() else {
             return EditorOutcome::default();
         };
-        let Some(previous_summary) = self.document_summary(tab_id) else {
-            return EditorOutcome::default();
-        };
         if !self.tab_session(tab_id).is_some_and(|tab| tab.allows_editing()) {
             return EditorOutcome::default();
         }
-        let Some(request) = self.edit_request(tab_id, intent) else {
+        self.synchronize_plugin_source_if_stale(tab_id);
+        let Some(tab) = self.tab_session(tab_id) else {
             return EditorOutcome::default();
         };
-        self.synchronize_plugin_source_if_stale(tab_id);
-        let Some(plan) = self.resolve_edit_plan(tab_id, &request) else {
+        let plan = resolve_edit_plan(&tab, intent);
+        self.apply_session_edit(tab_id, plan, line_height).unwrap_or_default()
+    }
+
+    pub(crate) fn execute_source_command(
+        &mut self,
+        command: &EditCommand,
+        line_height: f32,
+    ) -> EditorOutcome {
+        let Some(tab_id) = self.active_tab_id() else {
             return EditorOutcome::default();
         };
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
@@ -299,26 +287,38 @@ impl ModelSession {
         if !tab.allows_editing() {
             return EditorOutcome::default();
         }
-        if !apply_edit_plan(tab.document, plan) {
+        let previous_revision = tab.document.content_revision();
+        let previous_dirty = tab.document.dirty;
+        let advance_cache = tab.take_advance_cache();
+        let mut presentation = tab.take_presentation();
+        let page_step = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
+        let edit = crate::editor_commands::execute_edit_command_with_system_clipboard(
+            command,
+            tab.document,
+            &advance_cache,
+            &mut presentation.cursor_render_state,
+            page_step,
+        );
+        tab.restore_presentation(presentation);
+        tab.restore_advance_cache(advance_cache);
+        if !edit.executed {
             return EditorOutcome::default();
         }
-
-        refresh_presentation_after_edit(&mut tab, line_height);
-        let current_revision = tab.document.content_revision();
-        let current_dirty = tab.document.dirty;
-        let source = tab.document.full_text();
-        let source_generation = tab.document.generation();
-        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
-            text: source,
-            generation: source_generation,
-        });
-        edit_outcome(
+        refresh_transaction_presentation(&mut tab, &edit, line_height);
+        if previous_revision != tab.document.content_revision() {
+            synchronize_plugin_source(&mut tab);
+        }
+        let mut outcome = edit_outcome(
             tab_id,
-            previous_summary.content_revision,
-            previous_summary.dirty,
-            current_revision,
-            current_dirty,
-        )
+            previous_revision,
+            previous_dirty,
+            tab.document.content_revision(),
+            tab.document.dirty,
+        );
+        if crate::editor_commands::edit_requires_reshape(command, &edit) {
+            outcome.shell_effect = outcome.shell_effect.merge(crate::event::ShellEffect::RESHAPE);
+        }
+        outcome
     }
 
     pub(crate) fn apply_active_edit_transaction(
@@ -326,38 +326,55 @@ impl ModelSession {
         transaction: ui::plugin::EditTransaction,
         line_height: f32,
     ) -> EditorOutcome {
-        let Some(tab_id) = self.active_tab_id() else {
-            return EditorOutcome::default();
-        };
-        let Some(previous_summary) = self.document_summary(tab_id) else {
-            return EditorOutcome::default();
-        };
-        let Some(mut tab) = self.tab_session_mut(tab_id) else {
-            return EditorOutcome::default();
-        };
-        if !tab.allows_editing() {
-            return EditorOutcome::default();
-        }
-        if !apply_edit_plan(tab.document, ui::plugin::EditPlan::Apply(transaction)) {
-            return EditorOutcome::default();
-        }
+        self.active_tab_id()
+            .and_then(|tab_id| {
+                self.apply_session_edit(
+                    tab_id,
+                    ui::plugin::EditPlan::Apply(transaction),
+                    line_height,
+                )
+            })
+            .unwrap_or_default()
+    }
 
-        refresh_presentation_after_edit(&mut tab, line_height);
-        let current_revision = tab.document.content_revision();
-        let current_dirty = tab.document.dirty;
-        let source = tab.document.full_text();
-        let source_generation = tab.document.generation();
-        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
-            text: source,
-            generation: source_generation,
-        });
-        edit_outcome(
+    fn apply_session_edit(
+        &mut self,
+        tab_id: TabId,
+        plan: ui::plugin::EditPlan,
+        line_height: f32,
+    ) -> Option<EditorOutcome> {
+        let mut tab = self.tab_session_mut(tab_id)?;
+        if !tab.allows_editing() {
+            return None;
+        }
+        let previous_revision = tab.document.content_revision();
+        let previous_dirty = tab.document.dirty;
+        let previous_anchor = tab.document.cursor().selection_anchor;
+        let edit = execute_edit_plan(plan, tab.document).ok()?;
+        let selection_changed = previous_anchor != tab.document.cursor().selection_anchor;
+        if !edit.edit_outcome.executed && !edit.cursor_moved && !selection_changed {
+            return Some(EditorOutcome::default());
+        }
+        refresh_transaction_presentation(&mut tab, &edit.edit_outcome, line_height);
+        if edit.content_revision != previous_revision {
+            synchronize_plugin_source(&mut tab);
+        } else {
+            synchronize_plugin_caret(&mut tab);
+        }
+        let mut outcome = edit_outcome(
             tab_id,
-            previous_summary.content_revision,
-            previous_summary.dirty,
-            current_revision,
-            current_dirty,
-        )
+            previous_revision,
+            previous_dirty,
+            edit.content_revision,
+            edit.dirty,
+        );
+        if edit.edit_outcome.executed
+            && (edit.edit_outcome.new_line_count != edit.edit_outcome.old_line_count
+                || edit.edit_outcome.dirty_lines.is_some_and(|range| range.len() > 1))
+        {
+            outcome.shell_effect = outcome.shell_effect.merge(crate::event::ShellEffect::RESHAPE);
+        }
+        Some(outcome)
     }
 
     pub(crate) fn navigate_active_document(
@@ -421,6 +438,75 @@ impl ModelSession {
         }
     }
 
+    pub(crate) fn page_active_document(
+        &mut self,
+        direction: PageDirection,
+        line_height: f32,
+    ) -> EditorOutcome {
+        let Some(mut tab) = self.active_tab_id().and_then(|tab_id| self.tab_session_mut(tab_id))
+        else {
+            return EditorOutcome::default();
+        };
+        match direction {
+            PageDirection::Up => tab.page_up(line_height),
+            PageDirection::Down => tab.page_down(line_height),
+        }
+        EditorOutcome {
+            shell_effect: crate::event::ShellEffect::REDRAW,
+            ..EditorOutcome::default()
+        }
+    }
+
+    pub(crate) fn move_active_visual_cursor(
+        &mut self,
+        delta: isize,
+        extend_selection: bool,
+        dpi_scale: f32,
+        line_height: f32,
+        frame_cache: &crate::frame_cache::FrameCache,
+    ) -> EditorOutcome {
+        let Some(mut tab) = self.active_tab_id().and_then(|tab_id| self.tab_session_mut(tab_id))
+        else {
+            return EditorOutcome::default();
+        };
+        let display_map = tab.display_map_clone();
+        let previous_visual_line = tab.cursor_visual_line();
+        let previous_document_line = tab.document.cursor_line();
+        let advance_cache = tab.take_advance_cache();
+        let context = CursorContext {
+            display_map: &display_map,
+            cursor_visual_line: previous_visual_line,
+            advance_cache: &advance_cache,
+            first_line: &frame_cache.first_line,
+            last_line: &frame_cache.last_line,
+            visible_rows: tab.visible_rows(),
+            first_visible_row: tab.display().viewport.first_visible_row(),
+            scroll_top: tab.scroll_top(),
+            sticky_x: tab.cursor_render_state().sticky_x,
+            dpi_scale,
+        };
+        if extend_selection {
+            tab.document.ensure_selection_active();
+        } else {
+            tab.document.cursor_mut().selection_anchor = None;
+        }
+        tab.move_cursor_visual(delta, context);
+        tab.restore_advance_cache(advance_cache);
+        tab.ensure_cursor_visible(line_height);
+        // A wrapped line can extend past the viewport without crossing a document line.
+        if delta > 0
+            && previous_document_line == tab.document.cursor_line()
+            && previous_visual_line.is_some_and(|line| line + 1 >= tab.visible_rows())
+        {
+            tab.display_mut().viewport.scroll_pixels(line_height, &display_map, line_height);
+            tab.refresh_scroll_metrics(line_height);
+        }
+        EditorOutcome {
+            shell_effect: crate::event::ShellEffect::REDRAW,
+            ..EditorOutcome::default()
+        }
+    }
+
     pub(crate) fn select_all_active_document(&mut self) -> EditorOutcome {
         let Some(tab_id) = self.active_tab_id() else {
             return EditorOutcome::default();
@@ -477,29 +563,41 @@ impl ModelSession {
         if pixels == 0.0 {
             return EditorOutcome::default();
         }
-        let Some(tab_id) = self.active_tab_id() else {
-            return EditorOutcome::default();
-        };
-        let Some(mut tab) = self.tab_session_mut(tab_id) else {
-            return EditorOutcome::default();
-        };
-        if tab.runtime.plugin.handles_own_rendering()
-            && tab.send_message(ui::plugin::PluginMessage::Scroll {
-                delta: pixels,
-                viewport_h: plugin_viewport_height,
-            })
-        {
+        if self.scroll_active_plugin(pixels, plugin_viewport_height) {
             return EditorOutcome {
                 shell_effect: crate::event::ShellEffect::REDRAW,
                 ..EditorOutcome::default()
             };
         }
-        tab.scroll_viewport_by_pixels(pixels, line_height);
+        if !self.scroll_active_text(pixels, line_height) {
+            return EditorOutcome::default();
+        }
         EditorOutcome {
             shell_effect: crate::event::ShellEffect::REDRAW
                 .merge(crate::event::ShellEffect::RESHAPE),
             ..EditorOutcome::default()
         }
+    }
+
+    pub(crate) fn scroll_active_plugin(&mut self, pixels: f32, viewport_height: f32) -> bool {
+        self.active_tab_id().and_then(|tab_id| self.tab_session_mut(tab_id)).is_some_and(
+            |mut tab| {
+                tab.handles_own_rendering()
+                    && tab.send_message(ui::plugin::PluginMessage::Scroll {
+                        delta: pixels,
+                        viewport_h: viewport_height,
+                    })
+            },
+        )
+    }
+
+    pub(crate) fn scroll_active_text(&mut self, pixels: f32, line_height: f32) -> bool {
+        let Some(mut tab) = self.active_tab_id().and_then(|tab_id| self.tab_session_mut(tab_id))
+        else {
+            return false;
+        };
+        tab.scroll_viewport_by_pixels(pixels, line_height);
+        true
     }
 
     pub(crate) fn execute_semantic_edit(
@@ -541,13 +639,11 @@ impl ModelSession {
             _ => None,
         };
         if let Some(intent) = structural_intent {
-            let Some(request) = self.edit_request(tab_id, intent) else {
+            let Some(tab) = self.tab_session(tab_id) else {
                 return (SemanticEditResult::NoChange, EditorOutcome::default());
             };
-            let Some(plan) = self.resolve_edit_plan(tab_id, &request) else {
-                return (SemanticEditResult::Unsupported, EditorOutcome::default());
-            };
-            return self.apply_semantic_edit_plan(tab_id, previous_summary, plan, line_height);
+            let plan = resolve_edit_plan(&tab, intent);
+            return self.apply_semantic_edit_plan(tab_id, plan, line_height);
         }
 
         let plan = {
@@ -579,12 +675,7 @@ impl ModelSession {
                 EditorOutcome::default(),
             );
         };
-        self.apply_semantic_edit_plan(
-            tab_id,
-            previous_summary,
-            ui::plugin::EditPlan::Apply(transaction),
-            line_height,
-        )
+        self.apply_semantic_edit_plan(tab_id, ui::plugin::EditPlan::Apply(transaction), line_height)
     }
 
     pub(crate) fn apply_active_mindmap_theme(
@@ -593,9 +684,6 @@ impl ModelSession {
         line_height: f32,
     ) -> EditorOutcome {
         let Some(tab_id) = self.active_tab_id() else {
-            return EditorOutcome::default();
-        };
-        let Some(previous_summary) = self.document_summary(tab_id) else {
             return EditorOutcome::default();
         };
         let plan = {
@@ -616,88 +704,22 @@ impl ModelSession {
         let Some(plan) = plan else {
             return EditorOutcome::default();
         };
-        let Some(mut tab) = self.tab_session_mut(tab_id) else {
-            return EditorOutcome::default();
-        };
-        if !apply_edit_plan(tab.document, plan) {
-            return EditorOutcome::default();
-        }
-        refresh_presentation_after_edit(&mut tab, line_height);
-        synchronize_plugin_source(&mut tab);
-        edit_outcome(
-            tab_id,
-            previous_summary.content_revision,
-            previous_summary.dirty,
-            tab.document.content_revision(),
-            tab.document.dirty,
-        )
+        self.apply_session_edit(tab_id, plan, line_height).unwrap_or_default()
     }
 
     fn apply_semantic_edit_plan(
         &mut self,
         tab_id: TabId,
-        previous_summary: EditorDocumentSummary,
         plan: ui::plugin::EditPlan,
         line_height: f32,
     ) -> (SemanticEditResult, EditorOutcome) {
-        let Some(mut tab) = self.tab_session_mut(tab_id) else {
-            return (SemanticEditResult::NoChange, EditorOutcome::default());
-        };
-        if !tab.allows_editing() {
-            return (SemanticEditResult::NoChange, EditorOutcome::default());
-        }
-        if !apply_edit_plan(tab.document, plan) {
-            return (SemanticEditResult::NoChange, EditorOutcome::default());
-        }
-        refresh_presentation_after_edit(&mut tab, line_height);
-        let source = tab.document.full_text();
-        let source_generation = tab.document.generation();
-        let _ = tab.send_message(ui::plugin::PluginMessage::UpdateSource {
-            text: source,
-            generation: source_generation,
-        });
-        (
-            SemanticEditResult::Applied,
-            edit_outcome(
-                tab_id,
-                previous_summary.content_revision,
-                previous_summary.dirty,
-                tab.document.content_revision(),
-                tab.document.dirty,
-            ),
-        )
-    }
-
-    fn edit_request(
-        &self,
-        tab_id: TabId,
-        intent: ui::plugin::EditIntent,
-    ) -> Option<ui::plugin::EditRequest> {
-        let tab = self.tab_session(tab_id)?;
-        let selection = tab
-            .document
-            .selection_range()
-            .and_then(|(start, end)| (start < end).then_some(start..end));
-        Some(ui::plugin::EditRequest {
-            source_generation: tab.document.generation(),
-            cursor_byte: tab.document.cursor_offset().to_usize(),
-            selection,
-            intent,
-        })
-    }
-
-    fn resolve_edit_plan(
-        &self,
-        tab_id: TabId,
-        request: &ui::plugin::EditRequest,
-    ) -> Option<ui::plugin::EditPlan> {
-        let tab = self.tab_session(tab_id)?;
-        let plan = tab.plan_edit_request(request);
-        Some(if plan == ui::plugin::EditPlan::UseDefault {
-            default_edit_plan(request, tab.document)
+        let outcome = self.apply_session_edit(tab_id, plan, line_height).unwrap_or_default();
+        let result = if outcome.shell_effect == crate::event::ShellEffect::NONE {
+            SemanticEditResult::NoChange
         } else {
-            plan
-        })
+            SemanticEditResult::Applied
+        };
+        (result, outcome)
     }
 
     pub(crate) fn document_save_snapshot(
@@ -972,131 +994,12 @@ impl ModelSession {
     }
 }
 
-fn default_newline_text(document: &appkit_core::document::DocumentModel) -> String {
-    if document.tb.is_crlf() { "\r\n".to_owned() } else { "\n".to_owned() }
-}
-
-fn default_edit_plan(
-    request: &ui::plugin::EditRequest,
-    document: &appkit_core::document::DocumentModel,
-) -> ui::plugin::EditPlan {
-    use ui::plugin::{EditIntent, EditPlan, EditTransaction};
-
-    let replacement = match &request.intent {
-        EditIntent::InsertText(text) => Some(text.clone()),
-        EditIntent::InsertParagraphBreak | EditIntent::InsertLineBreak => {
-            Some(default_newline_text(document))
-        }
-        EditIntent::Indent => Some(if document.tb.indent_with_tabs() {
-            "\t".to_owned()
-        } else {
-            " ".repeat(document.tb.tab_size() as usize)
-        }),
-        EditIntent::DeleteBackward | EditIntent::DeleteForward => None,
-        EditIntent::Outdent
-        | EditIntent::PromoteObject
-        | EditIntent::DemoteObject
-        | EditIntent::SelectObject => return EditPlan::Consume,
-    };
-    let history = match &request.intent {
-        EditIntent::InsertText(_) => core::buffer::EditHistoryKind::Insert,
-        EditIntent::DeleteBackward | EditIntent::DeleteForward => {
-            core::buffer::EditHistoryKind::Delete
-        }
-        _ => core::buffer::EditHistoryKind::Standalone,
-    };
-    if let Some(text) = replacement {
-        let range = request.selection.clone().unwrap_or(request.cursor_byte..request.cursor_byte);
-        let cursor_after = range.start + text.len();
-        return EditPlan::ApplyDefault(
-            EditTransaction::replace(request.source_generation, range, text, cursor_after),
-            history,
-        );
+fn resolve_edit_plan(tab: &TabSession<'_>, intent: ui::plugin::EditIntent) -> ui::plugin::EditPlan {
+    let request = build_edit_request(tab.document, intent);
+    match tab.plan_edit_request(&request) {
+        ui::plugin::EditPlan::UseDefault => default_edit_plan(&request, tab.document),
+        plan => plan,
     }
-
-    let range = request.selection.clone().unwrap_or_else(|| {
-        let direction = if request.intent == EditIntent::DeleteBackward { -1 } else { 1 };
-        let target = document
-            .tb
-            .grapheme_boundary_delta(core::types::ByteIndex(request.cursor_byte), direction)
-            .to_usize();
-        target.min(request.cursor_byte)..target.max(request.cursor_byte)
-    });
-    EditPlan::ApplyDefault(
-        EditTransaction::replace(
-            request.source_generation,
-            range.clone(),
-            String::new(),
-            range.start,
-        ),
-        history,
-    )
-}
-
-fn apply_edit_plan(
-    document: &mut appkit_core::document::DocumentModel,
-    plan: ui::plugin::EditPlan,
-) -> bool {
-    use ui::plugin::EditPlan;
-
-    match plan {
-        EditPlan::UseDefault | EditPlan::Consume => false,
-        EditPlan::MoveCursor(update) => {
-            if !valid_document_boundary(document, update.cursor_after) {
-                return false;
-            }
-            document.cursor_move_to_offset(update.cursor_after);
-            true
-        }
-        EditPlan::SetSelection(selection) => apply_edit_selection(document, selection),
-        EditPlan::Apply(transaction) => {
-            apply_edit_transaction(document, transaction, core::buffer::EditHistoryKind::Standalone)
-        }
-        EditPlan::ApplyDefault(transaction, history) => {
-            apply_edit_transaction(document, transaction, history)
-        }
-    }
-}
-
-fn apply_edit_transaction(
-    document: &mut appkit_core::document::DocumentModel,
-    transaction: ui::plugin::EditTransaction,
-    history: core::buffer::EditHistoryKind,
-) -> bool {
-    if transaction.source_generation != document.generation() {
-        return false;
-    }
-    let mut replacements = transaction.replacements;
-    replacements.sort_by_key(|replacement| replacement.range.start);
-    if replacements.windows(2).any(|pair| pair[0].range.end > pair[1].range.start)
-        || replacements.iter().any(|replacement| {
-            replacement.range.start > replacement.range.end
-                || replacement.range.end > document.buffer_len()
-                || !valid_document_boundary(document, replacement.range.start)
-                || !valid_document_boundary(document, replacement.range.end)
-        })
-    {
-        return false;
-    }
-    if replacements.is_empty() {
-        return apply_edit_selection(document, transaction.selection_after);
-    }
-
-    document.sync_selection_to_buffer();
-    document.tb.edit_begin_grouping();
-    for replacement in replacements.iter().rev() {
-        document.tb.replace_range_with_history(
-            replacement.range.clone(),
-            replacement.text.as_bytes(),
-            history,
-        );
-    }
-    document.tb.edit_end_grouping();
-    document.line_index = appkit_core::line_index::LineIndex::rebuild_from(&document.tb);
-    document.mark_content_changed();
-    document.dirty = document.tb.is_dirty();
-    document.sync_cursor_from_buffer();
-    apply_edit_selection(document, transaction.selection_after)
 }
 
 fn valid_document_boundary(document: &appkit_core::document::DocumentModel, byte: usize) -> bool {
@@ -1104,31 +1007,42 @@ fn valid_document_boundary(document: &appkit_core::document::DocumentModel, byte
         return false;
     }
     let source = document.full_text();
-    core::unicode::CursorNav::new(&source).goto_byte(core::types::ByteIndex(byte)).offset
-        == core::types::ByteIndex(byte)
+    textora_core::unicode::CursorNav::new(&source)
+        .goto_byte(textora_core::types::ByteIndex(byte))
+        .offset
+        == textora_core::types::ByteIndex(byte)
 }
 
-fn apply_edit_selection(
-    document: &mut appkit_core::document::DocumentModel,
-    selection: ui::plugin::EditSelection,
-) -> bool {
-    use ui::plugin::EditSelection;
-
-    match selection {
-        EditSelection::Caret(byte) if valid_document_boundary(document, byte) => {
-            document.cursor_move_to_offset(byte);
-            document.cursor_mut().selection_anchor = None;
-            true
+fn refresh_transaction_presentation(
+    tab: &mut TabSessionMut<'_>,
+    edit: &crate::edit_transaction::EditOutcome,
+    line_height: f32,
+) {
+    if edit.executed
+        && let Some(dirty_lines) = &edit.dirty_lines
+    {
+        if edit.invalidates_all_render_cache() {
+            let changed_line_end =
+                (dirty_lines.end + edit.new_line_count).saturating_sub(edit.old_line_count);
+            let entries = (dirty_lines.start..changed_line_end)
+                .map(|line| {
+                    let offset = tab.document.line_byte_offset(line).unwrap_or(0);
+                    let length = tab.document.line_byte_length(line).unwrap_or(0) as u32;
+                    crate::snap_tree::DisplayLineEntry::placeholder(offset, length, 0, 1)
+                })
+                .collect();
+            let _ = tab.display_mut().display_map.sync(dirty_lines.clone(), entries);
+            tab.invalidate_render_cache_all();
+        } else {
+            tab.display_mut().render_cache.invalidate_range(dirty_lines.clone());
         }
-        EditSelection::Range { anchor, cursor }
-            if valid_document_boundary(document, anchor)
-                && valid_document_boundary(document, cursor) =>
-        {
-            document.cursor_move_to_offset(cursor);
-            document.cursor_mut().selection_anchor = Some(anchor);
-            true
-        }
-        EditSelection::Caret(_) | EditSelection::Range { .. } => false,
+    }
+    tab.clamp_scroll_anchor(line_height);
+    tab.derive_scroll_top(line_height);
+    tab.ensure_cursor_visible(line_height);
+    tab.cursor_render_state_mut().reset_after_edit();
+    if tab.handles_own_rendering() {
+        tab.invalidate_cursor_visibility();
     }
 }
 
@@ -1146,10 +1060,19 @@ fn refresh_presentation_after_edit(tab: &mut TabSessionMut<'_>, line_height: f32
 }
 
 fn synchronize_plugin_source(tab: &mut TabSessionMut<'_>) {
-    use ui::plugin::{PluginMessage, VisualCaretPosition};
+    use ui::plugin::PluginMessage;
+
+    if tab.plugin_name() == ui::plugin::PLUGIN_EDITOR {
+        return;
+    }
     let source = tab.document.full_text();
     let generation = tab.document.generation();
     tab.send_message(PluginMessage::UpdateSource { text: source, generation });
+    synchronize_plugin_caret(tab);
+}
+
+fn synchronize_plugin_caret(tab: &mut TabSessionMut<'_>) {
+    use ui::plugin::{PluginMessage, VisualCaretPosition};
     let byte_offset = tab.document.cursor_offset().to_usize();
     let affinity = tab.document.tb().cursor_affinity();
     let anchor = tab.document.cursor().selection_anchor;
@@ -1186,7 +1109,7 @@ mod tests {
     use std::rc::Rc;
 
     use appkit_core::document::DocumentModel;
-    use core::buffer::TextBuffer;
+    use textora_core::buffer::TextBuffer;
     use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MINDMAP, SemanticEditCommand};
 
     use super::*;
@@ -1234,7 +1157,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
             _bounds: ui::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1246,7 +1169,7 @@ mod tests {
         fn query(
             &self,
             query: ui::plugin::PluginQuery,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             let ui::plugin::PluginQuery::PlanMindmapTheme { theme_id, source_generation } = query
             else {
@@ -1270,7 +1193,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
             _bounds: ui::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1282,7 +1205,7 @@ mod tests {
         fn handle_message(
             &mut self,
             message: ui::plugin::PluginMessage,
-            _document: &mut dyn core::document::DocViewMut,
+            _document: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             let ui::plugin::PluginMessage::UpdateSource { text, generation } = message else {
                 return false;
@@ -1319,7 +1242,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
             _bounds: ui::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1335,7 +1258,7 @@ mod tests {
         fn query(
             &self,
             query: ui::plugin::PluginQuery,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             let ui::plugin::PluginQuery::NeedsSourceUpdate(generation) = query else {
                 return ui::plugin::PluginResponse::None;
@@ -1346,7 +1269,7 @@ mod tests {
         fn handle_message(
             &mut self,
             message: ui::plugin::PluginMessage,
-            _document: &mut dyn core::document::DocViewMut,
+            _document: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             let ui::plugin::PluginMessage::UpdateSource { text, generation } = message else {
                 return false;
@@ -1510,6 +1433,25 @@ mod tests {
     }
 
     #[test]
+    fn invalid_resulting_caret_rejects_transaction_before_writing() {
+        let mut session = model_session();
+        let _ =
+            session.install_prepared_tab(prepared_text("abc"), None, OpenDisposition::Persistent);
+        let tab_id = session.active_tab_id().expect("installed document is active");
+        let before = session.document_text_snapshot(tab_id).expect("document snapshot exists");
+        let generation =
+            session.tab_session(tab_id).expect("document exists").document.generation();
+        let transaction = ui::plugin::EditTransaction::replace(generation, 1..2, "中".into(), 2);
+
+        let outcome = session.apply_active_edit_transaction(transaction, 20.0);
+
+        let after = session.document_text_snapshot(tab_id).expect("document snapshot still exists");
+        assert_eq!(after.text, before.text);
+        assert_eq!(after.content_revision, before.content_revision);
+        assert!(outcome.notifications.is_empty());
+    }
+
+    #[test]
     fn unsupported_semantic_command_is_typed_and_does_not_mutate_document() {
         let mut session = model_session();
         let effect =
@@ -1616,7 +1558,7 @@ mod tests {
     fn default_plan_history_kind(
         document: &DocumentModel,
         intent: ui::plugin::EditIntent,
-    ) -> core::buffer::EditHistoryKind {
+    ) -> textora_core::buffer::EditHistoryKind {
         let request = ui::plugin::EditRequest {
             source_generation: document.generation(),
             cursor_byte: document.cursor_offset().to_usize(),
@@ -1636,12 +1578,12 @@ mod tests {
 
         assert_eq!(
             default_plan_history_kind(&document, ui::plugin::EditIntent::InsertParagraphBreak),
-            core::buffer::EditHistoryKind::Standalone,
+            textora_core::buffer::EditHistoryKind::Standalone,
             "a paragraph break must never join a typing run"
         );
         assert_eq!(
             default_plan_history_kind(&document, ui::plugin::EditIntent::Indent),
-            core::buffer::EditHistoryKind::Standalone,
+            textora_core::buffer::EditHistoryKind::Standalone,
             "an indent must never join a typing run"
         );
         assert_eq!(
@@ -1649,7 +1591,7 @@ mod tests {
                 &document,
                 ui::plugin::EditIntent::InsertText("x".to_owned())
             ),
-            core::buffer::EditHistoryKind::Insert,
+            textora_core::buffer::EditHistoryKind::Insert,
             "plain typing keeps coalescing"
         );
     }
@@ -1665,7 +1607,9 @@ mod tests {
             intent: ui::plugin::EditIntent::InsertParagraphBreak,
         };
         let break_plan = default_edit_plan(&break_request, &document);
-        assert!(apply_edit_plan(&mut document, break_plan), "paragraph break should apply");
+        let outcome =
+            execute_edit_plan(break_plan, &mut document).expect("paragraph break should apply");
+        assert!(outcome.edit_outcome.executed);
         let type_request = ui::plugin::EditRequest {
             source_generation: document.generation(),
             cursor_byte: document.cursor_offset().to_usize(),
@@ -1673,7 +1617,8 @@ mod tests {
             intent: ui::plugin::EditIntent::InsertText("x".to_owned()),
         };
         let type_plan = default_edit_plan(&type_request, &document);
-        assert!(apply_edit_plan(&mut document, type_plan), "typing should apply");
+        let outcome = execute_edit_plan(type_plan, &mut document).expect("typing should apply");
+        assert!(outcome.edit_outcome.executed);
 
         assert_eq!(document.full_text(), "\nx");
         document.undo();

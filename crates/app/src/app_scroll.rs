@@ -4,7 +4,7 @@
 use crate::app::App;
 use crate::app_effect::AppEffect;
 use crate::canvas_viewport::CanvasViewportAction;
-use crate::cursor_motion::CursorContext;
+use crate::cursor_motion::PageDirection;
 use ui::canvas::CanvasPoint;
 use winit::event::MouseScrollDelta;
 
@@ -47,118 +47,40 @@ impl App {
         &mut self,
         action: CanvasViewportAction,
     ) -> AppEffect {
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return AppEffect::NONE;
-        };
-        if !tab.is_canvas() || !tab.has_canvas_viewport_snapshot() {
-            return AppEffect::NONE;
-        }
-
-        tab.apply_canvas_viewport_action(action);
-        AppEffect::REDRAW
+        self.editor_runtime.apply_active_canvas_viewport_action(action).shell_effect
     }
 
-    /// Move cursor to an adjacent visual line, preserving horizontal position (sticky_x).
-    /// Used for up/down arrow keys when word wrap creates multiple visual lines per doc line.
-    /// Only updates DocumentView cursor_offset; shape_visible_lines handles visual position.
     pub(crate) fn move_cursor_visual(&mut self, delta: isize) -> AppEffect {
-        let metrics = self.ui_metrics();
-        let dpi = metrics.dpi;
-        let line_height = metrics.line_height;
-        let Some(tab_id) = self.active_tab_id() else {
-            return AppEffect::NONE;
-        };
-        let runtime_frame_cache = self.editor_runtime.frame_cache_snapshot();
-        let first_line = runtime_frame_cache.first_line;
-        let last_line = runtime_frame_cache.last_line;
-        let Some(mut tab) = self.tab_session_mut(tab_id) else {
-            return AppEffect::NONE;
-        };
-        let display_map = tab.display_map_clone();
-        let vl_before = tab.cursor_visual_line();
-        let doc_line_before = tab.document.cursor_line();
-        let advance_cache = tab.take_advance_cache();
-        let ctx = CursorContext {
-            display_map: &display_map,
-            cursor_visual_line: tab.cursor_visual_line(),
-            advance_cache: &advance_cache,
-            first_line: &first_line,
-            last_line: &last_line,
-            visible_rows: tab.visible_rows(),
-            first_visible_row: tab.display().viewport.first_visible_row(),
-            scroll_top: tab.scroll_top(),
-            sticky_x: tab.cursor_render_state().sticky_x,
-            dpi_scale: dpi,
-        };
-        tab.document.cursor_mut().selection_anchor = None;
-        tab.move_cursor_visual(delta, ctx);
-        tab.restore_advance_cache(advance_cache);
-        tab.ensure_cursor_visible(line_height);
-        // Long wrapped line: ensure_cursor_visible only checks doc-line
-        // boundaries, so cursor may move off-screen within the same doc
-        // line. Force-scroll when cursor was at viewport bottom.
-        if delta > 0
-            && doc_line_before == tab.document.cursor_line()
-            && vl_before.is_some_and(|vl| vl + 1 >= tab.visible_rows())
-        {
-            tab.display_mut().viewport.scroll_pixels(line_height, &display_map, line_height);
-            tab.refresh_scroll_metrics(line_height);
-        }
-        AppEffect::REDRAW
+        self.editor_runtime.move_active_visual_cursor(delta, false).shell_effect
     }
 
     pub(crate) fn page_up(&mut self) -> AppEffect {
-        let line_height = self.ui_metrics().line_height;
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return AppEffect::NONE;
-        };
-        tab.page_up(line_height);
-        AppEffect::REDRAW
+        self.editor_runtime.page_active_document(PageDirection::Up).shell_effect
     }
 
     pub(crate) fn page_down(&mut self) -> AppEffect {
-        let line_height = self.ui_metrics().line_height;
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return AppEffect::NONE;
-        };
-        tab.page_down(line_height);
-        AppEffect::REDRAW
+        self.editor_runtime.page_active_document(PageDirection::Down).shell_effect
     }
 
     /// Scroll the active non-editing plugin by pixel delta.
     /// Shared by mouse wheel and keyboard scroll paths.
     pub(crate) fn plugin_scroll_by_pixels(&mut self, delta: f32) -> AppEffect {
-        let metrics = self.ui_metrics();
-        let line_height = metrics.line_height;
         let viewport_h = self.plugin_viewport_h();
-        let handles_own_rendering = self.active_handles_own_rendering();
-
-        let scroll_result: Option<(f32, f32)> = {
-            let Some(mut tab) = self.active_tab_session_mut() else {
-                return AppEffect::NONE;
-            };
-            // Only plugins that render their own viewport get plugin scroll.
-            // Standard editor (allows_editing=true, handles_own_rendering=false)
-            // falls through to normal DocumentView scrolling below.
-            if !handles_own_rendering {
-                return AppEffect::NONE;
-            }
-            let consumed =
-                tab.send_message(ui::plugin::PluginMessage::Scroll { delta, viewport_h });
-            if consumed {
-                let content_h = tab.content_height();
-                let scroll_y = tab.scroll_y();
-                Some((content_h, scroll_y))
-            } else {
-                None
-            }
-        };
-
-        if let Some((content_h, scroll_y)) = scroll_result {
-            self.sync_plugin_scrollbar(content_h, scroll_y, line_height, viewport_h);
-            return AppEffect::REDRAW;
+        if !self.editor_runtime.scroll_active_plugin(delta, viewport_h) {
+            return AppEffect::NONE;
         }
-        AppEffect::NONE
+
+        if let Some((content_h, scroll_y)) =
+            self.active_tab_session().map(|tab| (tab.content_height(), tab.scroll_y()))
+        {
+            self.sync_plugin_scrollbar(
+                content_h,
+                scroll_y,
+                self.ui_metrics().line_height,
+                viewport_h,
+            );
+        }
+        AppEffect::REDRAW
     }
 
     /// Effective viewport height for plugin content (editor area minus top padding).
@@ -186,52 +108,7 @@ impl App {
     }
 
     pub(crate) fn extend_selection_visual(&mut self, delta: isize) -> AppEffect {
-        let metrics = self.ui_metrics();
-        let dpi = metrics.dpi;
-        let line_height = metrics.line_height;
-        let Some(tab_id) = self.active_tab_id() else {
-            return AppEffect::NONE;
-        };
-        let runtime_frame_cache = self.editor_runtime.frame_cache_snapshot();
-        let first_line = runtime_frame_cache.first_line;
-        let last_line = runtime_frame_cache.last_line;
-        let Some(mut tab) = self.tab_session_mut(tab_id) else {
-            return AppEffect::NONE;
-        };
-        let display_map = tab.display_map_clone();
-        let vl_before = tab.cursor_visual_line();
-        let doc_line_before = tab.document.cursor_line();
-        let advance_cache = tab.take_advance_cache();
-        let ctx = CursorContext {
-            display_map: &display_map,
-            cursor_visual_line: tab.cursor_visual_line(),
-            advance_cache: &advance_cache,
-            first_line: &first_line,
-            last_line: &last_line,
-            visible_rows: tab.visible_rows(),
-            first_visible_row: tab.display().viewport.first_visible_row(),
-            scroll_top: tab.scroll_top(),
-            sticky_x: tab.cursor_render_state().sticky_x,
-            dpi_scale: dpi,
-        };
-        if tab.document.cursor().selection_anchor.is_none() {
-            tab.document.cursor_mut().selection_anchor =
-                Some(tab.document.cursor().offset.to_usize());
-        }
-        tab.move_cursor_visual(delta, ctx);
-        tab.ensure_cursor_visible(line_height);
-        tab.restore_advance_cache(advance_cache);
-        // Long wrapped line: ensure_cursor_visible only checks doc-line
-        // boundaries, so cursor may move off-screen within the same doc
-        // line. Force-scroll when cursor was at viewport bottom.
-        if delta > 0
-            && doc_line_before == tab.document.cursor_line()
-            && vl_before.is_some_and(|vl| vl + 1 >= tab.visible_rows())
-        {
-            tab.display_mut().viewport.scroll_pixels(line_height, &display_map, line_height);
-            tab.refresh_scroll_metrics(line_height);
-        }
-        AppEffect::REDRAW
+        self.editor_runtime.move_active_visual_cursor(delta, true).shell_effect
     }
 
     /// Handle mouse wheel scroll events.
@@ -338,20 +215,13 @@ impl App {
             }
         }
 
-        match delta {
-            MouseScrollDelta::LineDelta(_, y) => {
-                let Some(mut tab) = self.active_tab_session_mut() else {
-                    return AppEffect::NONE;
-                };
-                let pixels = -y * 3.0 * line_height;
-                tab.scroll_viewport_by_pixels(pixels, line_height);
-            }
-            MouseScrollDelta::PixelDelta(pos) => {
-                let Some(mut tab) = self.active_tab_session_mut() else {
-                    return AppEffect::NONE;
-                };
-                tab.scroll_viewport_by_pixels(-pos.y as f32, line_height);
-            }
+        const TEXT_WHEEL_ROWS_PER_TICK: f32 = 3.0;
+        let pixels = match delta {
+            MouseScrollDelta::LineDelta(_, y) => -y * TEXT_WHEEL_ROWS_PER_TICK * line_height,
+            MouseScrollDelta::PixelDelta(position) => -(position.y as f32),
+        };
+        if !self.editor_runtime.scroll_active_text(pixels, line_height) {
+            return AppEffect::NONE;
         }
         self.last_scroll_time = std::time::Instant::now();
         AppEffect::REDRAW
@@ -364,9 +234,9 @@ impl App {
     /// Used for PageUp/PageDown/Arrow keys/Home/End in preview/novel mode.
     pub(crate) fn plugin_scroll_by_command(
         &mut self,
-        cmd: &crate::input::EditCommand,
+        cmd: &appkit_shell::input_mapper::EditCommand,
     ) -> AppEffect {
-        use crate::input::EditCommand;
+        use appkit_shell::input_mapper::EditCommand;
 
         let metrics = self.ui_metrics();
         let line_height = metrics.line_height;
@@ -530,7 +400,7 @@ mod tests {
         }
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -541,7 +411,7 @@ mod tests {
         fn handle_message(
             &mut self,
             msg: ui::plugin::PluginMessage,
-            _doc: &mut dyn core::document::DocViewMut,
+            _doc: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             match msg {
                 ui::plugin::PluginMessage::Scroll { delta, viewport_h } => {
@@ -563,7 +433,7 @@ mod tests {
         fn query(
             &self,
             q: ui::plugin::PluginQuery,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             match q {
                 ui::plugin::PluginQuery::ScrollY => {
@@ -607,7 +477,8 @@ mod tests {
     #[test]
     fn plugin_page_down_scrolls_by_viewport() {
         let mut app = make_reading_app(5000.0);
-        let effect = app.plugin_scroll_by_command(&crate::input::EditCommand::PageDown);
+        let effect =
+            app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
         assert_eq!(effect, AppEffect::REDRAW);
         let tab = app.active_tab_session().unwrap();
         match tab.query(ui::plugin::PluginQuery::ScrollY) {
@@ -622,11 +493,11 @@ mod tests {
     fn plugin_page_up_scrolls_back() {
         let mut app = make_reading_app(5000.0);
         // Scroll down first.
-        app.plugin_scroll_by_command(&crate::input::EditCommand::PageDown);
+        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
         let y_after_down = app.active_tab_session().unwrap().scroll_y();
         assert!(y_after_down > 0.0);
         // Scroll back up.
-        app.plugin_scroll_by_command(&crate::input::EditCommand::PageUp);
+        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageUp);
         let y_after_up = app.active_tab_session().unwrap().scroll_y();
         assert!(y_after_up < y_after_down, "PageUp should reduce scroll_y");
     }
@@ -634,7 +505,7 @@ mod tests {
     #[test]
     fn plugin_move_down_scrolls_small_amount() {
         let mut app = make_reading_app(5000.0);
-        app.plugin_scroll_by_command(&crate::input::EditCommand::MoveDown);
+        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveDown);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y > 0.0 && y < 100.0, "MoveDown should scroll a small amount, got {y}");
     }
@@ -643,10 +514,10 @@ mod tests {
     fn plugin_move_to_doc_start_resets_scroll() {
         let mut app = make_reading_app(5000.0);
         // Scroll down first.
-        app.plugin_scroll_by_command(&crate::input::EditCommand::PageDown);
-        app.plugin_scroll_by_command(&crate::input::EditCommand::PageDown);
+        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
+        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
         // Go to start.
-        app.plugin_scroll_by_command(&crate::input::EditCommand::MoveToDocStart);
+        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveToDocStart);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y.abs() < 1.0, "MoveToDocStart should reset scroll_y to 0, got {y}");
     }
@@ -654,7 +525,7 @@ mod tests {
     #[test]
     fn plugin_move_to_doc_end_scrolls_to_bottom() {
         let mut app = make_reading_app(5000.0);
-        app.plugin_scroll_by_command(&crate::input::EditCommand::MoveToDocEnd);
+        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveToDocEnd);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y > 0.0, "MoveToDocEnd should scroll near bottom, got {y}");
     }
@@ -686,7 +557,8 @@ mod tests {
         app.switch_workspace_for_test(0);
         // Standard editor: allows_editing=true, handles_own_rendering=false.
         // Plugin scroll is a no-op; scrolling falls through to DocumentView.
-        let effect = app.plugin_scroll_by_command(&crate::input::EditCommand::PageDown);
+        let effect =
+            app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
         assert_eq!(effect, AppEffect::NONE);
     }
 
@@ -723,7 +595,7 @@ mod tests {
         }
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -734,7 +606,7 @@ mod tests {
         fn handle_message(
             &mut self,
             msg: ui::plugin::PluginMessage,
-            _doc: &mut dyn core::document::DocViewMut,
+            _doc: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             match msg {
                 ui::plugin::PluginMessage::Scroll { delta, viewport_h } => {
@@ -752,7 +624,7 @@ mod tests {
         fn query(
             &self,
             q: ui::plugin::PluginQuery,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             match q {
                 ui::plugin::PluginQuery::ScrollY => {
@@ -798,7 +670,8 @@ mod tests {
     #[test]
     fn wysiwyg_plugin_receives_scroll_by_command_page_down() {
         let mut app = make_wysiwyg_app(5000.0);
-        let effect = app.plugin_scroll_by_command(&crate::input::EditCommand::PageDown);
+        let effect =
+            app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
         assert_eq!(effect, AppEffect::REDRAW);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y > 0.0, "scroll_y should advance on PageDown, got {y}");
@@ -859,7 +732,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,

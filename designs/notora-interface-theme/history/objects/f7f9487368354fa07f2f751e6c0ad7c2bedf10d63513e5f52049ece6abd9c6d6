@@ -1,0 +1,125 @@
+<!-- @dsCard group="思维导图" height=380 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>MindmapNode — 候选配色</title>
+<style>
+  html, body { margin:0; height:100%; }
+  body {
+    background:var(--surface-window); color:var(--ink);
+    font-family:var(--font-sans); -webkit-font-smoothing:antialiased;
+  }
+  .stage { box-sizing:border-box; width:720px; padding:16px; display:flex; flex-wrap:wrap; gap:16px 16px; }
+  .panel {
+    position:relative; box-sizing:border-box; width:336px; height:316px;
+    border-radius:8px; border:1px solid;
+  }
+  .panel-head {
+    position:absolute; left:14px; top:12px; right:14px;
+    display:flex; justify-content:space-between; align-items:baseline;
+    font-size:10px; line-height:14px; letter-spacing:.04em;
+  }
+  .panel-note { font-size:9px; letter-spacing:.02em; opacity:.75; }
+  .tree { position:absolute; inset:0; }
+  .card {
+    position:absolute; box-sizing:border-box; height:30px; border-radius:6px;
+    border:1px solid; padding:0 10px; display:flex; align-items:center;
+    font-size:11.5px; line-height:1; white-space:nowrap; overflow:hidden;
+  }
+  .root {
+    position:absolute; box-sizing:border-box; left:12px; top:138px;
+    width:62px; height:40px; border-radius:8px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:11px; font-weight:600;
+  }
+  .child { height:26px; font-size:10.5px; border-radius:6px; }
+
+  /* 纸墨 */
+  .paper { background:#FCFAF8; border-color:#E0D5C4; color:#62666C; }
+  .paper .root { background:#2B2118; color:#FCFAF8; }
+  .paper .card { background:#F2EDEB; border-color:#8C4A2F; color:#7A3A1F; }
+  .paper .c2 { background:#F0EFEB; border-color:#6B7038; color:#555B22; }
+  .paper .c3 { background:#EFEFED; border-color:#387C74; color:#2A665E; }
+  .paper .c4 { background:#EFEFF0; border-color:#527BA5; color:#3B6187; }
+  .paper .c5 { background:#F4EFEB; border-color:#A57636; color:#7C581C; }
+  .paper .c6 { background:#F3EFEF; border-color:#9E7C9B; color:#75566E; }
+  .paper .selected { background:#FBF3EF; border-color:#8C4A2F; color:#7A3A1F; outline:2px solid #C2410C; outline-offset:2px; }
+  .paper .hover { box-shadow:0 0 0 1px #527BA5; }
+  .paper .p0 { border-color:#B3261E; }
+  .paper .done { background:#F3F2EF; border-color:#3F5522; color:#3F5522; }
+  .paper .blocked { background:#F7F1EF; border-color:#B3261E; color:#B3261E; }
+  .paper .connector { stroke:#8C4A2F; }
+
+  /* 墨夜 */
+  .night { background:#191614; border-color:#3B332C; color:#B8ADA3; }
+  .night .root { background:#F2EDE8; color:#191614; }
+  .night .card { background:#5A3D32; border-color:#D59278; color:#F2C9B6; }
+  .night .c2 { background:#484A34; border-color:#ABB07C; color:#DDE0BC; }
+  .night .c3 { background:#36504C; border-color:#7CC0B7; color:#BFE9E2; }
+  .night .c4 { background:#3D4F61; border-color:#90BCE9; color:#CBE4F8; }
+  .night .c5 { background:#614B31; border-color:#E6B374; color:#F8E0BC; }
+  .night .c6 { background:#5C4C5A; border-color:#DBB7D7; color:#F2DFF0; }
+  .night .selected { background:#51331C; border-color:#D59278; color:#F2C9B6; outline:2px solid #F59A4A; outline-offset:2px; }
+  .night .hover { box-shadow:0 0 0 1px #90BCE9; }
+  .night .p0 { border-color:#F08A7F; }
+  .night .done { background:#45493A; border-color:#CFE0B4; color:#CFE0B4; }
+  .night .blocked { background:#543732; border-color:#FFA79A; color:#FFA79A; }
+  .night .connector { stroke:#D59278; }
+
+  .legend { width:688px; font-size:10px; line-height:14px; color:var(--ink-muted); }
+  .legend b { font-weight:600; color:var(--ink); }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="panel paper">
+    <div class="panel-head"><span>纸墨 · 浅色</span><span class="panel-note">候选 · 未接线</span></div>
+    <svg class="tree" width="336" height="316" viewBox="0 0 336 316" aria-hidden="true">
+      <g fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path class="connector" d="M74 158 H91 V59 H108" stroke="#8C4A2F"/>
+        <path d="M74 158 H91 V101 H108" stroke="#6B7038"/>
+        <path d="M74 158 H91 V143 H108" stroke="#387C74"/>
+        <path d="M74 158 H91 V185 H108" stroke="#527BA5"/>
+        <path d="M74 158 H91 V227 H108" stroke="#A57636"/>
+        <path d="M74 158 H91 V269 H108" stroke="#9E7C9B"/>
+        <path d="M208 143 H232" stroke="#387C74"/>
+      </g>
+    </svg>
+    <div class="root">产品地图</div>
+    <div class="card c1 selected" style="left:108px;top:44px;width:100px;">需求</div>
+    <div class="card c2 p0" style="left:108px;top:86px;width:100px;">设计</div>
+    <div class="card c3" style="left:108px;top:128px;width:100px;">开发</div>
+    <div class="card c4 hover" style="left:108px;top:170px;width:100px;">测试</div>
+    <div class="card c5 done" style="left:108px;top:212px;width:100px;">上线</div>
+    <div class="card c6 blocked" style="left:108px;top:254px;width:100px;">复盘</div>
+    <div class="card c3 child" style="left:232px;top:130px;width:84px;">接口评审</div>
+  </div>
+
+  <div class="panel night">
+    <div class="panel-head"><span>墨夜 · 深色</span><span class="panel-note">候选 · 未接线</span></div>
+    <svg class="tree" width="336" height="316" viewBox="0 0 336 316" aria-hidden="true">
+      <g fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M74 158 H91 V59 H108" stroke="#D59278"/>
+        <path d="M74 158 H91 V101 H108" stroke="#ABB07C"/>
+        <path d="M74 158 H91 V143 H108" stroke="#7CC0B7"/>
+        <path d="M74 158 H91 V185 H108" stroke="#90BCE9"/>
+        <path d="M74 158 H91 V227 H108" stroke="#E6B374"/>
+        <path d="M74 158 H91 V269 H108" stroke="#DBB7D7"/>
+        <path d="M208 143 H232" stroke="#7CC0B7"/>
+      </g>
+    </svg>
+    <div class="root">产品地图</div>
+    <div class="card c1 selected" style="left:108px;top:44px;width:100px;">需求</div>
+    <div class="card c2 p0" style="left:108px;top:86px;width:100px;">设计</div>
+    <div class="card c3" style="left:108px;top:128px;width:100px;">开发</div>
+    <div class="card c4 hover" style="left:108px;top:170px;width:100px;">测试</div>
+    <div class="card c5 done" style="left:108px;top:212px;width:100px;">上线</div>
+    <div class="card c6 blocked" style="left:108px;top:254px;width:100px;">复盘</div>
+    <div class="card c3 child" style="left:232px;top:130px;width:84px;">接口评审</div>
+  </div>
+
+  <div class="legend"><b>线</b> = 连接线与边框 · <b>墨</b> = 标题 · <b>纸</b> = 卡面　｜　橙环 = 选中 · 红边 = P0 · 实心状态卡 = doing/done/blocked 整卡换墨</div>
+</div>
+</body>
+</html>

@@ -2,6 +2,9 @@ use std::ops::Range;
 use std::time::Instant;
 
 const HOVER_REDRAW_THRESHOLD_PX_SQUARED: f32 = 4.0;
+const MULTI_CLICK_MAXIMUM_WHOLE_MILLIS: u128 = 500;
+const MULTI_CLICK_MAXIMUM_DISTANCE_PX_SQUARED: f32 = 25.0;
+const MAXIMUM_CLICK_COUNT: u8 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CanvasDragEligibility {
@@ -46,6 +49,26 @@ pub struct MouseState {
 }
 
 impl MouseState {
+    pub fn record_editor_press(&mut self, position: (f32, f32)) {
+        self.record_editor_press_at(Instant::now(), position);
+    }
+
+    fn record_editor_press_at(&mut self, pressed_at: Instant, position: (f32, f32)) {
+        let elapsed = pressed_at.duration_since(self.last_click_time);
+        let horizontal_distance = position.0 - self.last_click_pos.0;
+        let vertical_distance = position.1 - self.last_click_pos.1;
+        let distance_squared =
+            horizontal_distance * horizontal_distance + vertical_distance * vertical_distance;
+        if elapsed.as_millis() > MULTI_CLICK_MAXIMUM_WHOLE_MILLIS
+            || distance_squared > MULTI_CLICK_MAXIMUM_DISTANCE_PX_SQUARED
+        {
+            self.click_count = 0;
+        }
+        self.click_count = (self.click_count + 1).min(MAXIMUM_CLICK_COUNT);
+        self.last_click_time = pressed_at;
+        self.last_click_pos = position;
+    }
+
     pub fn capture(&self) -> MouseCapture {
         if self.canvas_drag.is_some() {
             MouseCapture::CanvasDrag
@@ -98,7 +121,47 @@ impl Default for MouseState {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::MouseState;
+
+    #[test]
+    fn editor_press_preserves_the_whole_millisecond_cutoff() {
+        let mut mouse = MouseState::new();
+        let initial_press = Instant::now();
+        let position = (10.0, 20.0);
+        let exact_limit = initial_press + Duration::from_millis(500);
+        let fractional_limit = exact_limit + Duration::from_micros(500_999);
+        let expired = fractional_limit + Duration::from_millis(501);
+
+        for (press_time, expected_count) in
+            [(initial_press, 1), (exact_limit, 2), (fractional_limit, 3), (expired, 1)]
+        {
+            mouse.record_editor_press_at(press_time, position);
+            assert_eq!(mouse.click_count, expected_count);
+        }
+        assert_eq!(mouse.last_click_time, expired);
+        assert_eq!(mouse.last_click_pos, position);
+    }
+
+    #[test]
+    fn editor_press_measures_distance_from_the_last_press_and_caps_at_three() {
+        let mut mouse = MouseState::new();
+        let press_time = Instant::now();
+
+        for (position, expected_count) in [
+            ((10.0, 20.0), 1),
+            ((13.0, 24.0), 2),
+            ((16.0, 28.0), 3),
+            ((19.0, 32.0), 3),
+            ((22.0, 36.25), 1),
+            ((22.0, 36.25), 2),
+        ] {
+            mouse.record_editor_press_at(press_time, position);
+            assert_eq!(mouse.click_count, expected_count);
+            assert_eq!(mouse.last_click_pos, position);
+        }
+    }
 
     #[test]
     fn overlay_hover_needs_redraw_first_time_returns_true() {

@@ -1,7 +1,7 @@
+use appkit_core::document::DocumentModel;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::io::Write;
 use std::time::{Duration, Instant};
-use textora_app::dev_support::DocumentView;
 use ui::tab_bar::{TabBarWidget, TabBarWidgetInput, TabInfo, tab_bar_height};
 
 /// Benchmark: layout 100 tabs.
@@ -99,16 +99,17 @@ fn bench_tab_switch(c: &mut Criterion) {
         paths.push(path);
     }
 
-    let doc_views: Vec<_> =
-        paths.iter().map(|p| DocumentView::from_file(p, 40, 10.0).expect("load")).collect();
+    let documents: Vec<_> = paths
+        .iter()
+        .map(|path| DocumentModel::from_file(path).expect("load tab switch fixture"))
+        .collect();
 
     let mut active = 0usize;
 
     c.bench_function("tab_switch", |b| {
         b.iter(|| {
-            active = (active + 1) % doc_views.len();
-            let dv = &doc_views[active];
-            std::hint::black_box(dv.line_count());
+            active = (active + 1) % documents.len();
+            std::hint::black_box(documents[active].line_count());
         });
     });
 }

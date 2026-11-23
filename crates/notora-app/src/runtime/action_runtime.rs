@@ -44,6 +44,25 @@ impl ActionRuntime {
         &self.state
     }
 
+    pub(super) fn has_save_conflict(&self, identity: notora_core::DocumentIdentity) -> bool {
+        self.state.library.save_conflict.is_some_and(|conflict| conflict.identity == identity)
+    }
+
+    pub(super) fn has_pending_unlock(
+        &self,
+        request: crate::action::DocumentLoadRequest,
+        generation: u64,
+    ) -> bool {
+        matches!(
+            self.state.encrypted_note_unlock,
+            crate::state::EncryptedNoteUnlockState::Submitting {
+                request: pending_request,
+                generation: pending_generation,
+                ..
+            } if pending_request == request && pending_generation == generation
+        )
+    }
+
     pub(super) fn enqueue(&mut self, action: NotoraAction) {
         self.event_pump.enqueue(action);
     }

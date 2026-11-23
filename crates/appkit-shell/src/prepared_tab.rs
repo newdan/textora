@@ -35,7 +35,7 @@ mod tests {
     use crate::editor_plugin::EditorPlugin;
     use crate::tab_runtime::TabRuntime;
     use appkit_core::document::DocumentModel;
-    use core::buffer::TextBuffer;
+    use textora_core::buffer::TextBuffer;
 
     #[test]
     fn prepared_tab_preserves_document_and_runtime() {

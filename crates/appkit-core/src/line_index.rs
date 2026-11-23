@@ -3,9 +3,9 @@
 //! Used by DocumentView for efficient line-level access during rendering,
 //! cursor movement, and incremental edits.
 
-use core::buffer::text_buffer::TextBuffer;
-use core::types::{UniCharOffset, UnicharLineLookup};
-use core::unicode::{
+use textora_core::buffer::text_buffer::TextBuffer;
+use textora_core::types::{UniCharOffset, UnicharLineLookup};
+use textora_core::unicode::{
     ucd_grapheme_cluster_joins, ucd_grapheme_cluster_joins_done, ucd_grapheme_cluster_lookup,
 };
 

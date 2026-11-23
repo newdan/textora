@@ -87,7 +87,7 @@ impl ViewPlugin for NovelView {
     fn handle_message(
         &mut self,
         msg: PluginMessage,
-        _doc: &mut dyn core::document::DocViewMut,
+        _doc: &mut dyn textora_core::document::DocViewMut,
     ) -> bool {
         match msg {
             PluginMessage::SetTextSpacingMode(_) => {

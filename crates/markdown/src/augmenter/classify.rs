@@ -941,6 +941,7 @@ pub fn classify_enter_context(source: &str, current_byte: usize) -> EnterContext
                                 source,
                                 current_byte,
                                 &block_range,
+                                &frame.container_path,
                             );
                             return EnterContext::IndentedCodeBlock { continuation_prefix };
                         }
@@ -1158,14 +1159,26 @@ pub(in crate::augmenter) fn line_indent_and_content(
     source: &str,
     line_start: usize,
     line_end: usize,
-) -> (&str, bool) {
+    block_range: &std::ops::Range<usize>,
+    container_path: &ContainerPath,
+) -> (String, bool) {
     let content_end = source_line_content_end(source, line_end);
-    let indent_width = source[line_start..content_end]
+    let container_end =
+        matching_container_position(source, line_start, content_end, container_path)
+            .map(|position| position.byte_offset)
+            .unwrap_or_else(|| {
+                if line_start <= block_range.start && block_range.start <= content_end {
+                    block_range.start
+                } else {
+                    line_start
+                }
+            });
+    let indent_width = source[container_end..content_end]
         .bytes()
         .take_while(|source_byte| matches!(*source_byte, b' ' | b'\t'))
         .count();
-    let indent_end = line_start + indent_width;
-    (&source[line_start..indent_end], indent_end < content_end)
+    let indent_end = container_end + indent_width;
+    (canonical_container_prefix(source, indent_end), indent_end < content_end)
 }
 
 /// 计算缩进代码块续行前缀。空白行从同一块最近的非空行继承缩进。
@@ -1173,14 +1186,15 @@ pub(in crate::augmenter) fn indented_code_continuation_prefix(
     source: &str,
     current_byte: usize,
     block_range: &std::ops::Range<usize>,
+    container_path: &ContainerPath,
 ) -> String {
     let Some((line_start, _, line_end)) = locate_source_line_bounds(source, current_byte) else {
         return String::new();
     };
     let (current_indent, current_has_content) =
-        line_indent_and_content(source, line_start, line_end);
+        line_indent_and_content(source, line_start, line_end, block_range, container_path);
     if current_has_content {
-        return current_indent.to_owned();
+        return current_indent;
     }
 
     let mut previous_line_start = line_start;
@@ -1193,10 +1207,15 @@ pub(in crate::augmenter) fn indented_code_continuation_prefix(
             .bytes()
             .rposition(|source_byte| source_byte == b'\n')
             .map_or(0, |newline| newline + 1);
-        let (candidate_indent, candidate_has_content) =
-            line_indent_and_content(source, candidate_start, previous_line_end);
+        let (candidate_indent, candidate_has_content) = line_indent_and_content(
+            source,
+            candidate_start,
+            previous_line_end,
+            block_range,
+            container_path,
+        );
         if candidate_has_content {
-            return candidate_indent.to_owned();
+            return candidate_indent;
         }
         previous_line_start = candidate_start;
     }
@@ -1207,10 +1226,15 @@ pub(in crate::augmenter) fn indented_code_continuation_prefix(
             .bytes()
             .position(|source_byte| source_byte == b'\n')
             .map_or(source.len(), |newline| next_line_start + newline);
-        let (candidate_indent, candidate_has_content) =
-            line_indent_and_content(source, next_line_start, next_line_end);
+        let (candidate_indent, candidate_has_content) = line_indent_and_content(
+            source,
+            next_line_start,
+            next_line_end,
+            block_range,
+            container_path,
+        );
         if candidate_has_content {
-            return candidate_indent.to_owned();
+            return candidate_indent;
         }
         let newline_width = newline_sequence_width_at(source, next_line_end).unwrap_or(0);
         if newline_width == 0 {
@@ -1219,7 +1243,7 @@ pub(in crate::augmenter) fn indented_code_continuation_prefix(
         next_line_start = next_line_end + newline_width;
     }
 
-    current_indent.to_owned()
+    current_indent
 }
 
 /// 单元格正文起点；空单元格落在单元格源码范围末端。

@@ -55,7 +55,7 @@ fn run_editing_pipeline(source: &str, cursor_byte: usize, style: &MarkdownStyle)
     black_box(augment_edit(source, cursor_byte, AugmentKind::InsertText(String::from("中"))));
     let parsed = parse_markdown(source);
     let document = MarkdownDoc::build(&parsed, style);
-    let document_view = core::document::StringDocView::new(source);
+    let document_view = textora_core::document::StringDocView::new(source);
     layout_doc_for_rendering(&document.blocks, style, VIEWPORT_WIDTH, &document_view)
         .document()
         .total_height
@@ -92,7 +92,7 @@ fn benchmark_long_paragraph_layout(criterion: &mut Criterion) {
         let source = long_cjk_paragraph(size_kib * 1024);
         let parsed = parse_markdown(&source);
         let document = MarkdownDoc::build(&parsed, &style);
-        let document_view = core::document::StringDocView::new(&source);
+        let document_view = textora_core::document::StringDocView::new(&source);
         group.throughput(Throughput::Bytes(source.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size_kib), &size_kib, |bencher, _| {
             bencher.iter(|| {

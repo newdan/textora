@@ -17,7 +17,7 @@ ci-no-fonts = []
 accesskit = "0.24.1"
 accesskit_winit = { version = "0.33.2", default-features = false, features = ["rwh_06"] }
 appkit-core = { path = "../appkit-core", package = "textora-appkit-core" }
-core.workspace = true
+textora_core.workspace = true
 ui.workspace = true
 winit.workspace = true
 wgpu.workspace = true

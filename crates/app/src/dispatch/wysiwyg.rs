@@ -1,361 +1,32 @@
-//! WYSIWYG dispatch — visual navigation and plugin cursor synchronization.
-//!
-//! When the active plugin is a WYSIWYG editor (`handles_own_rendering() == true`),
-//! the dispatch path in [`super::editor`] routes visual-navigation commands here
-//! so the plugin can resolve movement targets from its own layout.
-//!
-//! Text-editing commands never reach this module: `dispatch_edit_command`
-//! converts them to an [`ui::plugin::EditIntent`] up front and executes them
-//! through the transactional edit pipeline (`crate::edit_transaction`), which
-//! validates source generation, grapheme boundaries, and selection collapse
-//! before applying one atomic transaction.
+//! Product viewport adaptation for the shared visual editor.
 
 use crate::app::App;
 use crate::app_effect::AppEffect;
 #[cfg(test)]
 use crate::document_view::DocumentView;
-use crate::input::EditCommand;
-use crate::tab_session::{TabSession, TabSessionMut};
-use appkit_core::document::DocumentModel;
-use core::types::ByteIndex;
-use ui::plugin::{
-    CursorAffinity, EditHitTarget, MoveDirection, PluginMessage, PluginQuery, PluginResponse,
-    VisualCaretPosition,
+#[cfg(test)]
+use appkit_shell::editor_runtime::apply_target_to_document;
+pub(crate) use appkit_shell::editor_runtime::{
+    apply_edit_hit_target, query_visual_caret_hit, set_wysiwyg_cursor_and_selection,
+    set_wysiwyg_visual_caret_and_selection,
 };
-
-fn wysiwyg_cursor_x(tab: &TabSession<'_>, byte: usize) -> Option<f32> {
-    tab.query_cursor_screen_rect(byte).map(|(x, _y, _w, _h)| x)
-}
-
-fn query_visual_caret_move(
-    tab: &TabSession<'_>,
-    current_byte: usize,
-    direction: MoveDirection,
-    target_x: Option<f32>,
-) -> Option<VisualCaretPosition> {
-    if let PluginResponse::VisualCaretPosition(position) =
-        tab.query(PluginQuery::VisualMoveCaret { current_byte, direction, target_x })
-    {
-        return position;
-    }
-    tab.visual_move_byte(current_byte, direction, target_x).map(|byte_offset| VisualCaretPosition {
-        byte_offset,
-        affinity: CursorAffinity::Downstream,
-    })
-}
-
-pub(crate) fn query_visual_caret_hit(
-    tab: &TabSession<'_>,
-    x: f32,
-    y: f32,
-    offset_x: f32,
-    offset_y: f32,
-) -> Option<VisualCaretPosition> {
-    if let PluginResponse::VisualCaretPosition(position) =
-        tab.query(PluginQuery::HitTestVisualCaret { x, y, offset_x, offset_y })
-    {
-        return position;
-    }
-    tab.hit_test_byte(x, y, offset_x, offset_y).map(|byte_offset| VisualCaretPosition {
-        byte_offset,
-        affinity: CursorAffinity::Downstream,
-    })
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Visual navigation
-// ────────────────────────────────────────────────────────────────────────────
+use appkit_shell::input_mapper::EditCommand;
 
 impl App {
-    /// Route a visual-navigation command to the WYSIWYG plugin.
-    ///
-    /// Queries [`PluginQuery::VisualMove`] to translate the requested direction
-    /// into a target byte offset, then updates the DocumentView cursor.
-    /// Returns `AppEffect::REDRAW` on success (no text modification → no
-    /// cache invalidation needed).
-    pub(crate) fn dispatch_wysiwyg_navigation(&mut self, cmd: &EditCommand) -> AppEffect {
-        let extend_selection = matches!(
-            cmd,
-            EditCommand::ExtendLeft
-                | EditCommand::ExtendRight
-                | EditCommand::ExtendUp
-                | EditCommand::ExtendDown
-                | EditCommand::ExtendToLineStart
-                | EditCommand::ExtendToLineEnd
-                | EditCommand::ExtendToDocStart
-                | EditCommand::ExtendToDocEnd
-        );
-        let direction = match cmd {
-            EditCommand::MoveLeft | EditCommand::ExtendLeft => MoveDirection::Left,
-            EditCommand::MoveRight | EditCommand::ExtendRight => MoveDirection::Right,
-            EditCommand::MoveUp | EditCommand::ExtendUp => MoveDirection::Up,
-            EditCommand::MoveDown | EditCommand::ExtendDown => MoveDirection::Down,
-            EditCommand::MoveToLineStart | EditCommand::ExtendToLineStart => {
-                MoveDirection::LineStart
-            }
-            EditCommand::MoveToLineEnd | EditCommand::ExtendToLineEnd => MoveDirection::LineEnd,
-            EditCommand::MoveToDocStart | EditCommand::ExtendToDocStart => {
-                return self.wysiwyg_navigate_to_doc_boundary(0, extend_selection);
-            }
-            EditCommand::MoveToDocEnd | EditCommand::ExtendToDocEnd => {
-                return self.wysiwyg_navigate_to_doc_end(extend_selection);
-            }
-            EditCommand::PageUp => {
-                return self.wysiwyg_page(-1);
-            }
-            EditCommand::PageDown => {
-                return self.wysiwyg_page(1);
-            }
-            _ => return AppEffect::NONE,
-        };
-        let vertical_navigation = matches!(direction, MoveDirection::Up | MoveDirection::Down);
-        let preferred_x = self.editor_runtime.preferred_x();
-
-        // Phase 1: query the semantic target first, then retain byte navigation
-        // as the fallback for existing Markdown WYSIWYG plugins.
-        let (semantic_target, visual_target, selection_anchor, vertical_anchor_x) = {
-            let Some(tab) = self.active_tab_session() else {
-                return AppEffect::NONE;
-            };
-            let current_byte = tab.document.cursor_offset().to_usize();
-            let vertical_anchor_x = if vertical_navigation {
-                preferred_x.or_else(|| wysiwyg_cursor_x(&tab, current_byte))
-            } else {
-                None
-            };
-            let target_x = vertical_anchor_x;
-            let selection_anchor = if extend_selection {
-                Some(tab.document.cursor().selection_anchor.unwrap_or(current_byte))
-            } else {
-                None
-            };
-            let semantic_target = tab.move_edit_target(current_byte, direction, target_x);
-            let visual_target = semantic_target
-                .is_none()
-                .then(|| query_visual_caret_move(&tab, current_byte, direction, target_x));
-            (semantic_target, visual_target.flatten(), selection_anchor, vertical_anchor_x)
-        };
-
-        // Phase 2: apply cursor + notify plugin with snapped byte (mutable borrow).
-        let cursor_after = {
-            let Some(mut tab) = self.active_tab_session_mut() else {
-                return AppEffect::NONE;
-            };
-            if let Some(target) = semantic_target {
-                apply_edit_hit_target(&mut tab, target);
-            } else if let Some(position) = visual_target {
-                set_wysiwyg_visual_caret_and_selection(&mut tab, position, selection_anchor);
-            } else {
-                return AppEffect::NONE;
-            }
-            tab.document.cursor_offset().to_usize()
-        };
-
-        if vertical_navigation {
-            let resolved_anchor_x = vertical_anchor_x.or_else(|| {
-                self.active_tab_session()
-                    .and_then(|active_tab| wysiwyg_cursor_x(&active_tab, cursor_after))
-            });
-            self.editor_runtime.set_preferred_x(resolved_anchor_x);
-        } else {
-            self.editor_runtime.set_preferred_x(None);
-        }
-        self.ensure_wysiwyg_cursor_visible();
-
-        AppEffect::REDRAW
+    pub(crate) fn dispatch_wysiwyg_navigation(&mut self, command: &EditCommand) -> AppEffect {
+        let reveal_viewport_height = self.plugin_viewport_h();
+        let page_viewport_height =
+            self.visible_height_lines(self.screen_height()) as f32 * self.ui_metrics().line_height;
+        self.editor_runtime.execute_visual_navigation(
+            command,
+            reveal_viewport_height,
+            page_viewport_height,
+        )
     }
 
-    /// Let the plugin reveal the caret after its final layout. Plugins without
-    /// deferred reveal support use the current geometry as a compatibility fallback.
     pub(crate) fn ensure_wysiwyg_cursor_visible(&mut self) {
-        if !self.active_handles_own_rendering() {
-            return;
-        }
-        let Some(tab) = self.active_tab_session() else {
-            return;
-        };
-        let cursor_byte = tab.document.cursor_offset().to_usize();
-        if self
-            .active_tab_session_mut()
-            .is_some_and(|mut tab| tab.send_message(PluginMessage::RevealCursor(cursor_byte)))
-        {
-            return;
-        }
-        let Some((_, cursor_y, _, cursor_h)) =
-            self.active_tab_session().and_then(|tab| tab.query_cursor_screen_rect(cursor_byte))
-        else {
-            return;
-        };
-        let viewport_h = self.plugin_viewport_h();
-        let delta =
-            if cursor_y < 0.0 { cursor_y } else { (cursor_y + cursor_h - viewport_h).max(0.0) };
-        if delta == 0.0 {
-            return;
-        }
-        if let Some(mut tab) = self.active_tab_session_mut() {
-            tab.send_message(PluginMessage::Scroll { delta, viewport_h });
-        }
-    }
-
-    /// Move cursor to byte offset 0 (document start).
-    fn wysiwyg_navigate_to_doc_boundary(
-        &mut self,
-        byte: usize,
-        extend_selection: bool,
-    ) -> AppEffect {
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return AppEffect::NONE;
-        };
-        let current_byte = tab.document.cursor_offset().to_usize();
-        let selection_anchor = extend_selection
-            .then(|| tab.document.cursor().selection_anchor.unwrap_or(current_byte));
-        let _snapped = set_wysiwyg_cursor_and_selection(&mut tab, byte, selection_anchor);
-        self.editor_runtime.set_preferred_x(None);
-        self.ensure_wysiwyg_cursor_visible();
-        AppEffect::REDRAW
-    }
-
-    /// Move cursor to the last byte of the document.
-    fn wysiwyg_navigate_to_doc_end(&mut self, extend_selection: bool) -> AppEffect {
-        let end =
-            self.active_tab_session().map(|session| session.document.buffer_len()).unwrap_or(0);
-        self.wysiwyg_navigate_to_doc_boundary(end, extend_selection)
-    }
-
-    /// Scroll one page up (`direction < 0`) or down (`direction > 0`).
-    /// Uses plugin scroll message for accurate paging in WYSIWYG mode.
-    fn wysiwyg_page(&mut self, direction: isize) -> AppEffect {
-        let screen_h = self.screen_height();
-        let line_height = self.ui_metrics().line_height;
-        let viewport_h = self.visible_height_lines(screen_h) as f32 * line_height;
-        let delta = if direction < 0 { -viewport_h } else { viewport_h };
-
-        // Phase 1: scroll plugin (mutable borrow).
-        {
-            let Some(mut tab) = self.active_tab_session_mut() else {
-                return AppEffect::NONE;
-            };
-            tab.send_message(PluginMessage::Scroll { delta, viewport_h });
-        }
-
-        // Phase 2: find cursor target via hit test (immutable borrow).
-        let position = {
-            let Some(tab) = self.active_tab_session() else {
-                return AppEffect::NONE;
-            };
-            query_visual_caret_hit(&tab, 0.0, 0.0, 0.0, 0.0).unwrap_or_else(|| {
-                VisualCaretPosition {
-                    byte_offset: tab.document.cursor_offset().to_usize(),
-                    affinity: tab.document.tb().cursor_affinity(),
-                }
-            })
-        };
-
-        // Phase 3: apply cursor + notify plugin with snapped byte (mutable borrow).
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return AppEffect::NONE;
-        };
-        set_wysiwyg_visual_caret_and_selection(&mut tab, position, None);
-        self.editor_runtime.set_preferred_x(None);
-        AppEffect::REDRAW
-    }
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Cursor / selection synchronization helpers
-// ────────────────────────────────────────────────────────────────────────────
-
-pub(crate) fn set_wysiwyg_cursor_and_selection(
-    tab: &mut TabSessionMut<'_>,
-    requested_cursor_byte: usize,
-    selection_anchor: Option<usize>,
-) -> usize {
-    tab.document.cursor_move_to_offset(requested_cursor_byte);
-    let snapped_cursor_byte = tab.document.cursor_offset().to_usize();
-    tab.document.cursor_mut().selection_anchor = selection_anchor;
-    tab.send_message(PluginMessage::SetCursorByte(snapped_cursor_byte));
-    tab.send_message(PluginMessage::SetVisualCaret(VisualCaretPosition {
-        byte_offset: snapped_cursor_byte,
-        affinity: CursorAffinity::Downstream,
-    }));
-    tab.send_message(PluginMessage::SetSelAnchorByte(selection_anchor));
-    tab.send_message(PluginMessage::SetSelCursorByte(
-        selection_anchor.map(|_| snapped_cursor_byte),
-    ));
-    snapped_cursor_byte
-}
-
-pub(crate) fn set_wysiwyg_visual_caret_and_selection(
-    tab: &mut TabSessionMut<'_>,
-    position: VisualCaretPosition,
-    selection_anchor: Option<usize>,
-) {
-    let snapped_byte =
-        set_wysiwyg_cursor_and_selection(tab, position.byte_offset, selection_anchor);
-    if snapped_byte != position.byte_offset {
-        return;
-    }
-    tab.document.tb.set_cursor_affinity(position.affinity);
-    tab.send_message(PluginMessage::SetVisualCaret(position));
-}
-
-pub(crate) fn apply_target_to_document(
-    doc: &mut impl crate::edit_transaction::DocumentModelMut,
-    target: EditHitTarget,
-) {
-    let doc = doc.document_model_mut();
-    match target {
-        EditHitTarget::TextCaret { byte_offset, .. } => {
-            doc.cursor_move_to_offset(byte_offset);
-            doc.cursor_mut().selection_anchor = None;
-        }
-        EditHitTarget::SourceObject { source_range } => {
-            let Some(source_range) = validated_source_object_range(doc, source_range) else {
-                return;
-            };
-            doc.cursor_move_to_offset(source_range.end);
-            doc.cursor_mut().selection_anchor = Some(source_range.start);
-        }
-        EditHitTarget::CanvasControl { .. } => {}
-        EditHitTarget::ClearFocus => {
-            doc.cursor_move_to_offset(doc.buffer_len());
-            doc.cursor_mut().selection_anchor = None;
-        }
-    }
-}
-
-fn validated_source_object_range(
-    doc: &DocumentModel,
-    source_range: std::ops::Range<usize>,
-) -> Option<std::ops::Range<usize>> {
-    if source_range.start > source_range.end || source_range.end > doc.buffer_len() {
-        return None;
-    }
-
-    let source = doc.full_text();
-    if !source.is_char_boundary(source_range.start) || !source.is_char_boundary(source_range.end) {
-        return None;
-    }
-
-    let start = ByteIndex(source_range.start);
-    let end = ByteIndex(source_range.end);
-    if !doc.tb().is_grapheme_boundary(start) || !doc.tb().is_grapheme_boundary(end) {
-        return None;
-    }
-
-    Some(source_range)
-}
-
-pub(crate) fn apply_edit_hit_target(tab: &mut TabSessionMut<'_>, target: EditHitTarget) {
-    let clears_edit_focus = matches!(target, EditHitTarget::ClearFocus);
-    apply_target_to_document(tab.document, target);
-    let cursor_byte = tab.document.cursor_offset().to_usize();
-    let selection_anchor = tab.document.cursor().selection_anchor;
-    tab.send_message(PluginMessage::SetSelAnchorByte(selection_anchor));
-    tab.send_message(PluginMessage::SetSelCursorByte(Some(cursor_byte)));
-    tab.send_message(PluginMessage::SetCursorByte(cursor_byte));
-    if clears_edit_focus {
-        tab.send_message(PluginMessage::ClearEditFocus);
+        let viewport_height = self.plugin_viewport_h();
+        self.editor_runtime.reveal_visual_caret(viewport_height);
     }
 }
 
@@ -410,7 +81,7 @@ pub(crate) mod semantic_test_support {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -427,7 +98,11 @@ pub(crate) mod semantic_test_support {
             true
         }
 
-        fn query(&self, query: PluginQuery, _doc: &dyn core::document::DocView) -> PluginResponse {
+        fn query(
+            &self,
+            query: PluginQuery,
+            _doc: &dyn textora_core::document::DocView,
+        ) -> PluginResponse {
             let mut state = self.state.borrow_mut();
             match query {
                 PluginQuery::NeedsSourceUpdate(_) => PluginResponse::Bool(false),
@@ -473,7 +148,7 @@ pub(crate) mod semantic_test_support {
         fn handle_message(
             &mut self,
             message: PluginMessage,
-            _doc: &mut dyn core::document::DocViewMut,
+            _doc: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             let recorded_message = match message {
                 PluginMessage::SetCursorByte(byte_offset) => {
@@ -512,7 +187,7 @@ mod tests {
     use crate::app::App;
     use crate::commands::execute_edit_command_v2;
     use crate::document_view::DocumentView;
-    use crate::input::EditCommand;
+    use appkit_shell::input_mapper::EditCommand;
 
     #[test]
     fn replace_range_empty_moves_insert_point_without_selecting_text() {
@@ -589,11 +264,41 @@ mod semantic_target_tests {
     use ui::plugin::EditHitTarget;
 
     #[test]
+    fn shared_keyboard_navigation_prefers_visual_targets_with_source_fallback() {
+        use super::semantic_test_support::{SemanticPluginState, app_with_semantic_plugin};
+        use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let state = Rc::new(RefCell::new(SemanticPluginState {
+            visual_move_result: Some(4),
+            ..SemanticPluginState::default()
+        }));
+        let mut app = app_with_semantic_plugin("abcdef", state.clone());
+        let mut frame = app.editor_runtime.begin_frame().expect("editor frame should begin");
+        frame
+            .paint_editor(ui::Rect::new(0.0, 0.0, 640.0, 480.0))
+            .expect("editor bounds should be painted");
+        let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
+
+        app.editor_runtime.handle_key_input(context, ui::KeyCode::Right, ui::core::Modifiers::NONE);
+
+        let tab = app.active_tab_session().expect("active visual tab");
+        assert_eq!(tab.document.cursor_offset().to_usize(), 4);
+
+        state.borrow_mut().visual_move_result = None;
+        app.editor_runtime.handle_key_input(context, ui::KeyCode::Right, ui::core::Modifiers::NONE);
+
+        let tab = app.active_tab_session().expect("active visual tab");
+        assert_eq!(tab.document.cursor_offset().to_usize(), 5);
+    }
+
+    #[test]
     fn text_target_clears_selection_and_places_caret() {
         let mut doc = DocumentView::new(vec!["abcdef".into()], 80, 10.0);
 
         apply_target_to_document(
-            &mut doc,
+            &mut doc.model,
             EditHitTarget::TextCaret { byte_offset: 3, selection_scope: None },
         );
 
@@ -605,7 +310,10 @@ mod semantic_target_tests {
     fn source_object_target_selects_exact_source_range() {
         let mut doc = DocumentView::new(vec!["abcdef".into()], 80, 10.0);
 
-        apply_target_to_document(&mut doc, EditHitTarget::SourceObject { source_range: 1..5 });
+        apply_target_to_document(
+            &mut doc.model,
+            EditHitTarget::SourceObject { source_range: 1..5 },
+        );
 
         assert_eq!(doc.selection_range(), Some((1, 5)));
     }
@@ -616,7 +324,7 @@ mod semantic_target_tests {
         doc.cursor_move_to_offset(3);
         doc.cursor_mut().selection_anchor = Some(1);
 
-        apply_target_to_document(&mut doc, EditHitTarget::ClearFocus);
+        apply_target_to_document(&mut doc.model, EditHitTarget::ClearFocus);
 
         assert_eq!(doc.cursor_offset().to_usize(), doc.buffer_len());
         assert!(doc.cursor().selection_anchor.is_none());
@@ -631,7 +339,7 @@ mod semantic_target_tests {
             doc.cursor_move_to_offset(0);
             doc.cursor_mut().selection_anchor = None;
 
-            apply_target_to_document(&mut doc, EditHitTarget::SourceObject { source_range });
+            apply_target_to_document(&mut doc.model, EditHitTarget::SourceObject { source_range });
 
             assert_eq!(doc.cursor_offset().to_usize(), 0);
             assert!(doc.cursor().selection_anchor.is_none());

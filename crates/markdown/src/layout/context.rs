@@ -1,9 +1,9 @@
 //! Layout context and width estimation.
 
-use core::unicode::{
+use shaping::Shaper;
+use textora_core::unicode::{
     ucd_grapheme_cluster_joins, ucd_grapheme_cluster_joins_done, ucd_grapheme_cluster_lookup,
 };
-use shaping::Shaper;
 
 use crate::builder::{InlineStyle, StyleSpan};
 
@@ -162,7 +162,7 @@ pub(crate) fn text_grapheme_x(
 // ===== Layout context =====
 
 pub struct LayoutCtx<'a> {
-    pub(crate) doc: &'a dyn core::document::DocView,
+    pub(crate) doc: &'a dyn textora_core::document::DocView,
     pub(crate) style: &'a crate::style::MarkdownStyle,
     pub(crate) viewport_w: f32,
     pub(crate) y: f32,
@@ -200,7 +200,7 @@ pub struct LayoutCtx<'a> {
 
 impl<'a> LayoutCtx<'a> {
     pub fn new(
-        doc: &'a dyn core::document::DocView,
+        doc: &'a dyn textora_core::document::DocView,
         style: &'a crate::style::MarkdownStyle,
         viewport_w: f32,
         shaper: Option<&'a mut Shaper>,
@@ -646,7 +646,7 @@ mod tests {
         // the gap width for fit decisions is zero.
         let mut shaper = shaping::Shaper::new().unwrap();
         let style = default_style();
-        let src_view = core::document::StringDocView::new(src);
+        let src_view = textora_core::document::StringDocView::new(src);
         let mut ctx = LayoutCtx::new(&src_view, &style, 800.0, Some(&mut shaper), None, None, None);
         // Wide viewport: both tokens should fit on one line
         let lines = ctx.wrap_text("第一行内容 第二行内容", 14.0, shaping::Weight::NORMAL);
@@ -665,7 +665,7 @@ mod tests {
         let src = "";
         let mut shaper = shaping::Shaper::new().unwrap();
         let style = default_style();
-        let src_view = core::document::StringDocView::new(src);
+        let src_view = textora_core::document::StringDocView::new(src);
         let mut ctx = LayoutCtx::new(&src_view, &style, 150.0, Some(&mut shaper), None, None, None);
         let long_cjk = "这是一段很长的中文文本用来测试自动换行功能";
         let lines = ctx.wrap_text(long_cjk, 14.0, shaping::Weight::NORMAL);
@@ -680,7 +680,7 @@ mod tests {
         let src = "";
         let mut shaper = shaping::Shaper::new().unwrap();
         let style = default_style();
-        let src_view = core::document::StringDocView::new(src);
+        let src_view = textora_core::document::StringDocView::new(src);
         let mut ctx = LayoutCtx::new(&src_view, &style, 300.0, Some(&mut shaper), None, None, None);
         let mixed = "中文 English mixed 混合文本 test";
         let lines = ctx.wrap_text(mixed, 14.0, shaping::Weight::NORMAL);
@@ -698,7 +698,7 @@ mod tests {
         // must not panic and must finish quickly.
         let mut shaper = shaping::Shaper::new().unwrap();
         let style = default_style();
-        let src_view = core::document::StringDocView::new(src);
+        let src_view = textora_core::document::StringDocView::new(src);
         let mut ctx = LayoutCtx::new(&src_view, &style, 700.0, Some(&mut shaper), None, None, None);
         let parts: Vec<&str> = (0..20)
             .map(|i| {
@@ -725,7 +725,7 @@ mod tests {
         let mut shaper = shaping::Shaper::new().unwrap();
         let style = default_style();
         // Use a narrow width that forces wrapping mid-sentence
-        let src_view = core::document::StringDocView::new(src);
+        let src_view = textora_core::document::StringDocView::new(src);
         let mut ctx = LayoutCtx::new(&src_view, &style, 188.0, Some(&mut shaper), None, None, None);
         let wrapped = ctx.wrap_text(text, 14.0, shaping::Weight::NORMAL);
         // Simulate what layout_line_with_styles does: track byte_offset
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn natural_spacing_enters_wrapping_shape_before_line_breaks() {
-        let document = core::document::StringDocView::new("");
+        let document = textora_core::document::StringDocView::new("");
         let mut natural_style = default_style();
         natural_style.text_spacing_mode = ui::typography::TextSpacingMode::Natural;
         let mut natural_shaper = shaping::Shaper::new().expect("natural spacing needs a shaper");
@@ -819,7 +819,7 @@ mod tests {
     fn wrap_text_uses_markdown_body_font_not_incoming_shaper_family() {
         let src = "";
         let style = default_style();
-        let src_view = core::document::StringDocView::new(src);
+        let src_view = textora_core::document::StringDocView::new(src);
         let text = "一. 定向军士:冲，不押宝.只填愿意去的军士院校和专业；优先技术型、军工/航空/信息/船舶/交通背景强的院校";
 
         let wrap_after_family = |family: Option<&str>| {
@@ -848,7 +848,7 @@ mod tests {
         let text = "状图（├── mod.rs  # comment）整行长度";
         let mut shaper = shaping::Shaper::new().unwrap();
         let style = default_style();
-        let src_view = core::document::StringDocView::new(src);
+        let src_view = textora_core::document::StringDocView::new(src);
         let mut ctx = LayoutCtx::new(&src_view, &style, 188.0, Some(&mut shaper), None, None, None);
         let wrapped = ctx.wrap_text(text, 14.0, shaping::Weight::NORMAL);
         let mut byte_offset = 0usize;
@@ -873,7 +873,7 @@ mod tests {
         let text = "mod.rs   # comment";
         let mut shaper = shaping::Shaper::new().unwrap();
         let style = default_style();
-        let src_view = core::document::StringDocView::new(src);
+        let src_view = textora_core::document::StringDocView::new(src);
         let mut ctx = LayoutCtx::new(&src_view, &style, 400.0, Some(&mut shaper), None, None, None);
         let wrapped = ctx.wrap_text(text, 14.0, shaping::Weight::NORMAL);
         let total: usize = wrapped.iter().map(|w| w.text.len()).sum();
@@ -886,7 +886,7 @@ mod tests {
         let text = "  hello world";
         let mut shaper = shaping::Shaper::new().unwrap();
         let style = default_style();
-        let src_view = core::document::StringDocView::new(src);
+        let src_view = textora_core::document::StringDocView::new(src);
         let mut ctx = LayoutCtx::new(&src_view, &style, 400.0, Some(&mut shaper), None, None, None);
         let wrapped = ctx.wrap_text(text, 14.0, shaping::Weight::NORMAL);
         let total: usize = wrapped.iter().map(|w| w.text.len()).sum();
@@ -907,7 +907,7 @@ mod tests {
         let mut shaper = shaping::Shaper::new().unwrap();
         let style = default_style();
         for text in &texts {
-            let src_view = core::document::StringDocView::new(src);
+            let src_view = textora_core::document::StringDocView::new(src);
             let mut ctx =
                 LayoutCtx::new(&src_view, &style, 400.0, Some(&mut shaper), None, None, None);
             let wrapped = ctx.wrap_text(text, 14.0, shaping::Weight::NORMAL);
@@ -943,7 +943,7 @@ mod tests {
         let style = default_style();
         for text in &texts {
             for &w in &widths {
-                let src_view = core::document::StringDocView::new(src);
+                let src_view = textora_core::document::StringDocView::new(src);
                 let mut ctx =
                     LayoutCtx::new(&src_view, &style, w, Some(&mut shaper), None, None, None);
                 let wrapped = ctx.wrap_text(text, 14.0, shaping::Weight::NORMAL);
@@ -966,7 +966,7 @@ mod tests {
     fn fallback_wrap_keeps_text_and_projection_ranges_in_sync() {
         let text = "provider/send 未配置时上传锁不释放";
         let style = default_style();
-        let src_view = core::document::StringDocView::new("");
+        let src_view = textora_core::document::StringDocView::new("");
         let mut ctx = LayoutCtx::new(&src_view, &style, 100.0, None, None, None, None);
         let wrapped = ctx.wrap_text_with_width(text, 14.0, shaping::Weight::NORMAL, 100.0);
 

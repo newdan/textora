@@ -72,7 +72,7 @@ impl MarkdownView {
         let source = &self.source;
         let editing = self.engine.edit_source.is_some();
         let engine = &mut self.engine;
-        let string_doc = core::document::StringDocView::new(source);
+        let string_doc = textora_core::document::StringDocView::new(source);
         engine.render(
             theme,
             viewport_w,
@@ -156,7 +156,7 @@ impl ViewPlugin for MarkdownView {
     fn handle_message(
         &mut self,
         msg: PluginMessage,
-        _doc: &mut dyn core::document::DocViewMut,
+        _doc: &mut dyn textora_core::document::DocViewMut,
     ) -> bool {
         if let Some(result) = self.engine.handle_message_common(&msg) {
             return result;

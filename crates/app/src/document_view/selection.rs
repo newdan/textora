@@ -1,15 +1,16 @@
 //! Selection operations and clipboard integration.
 
-use core::buffer::text_buffer::CursorMovement;
-use core::types::{ByteIndex, LogicalPoint};
+use appkit_shell::normalize_paste_text;
+use textora_core::buffer::text_buffer::CursorMovement;
+use textora_core::types::{ByteIndex, LogicalPoint};
 
-use super::{DocumentView, normalize_paste_text};
+use super::DocumentView;
 
 impl DocumentView {
     /// Select the word at the given byte offset.
     /// Returns (start, end) byte offsets of the word.
     pub fn word_select_at(&self, offset: usize) -> (usize, usize) {
-        use core::buffer::word_select;
+        use textora_core::buffer::word_select;
 
         let total = self.tb.text_length();
         if total == 0 || offset >= total {

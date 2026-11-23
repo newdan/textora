@@ -205,7 +205,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         viewport_h: f32,
         shaper: Option<&mut shaping::Shaper>,
         highlighter: &AppCodeHighlighter<'_>,
-        doc_view: &dyn core::document::DocView,
+        doc_view: &dyn textora_core::document::DocView,
         full_flat_lines: bool,
         full_layout: bool,
     ) {
@@ -269,7 +269,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         viewport_h: f32,
         shaper: Option<&mut shaping::Shaper>,
         highlighter: &AppCodeHighlighter<'_>,
-        doc_view: &dyn core::document::DocView,
+        doc_view: &dyn textora_core::document::DocView,
     ) {
         let scroll_anchor = self.lazy.as_ref().and_then(|lazy| {
             if lazy.estimated_heights.is_empty() {
@@ -339,7 +339,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         style: &MarkdownStyle,
         build_doc: impl FnOnce(&MarkdownStyle) -> S,
         mut shaper: Option<&mut shaping::Shaper>,
-        doc_view: &dyn core::document::DocView,
+        doc_view: &dyn textora_core::document::DocView,
         full_flat_lines: bool,
         full_layout: bool,
     ) -> (DrawList, bool) {

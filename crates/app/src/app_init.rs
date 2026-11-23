@@ -54,7 +54,7 @@ fn register_plugin_factory(
 }
 
 /// 构造 textora 产品的插件和路径路由；runtime 只接收这一步产出的 shared 配置。
-pub(crate) fn build_product_workspace() -> Workspace {
+fn product_editor_plugins() -> (ui::plugin::PluginRegistry, ViewRouteTable) {
     use ui::plugin::PLUGIN_EDITOR;
     #[cfg(feature = "markdown")]
     use ui::plugin::{PLUGIN_MARKDOWN_EDITOR, PLUGIN_MINDMAP, PLUGIN_NOVEL_VIEW};
@@ -72,7 +72,7 @@ pub(crate) fn build_product_workspace() -> Workspace {
         &mut registry,
         &mut registered_plugin_ids,
         PLUGIN_MINDMAP,
-        Box::new(textora_markdown::mindmap_view::MindmapPluginFactory),
+        Box::new(textora_mindmap::mindmap_view::MindmapPluginFactory),
     );
     #[cfg(feature = "markdown")]
     register_plugin_factory(
@@ -135,6 +135,11 @@ pub(crate) fn build_product_workspace() -> Workspace {
     let routes = ViewRouteTable::new(routes, &registered_plugin_ids)
         .expect("textora product routes must reference unique priorities and registered plugins");
 
+    (registry, routes)
+}
+
+pub(crate) fn build_product_workspace() -> Workspace {
+    let (registry, routes) = product_editor_plugins();
     Workspace::with_plugins(registry, routes)
 }
 
@@ -143,19 +148,14 @@ pub(crate) fn build_product_editor_runtime(
     theme: &ui::Theme,
     snapshots_directory: &std::path::Path,
 ) -> Result<EditorRuntime, EditorRuntimeError> {
-    let empty_routes = ViewRouteTable::new(Vec::new(), &HashSet::new())
-        .expect("an empty migration route table must be valid");
-    EditorRuntime::new_with_model(
-        EditorRuntimeConfig {
-            plugin_registry: ui::plugin::PluginRegistry::new(),
-            view_routes: empty_routes,
-            initial_settings: settings.clone(),
-            initial_theme: theme.clone(),
-            snapshots_directory: snapshots_directory.to_owned(),
-        },
-        build_product_workspace(),
-        Default::default(),
-    )
+    let (plugin_registry, view_routes) = product_editor_plugins();
+    EditorRuntime::new(EditorRuntimeConfig {
+        plugin_registry,
+        view_routes,
+        initial_settings: settings.clone(),
+        initial_theme: theme.clone(),
+        snapshots_directory: snapshots_directory.to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -163,7 +163,7 @@ mod product_runtime_assembly_tests {
     #[test]
     fn product_factory_keeps_plugin_registration_outside_shared_shell() {
         let source = include_str!("app_init.rs");
-        assert!(source.contains("build_product_workspace"));
+        assert!(source.contains("EditorRuntime::new(EditorRuntimeConfig"));
         assert!(source.contains("register_plugin_factory"));
     }
 }
@@ -249,7 +249,7 @@ impl App {
         // scale factor is known.  We store None here and spawn the worker
         // after scale setup in init_window.
 
-        let workspace_store = crate::workspace_store::WorkspaceStore::new(
+        let workspace_store = appkit_core::workspace::store::WorkspaceStore::new(
             paths.workspace_file.clone(),
             paths.pinned_paths_file.clone(),
             paths.snapshots_dir.clone(),

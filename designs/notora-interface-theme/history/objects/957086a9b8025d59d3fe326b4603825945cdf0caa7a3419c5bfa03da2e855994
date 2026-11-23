@@ -1,0 +1,44 @@
+<!-- @dsCard group="控件" height=160 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>SearchField — 预览</title>
+<style>
+  html, body { margin:0; height:100%; }
+  body { background:var(--surface-window); color:var(--ink); font-family:var(--font-sans); -webkit-font-smoothing:antialiased; }
+  .stage { box-sizing:border-box; height:100%; padding:20px 24px; display:flex; flex-direction:column; gap:12px; justify-content:center; }
+  .item { display:flex; flex-direction:column; gap:4px; }
+  .cap { font-size:11px; line-height:16px; color:var(--ink-muted); }
+  .field { box-sizing:border-box; width:280px; height:32px; border-radius:8px; border:1px solid var(--control-border);
+           background:var(--control-bg); display:flex; align-items:center; padding:0 8px; gap:0; }
+  .field:focus-within { border-color:var(--focus-ring); }
+  .lead { width:24px; height:16px; flex:none; display:flex; align-items:center; color:var(--ink-muted); }
+  .lead svg { width:16px; height:16px; }
+  .text { flex:1; min-width:0; border:0; outline:0; background:transparent; color:var(--ink);
+          font:400 14px/20px var(--font-sans); padding:0; }
+  .text::placeholder { color:var(--ink-muted); opacity:1; }
+  .clear { width:20px; height:20px; flex:none; display:flex; align-items:center; justify-content:center; color:var(--ink-muted); }
+  .clear svg { width:14px; height:14px; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="item">
+    <span class="cap">默认</span>
+    <div class="field">
+      <span class="lead"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span>
+      <input class="text" type="text" placeholder="搜索笔记..." aria-label="搜索笔记">
+    </div>
+  </div>
+  <div class="item">
+    <span class="cap">已输入</span>
+    <div class="field">
+      <span class="lead"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></span>
+      <input class="text" type="text" value="产品评审" aria-label="搜索笔记">
+      <span class="clear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

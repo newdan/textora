@@ -21,9 +21,6 @@ pub mod style;
 pub mod typography;
 pub mod view;
 
-pub mod mindmap_view;
-pub mod mmf;
-
 use ui::core::paint::DrawList;
 
 /// Clamp a byte index to a valid char boundary in `s` (snap left).
@@ -102,7 +99,7 @@ pub fn render_markdown_with_highlighter(
 ) -> DrawList {
     let parsed = parser::parse_markdown(src);
     let doc = builder::MarkdownDoc::build(&parsed, style);
-    let string_doc = core::document::StringDocView::new(src);
+    let string_doc = textora_core::document::StringDocView::new(src);
     let layout = layout::layout_doc_with_shaper_for_rendering(
         &doc.blocks,
         style,
@@ -130,7 +127,7 @@ pub fn render_markdown_with_highlighter(
 pub fn markdown_content_height(src: &str, style: &style::MarkdownStyle, viewport_w: f32) -> f32 {
     let parsed = parser::parse_markdown(src);
     let doc = builder::MarkdownDoc::build(&parsed, style);
-    let string_doc = core::document::StringDocView::new(src);
+    let string_doc = textora_core::document::StringDocView::new(src);
     let laid_out = layout::layout_doc(&doc.blocks, style, viewport_w, &string_doc);
     laid_out.total_height
 }

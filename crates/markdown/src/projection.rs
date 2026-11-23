@@ -76,7 +76,7 @@ pub(crate) struct TextProjectionBuilder {
     text: String,
     spans: Vec<ProjectionSpan>,
     char_anchors: Vec<SourceAnchor>,
-    pending_gap_start: Option<usize>,
+    pending_gap: Option<Range<usize>>,
     truncated_terminal_anchor: Option<SourceAnchor>,
 }
 
@@ -134,12 +134,12 @@ impl TextProjectionBuilder {
 
     fn flush_pending_gap(&mut self, next_source_start: usize) {
         self.truncated_terminal_anchor = None;
-        if let Some(gap_start) = self.pending_gap_start.take() {
+        if let Some(gap) = self.pending_gap.take() {
             let visual_start = self.text.len();
             self.text.push(' ');
-            self.char_anchors.push(SourceAnchor::upstream(gap_start));
+            self.char_anchors.push(SourceAnchor::upstream(gap.start));
             self.spans.push(ProjectionSpan {
-                source_range: gap_start..next_source_start,
+                source_range: gap.start..next_source_start.max(gap.end),
                 visual_range: visual_start..self.text.len(),
                 kind: ProjectionSpanKind::Collapsed,
             });
@@ -147,7 +147,7 @@ impl TextProjectionBuilder {
     }
 
     pub(crate) fn push_soft_break(&mut self, event_range: Range<usize>) {
-        self.pending_gap_start = Some(event_range.start);
+        self.pending_gap = Some(event_range);
     }
 
     pub(crate) fn trim_trailing_newline(&mut self) {
@@ -172,6 +172,9 @@ impl TextProjectionBuilder {
     }
 
     pub(crate) fn finish(mut self, source_end: usize) -> ProjectedText {
+        if let Some(gap) = self.pending_gap.clone() {
+            self.flush_pending_gap(gap.end);
+        }
         let last_span_source_end = self.spans.last().map(|span| span.source_range.end);
         let terminal_anchor = self.truncated_terminal_anchor.take().unwrap_or_else(|| {
             SourceAnchor::downstream(last_span_source_end.unwrap_or(source_end))

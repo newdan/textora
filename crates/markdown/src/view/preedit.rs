@@ -207,7 +207,7 @@ fn render_engine(
     };
     let style = settings.style_at_dpi(theme, dpi_scale);
     engine.toc_max_depth = settings.toc_max_depth;
-    let string_doc = core::document::StringDocView::new(source);
+    let string_doc = textora_core::document::StringDocView::new(source);
     let (mut dl, _) = engine.render(
         theme,
         bounds.w,
@@ -421,7 +421,7 @@ mod tests {
         let source = view.source.clone();
         ViewPlugin::render(
             view,
-            &core::document::StringDocView::new(&source),
+            &textora_core::document::StringDocView::new(&source),
             ui::Rect::new(0.0, 0.0, 800.0, 600.0),
             &ui::theme::test_theme(),
             &mut shaper,

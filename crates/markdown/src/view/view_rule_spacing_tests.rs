@@ -6,7 +6,7 @@ const NEAR_BOUNDARY_RATIO: f32 = 0.25;
 const FAR_BOUNDARY_RATIO: f32 = 0.75;
 
 fn render_rule_fixture(view: &mut MarkdownEditorView, source: &str, dpi_scale: f32) {
-    let document = core::document::StringDocView::new(source);
+    let document = textora_core::document::StringDocView::new(source);
     let theme = ui::theme::test_theme();
     let bounds = ui::Rect::new(0.0, 0.0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     let mut shaper = shaping::Shaper::new().expect("rule interaction tests require a shaper");

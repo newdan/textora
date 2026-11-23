@@ -227,7 +227,7 @@ pub(crate) fn layout_table(block: &BlockNode, ctx: &mut LayoutCtx, columns: usiz
 /// falls back to recursively collecting from children.
 pub(crate) fn collect_text_lines<'a>(
     block: &'a BlockNode,
-    doc: &'a dyn core::document::DocView,
+    doc: &'a dyn textora_core::document::DocView,
 ) -> Vec<std::borrow::Cow<'a, str>> {
     let lines = block.lines(doc);
     if !lines.is_empty() {
@@ -243,7 +243,7 @@ pub(crate) fn collect_text_lines<'a>(
 /// Collect text lines with their style spans from a block.
 pub(crate) fn collect_text_lines_with_styles<'a>(
     block: &'a BlockNode,
-    doc: &'a dyn core::document::DocView,
+    doc: &'a dyn textora_core::document::DocView,
 ) -> (Vec<std::borrow::Cow<'a, str>>, Vec<Vec<StyleSpan>>) {
     let lines = block.lines(doc);
     if !lines.is_empty() {
@@ -274,7 +274,7 @@ pub(crate) fn measure_column_demand(
     text_spacing_mode: ui::typography::TextSpacingMode,
     font_family: Option<&str>,
     mut shaper: Option<&mut Shaper>,
-    doc: &dyn core::document::DocView,
+    doc: &dyn textora_core::document::DocView,
 ) -> Vec<f32> {
     let mut demand = vec![0.0f32; columns];
 

@@ -5,7 +5,7 @@
 
 use std::ops::Range;
 
-use core::buffer::search::SearchOptions;
+use textora_core::buffer::search::SearchOptions;
 
 /// Holds the state of an active search for a single document.
 #[derive(Debug, Clone, Default)]

@@ -46,18 +46,10 @@ fn notora_app_remains_a_thin_composition_root() {
 fn runtime_state_is_owned_by_named_components() {
     let runtime_source = include_str!("../src/runtime.rs");
     let document_runtime_source = include_str!("../src/runtime/document_runtime.rs");
-    let document_command_executor_source =
-        include_str!("../src/runtime/document_command_executor.rs");
-    let notora_effect_executor_source = include_str!("../src/runtime/notora_effect_executor.rs");
     let frame_runtime_source = include_str!("../src/runtime/frame_runtime.rs");
     let action_runtime_source = include_str!("../src/runtime/action_runtime.rs");
     let persistence_runtime_source = include_str!("../src/runtime/persistence_runtime.rs");
     let product_coordinator_source = include_str!("../src/app/product_event_coordinator.rs");
-    let document_interpreter_source = include_str!("../src/app/document_completion_interpreter.rs");
-    let persistence_interpreter_source =
-        include_str!("../src/app/persistence_completion_interpreter.rs");
-    let workspace_interpreter_source =
-        include_str!("../src/app/workspace_completion_interpreter.rs");
     let deadline_coordinator_source = include_str!("../src/app/deadline_coordinator.rs");
     let effect_executor_source = include_str!("../src/effect_executor.rs");
     let runtime_fields_start = runtime_source
@@ -83,11 +75,6 @@ fn runtime_state_is_owned_by_named_components() {
     assert!(document_runtime_source.contains("pending_conflict_retries:"));
     assert!(document_runtime_source.contains("pending_metadata_mutations:"));
     assert!(!product_coordinator_source.contains("NotoraRuntime"));
-    assert!(!document_interpreter_source.contains("NotoraRuntime"));
-    assert!(!persistence_interpreter_source.contains("NotoraRuntime"));
-    assert!(!workspace_interpreter_source.contains("NotoraRuntime"));
-    assert!(!document_command_executor_source.contains("NotoraRuntime"));
-    assert!(!notora_effect_executor_source.contains("NotoraRuntime"));
     assert!(!deadline_coordinator_source.contains("NotoraRuntime"));
     assert!(!runtime_source.contains("fn apply_product_event"));
     assert!(!runtime_source.contains("DocumentCommand::"));
@@ -119,6 +106,7 @@ fn product_events_use_the_shared_runtime_and_domain_completions() {
     let product_source = include_str!("../src/product.rs");
     let action_runtime_source = include_str!("../src/runtime/action_runtime.rs");
     let coordinator_source = include_str!("../src/app/product_event_coordinator.rs");
+    let persistence_source = include_str!("../src/runtime/persistence_runtime.rs");
 
     assert!(product_source.contains("ProductEventInbox<NotoraProductEvent>"));
     assert!(product_source.contains("Workspace(WorkspaceCompletionEnvelope)"));
@@ -126,13 +114,27 @@ fn product_events_use_the_shared_runtime_and_domain_completions() {
     assert!(product_source.contains("Persistence(PersistenceCompletion)"));
     assert!(!product_source.contains("std::sync::mpsc"));
     assert!(action_runtime_source.contains("use appkit_shell::{DrainStart, EventPump}"));
-    assert!(coordinator_source.contains("trait WorkspaceCompletionTarget"));
-    assert!(coordinator_source.contains("trait DocumentCompletionTarget"));
-    assert!(coordinator_source.contains("trait PersistenceCompletionTarget"));
+    assert!(!coordinator_source.contains("trait "));
+    assert!(persistence_source.contains("fn apply_completion("));
     assert!(!coordinator_source.contains("WorkspaceCompletion::"));
     assert!(!coordinator_source.contains("DocumentCompletion::"));
     assert!(!coordinator_source.contains("PersistenceCompletion::"));
     assert!(!std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_pump.rs").exists());
+}
+
+#[test]
+fn commands_and_completions_do_not_callback_into_the_whole_runtime() {
+    let runtime_source = include_str!("../src/runtime.rs");
+    for source in [
+        runtime_source,
+        include_str!("../src/runtime/document_commands.rs"),
+        include_str!("../src/runtime/document_completions.rs"),
+        include_str!("../src/runtime/workspace_completions.rs"),
+        include_str!("../src/runtime/product_effects.rs"),
+    ] {
+        assert!(!source.contains("Target for NotoraRuntime"));
+        assert!(!source.contains("Target>"));
+    }
 }
 
 #[test]
@@ -161,7 +163,7 @@ fn non_editor_focus_and_modal_block_document_ime() {
 
 #[test]
 fn modal_new_document_menu_and_tooltip_are_painted_after_the_editor() {
-    let source = include_str!("../src/render.rs");
+    let source = include_str!("../src/render/painting.rs");
     let editor_position = source
         .find("frame.paint_editor_with")
         .expect("shell should paint the editor through EditorFrame");

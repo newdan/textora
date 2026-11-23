@@ -53,7 +53,7 @@ pub(crate) fn color_to_rgba(color: [f32; 4]) -> [u8; 4] {
 pub(crate) fn expose_failed_math(
     projected: &mut ProjectedText,
     styles: &mut Vec<StyleSpan>,
-    document: &dyn core::document::DocView,
+    document: &dyn textora_core::document::DocView,
     font_size: f32,
     foreground: [f32; 4],
     force_source: bool,

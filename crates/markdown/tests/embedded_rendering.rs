@@ -1,8 +1,6 @@
-extern crate core as doc_core;
-
 use std::borrow::Cow;
 
-use doc_core::document::{DocView, DocViewMut, StringDocView};
+use textora_core::document::{DocView, DocViewMut, StringDocView};
 use textora_markdown::style::MarkdownStyle;
 use textora_markdown::view::{MarkdownEditorView, MarkdownRenderSettings, MarkdownView};
 use ui::core::paint::{DrawCmd, DrawList};

@@ -16,7 +16,7 @@ wgpu.workspace = true
 unicode_categories = { workspace = true }
 unicode-segmentation.workspace = true
 winit.workspace = true
-core.workspace = true
+textora_core.workspace = true
 render.workspace = true
 shaping.workspace = true
 serde.workspace = true

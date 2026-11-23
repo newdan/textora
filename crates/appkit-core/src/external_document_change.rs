@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use core::disk_revision::DiskRevision;
+use textora_core::disk_revision::DiskRevision;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExternalDocumentChange {
@@ -74,8 +74,8 @@ fn same_renamed_file(baseline: &DiskRevision, candidate: &DiskRevision) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::disk_revision::read_disk_revision;
     use std::fs;
+    use textora_core::disk_revision::read_disk_revision;
 
     fn revision(path: &std::path::Path) -> DiskRevision {
         read_disk_revision(path)

@@ -1,0 +1,56 @@
+<!-- @dsCard group="浮层" height=300 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Dialog — 预览</title>
+<style>
+  html, body { margin:0; height:100%; }
+  body { font-family:var(--font-sans); color:var(--ink); -webkit-font-smoothing:antialiased; }
+  .app { position:relative; height:100%; display:flex; overflow:hidden; background:var(--surface-window); }
+  .rail { width:220px; height:100%; background:var(--surface-window); }
+  .list { width:340px; height:100%; background:var(--surface-navigation); }
+  .sheet { flex:1; height:100%; background:var(--surface-editor); }
+  .scrim { position:absolute; inset:0; background:var(--scrim); }
+  .dialog { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:380px; height:200px;
+            border-radius:8px; background:var(--surface-overlay); overflow:hidden; display:flex; flex-direction:column; }
+  .head { box-sizing:border-box; height:28px; flex:none; padding:0 8px 0 12px; display:flex; align-items:center;
+          background:var(--surface-navigation); border-bottom:1px solid var(--divider); }
+  .head h2 { margin:0; flex:1; font-size:14px; line-height:20px; font-weight:600; }
+  .close { width:20px; height:20px; display:flex; align-items:center; justify-content:center; color:var(--ink-muted); }
+  .close svg { width:14px; height:14px; }
+  .body { flex:1; padding:16px; display:flex; flex-direction:column; gap:6px; }
+  .field-label { font-size:12px; line-height:16px; color:var(--ink-muted); }
+  .input { box-sizing:border-box; width:100%; height:32px; padding:0 8px; border:1px solid var(--control-border);
+           border-radius:8px; background:var(--control-bg); font:400 14px/20px var(--font-sans); color:var(--ink); outline:0; }
+  .hint { margin:4px 0 0; font-size:12px; line-height:16px; color:var(--ink-muted); }
+  .foot { flex:none; padding:0 16px 16px; display:flex; justify-content:flex-end; gap:8px; }
+  .btn { box-sizing:border-box; height:32px; padding:0 8px; border-radius:8px; border:1px solid var(--button-border);
+         background:var(--button-bg); color:var(--ink); font:400 14px/20px var(--font-sans); }
+  .btn.hover { background:var(--button-hover); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="rail"></div>
+  <div class="list"></div>
+  <div class="sheet"></div>
+  <div class="scrim"></div>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dlg-title">
+    <div class="head">
+      <h2 id="dlg-title">新建笔记</h2>
+      <span class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
+    </div>
+    <div class="body">
+      <label class="field-label" for="note-title">标题</label>
+      <input class="input" id="note-title" value="产品评审">
+      <p class="hint">笔记会保存到「我的笔记 / 产品」。</p>
+    </div>
+    <div class="foot">
+      <button type="button" class="btn">取消</button>
+      <button type="button" class="btn hover">创建</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

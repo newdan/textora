@@ -241,26 +241,88 @@ pub(in crate::augmenter) fn contiguous_newline_count_before(source: &str, byte: 
     newline_count
 }
 
+fn quote_marker_count(prefix: &str) -> usize {
+    prefix.bytes().filter(|&byte| byte == b'>').count()
+}
+
+fn merge_boundary_delete_start(
+    source: &str,
+    boundary_start: usize,
+    context: &EnterContext,
+) -> usize {
+    if matches!(context, EnterContext::Heading { .. }) {
+        atx_heading_merge_end(source, boundary_start)
+    } else {
+        hard_break_marker_ending_at(source, boundary_start)
+            .map_or(boundary_start, |marker| marker.start)
+    }
+}
+
+fn backspace_quote_boundary(
+    source: &str,
+    boundary_start: usize,
+    current_byte: usize,
+    current_prefix: &str,
+    context: &EnterContext,
+) -> Option<EditAugmentation> {
+    let prev_prefix = match context {
+        EnterContext::BlockQuoteLine { continuation_prefix, .. }
+        | EnterContext::Heading { continuation_prefix, .. } => Some(continuation_prefix),
+        _ => None,
+    }?;
+    if quote_marker_count(prev_prefix) != quote_marker_count(current_prefix)
+        || prev_prefix != current_prefix
+    {
+        return None;
+    }
+    let delete_start = merge_boundary_delete_start(source, boundary_start, context);
+    let aug = EditAugmentation {
+        insert_text: Some(String::new()),
+        replace_range: Some(delete_start..current_byte),
+        cursor_byte_after: delete_start,
+    };
+    debug_assert_augmentation(&aug, source);
+    Some(aug)
+}
+
 pub(in crate::augmenter) fn backspace_paragraph_boundary(
     source: &str,
     current_byte: usize,
 ) -> Option<EditAugmentation> {
     let (line_start, _, line_end) = locate_source_line_bounds(source, current_byte)?;
+    if line_start == 0 || line_start == line_end {
+        return None;
+    }
     let at_visual_line_start = current_byte == line_start
         || (current_byte < line_end
             && !source[current_byte..].starts_with([' ', '\t', '\r', '\n'])
             && source[line_start..current_byte].bytes().all(|byte| matches!(byte, b' ' | b'\t')));
-    if !at_visual_line_start
-        || line_start == line_end
-        || !matches!(
-            classify_enter_context(source, current_byte),
-            EnterContext::TopLevelParagraphEnd
-                | EnterContext::ParagraphInterior
-                | EnterContext::ParagraphStart { .. }
-        )
-    {
+    let at_quote_content_start = !at_visual_line_start
+        && line_start < current_byte
+        && current_byte < line_end
+        && !source[current_byte..].starts_with([' ', '\t', '\r', '\n'])
+        && source[line_start..current_byte].bytes().any(|byte| byte == b'>')
+        && source[line_start..current_byte].bytes().all(|byte| matches!(byte, b' ' | b'\t' | b'>'));
+    if !at_visual_line_start && !at_quote_content_start {
         return None;
     }
+
+    let current_context = classify_enter_context(source, current_byte);
+    let current_quote_prefix = if at_quote_content_start {
+        let EnterContext::BlockQuoteLine { continuation_prefix, .. } = &current_context else {
+            return None;
+        };
+        Some(continuation_prefix.clone())
+    } else if matches!(
+        current_context,
+        EnterContext::TopLevelParagraphEnd
+            | EnterContext::ParagraphInterior
+            | EnterContext::ParagraphStart { .. }
+    ) {
+        None
+    } else {
+        return None;
+    };
 
     let source_bytes = source.as_bytes();
     let mut boundary_start = line_start;
@@ -282,17 +344,22 @@ pub(in crate::augmenter) fn backspace_paragraph_boundary(
     }
 
     let context = classify_enter_context(source, boundary_start);
+    if let Some(current_prefix) = current_quote_prefix {
+        return backspace_quote_boundary(
+            source,
+            boundary_start,
+            current_byte,
+            &current_prefix,
+            &context,
+        );
+    }
+
     match context {
         EnterContext::TopLevelParagraphEnd
         | EnterContext::ParagraphInterior
         | EnterContext::ParagraphStart { .. }
         | EnterContext::Heading { .. } => {
-            let delete_start = if matches!(context, EnterContext::Heading { .. }) {
-                atx_heading_merge_end(source, boundary_start)
-            } else {
-                hard_break_marker_ending_at(source, boundary_start)
-                    .map_or(boundary_start, |marker| marker.start)
-            };
+            let delete_start = merge_boundary_delete_start(source, boundary_start, &context);
             let aug = EditAugmentation {
                 insert_text: Some(String::new()),
                 replace_range: Some(delete_start..current_byte),
@@ -360,10 +427,10 @@ pub(in crate::augmenter) fn guard_unmergeable_leaf_boundary(
     Some(aug)
 }
 
-pub(in crate::augmenter) fn backspace_join_hard_break_line(
+pub(in crate::augmenter) fn matching_hard_break_boundary_before(
     source: &str,
     current_byte: usize,
-) -> Option<EditAugmentation> {
+) -> Option<(std::ops::Range<usize>, bool)> {
     let (line_start, _, _) = locate_source_line_bounds(source, current_byte)?;
     let continuation_prefix = source.get(line_start..current_byte)?;
     if !continuation_prefix_is_joinable(continuation_prefix)
@@ -385,6 +452,22 @@ pub(in crate::augmenter) fn backspace_join_hard_break_line(
                         line_start,
                         &ContainerPath::default(),
                     )));
+    Some((marker.start..current_byte, matches_previous))
+}
+
+pub(in crate::augmenter) fn hard_break_boundary_before(
+    source: &str,
+    current_byte: usize,
+) -> Option<std::ops::Range<usize>> {
+    matching_hard_break_boundary_before(source, current_byte)
+        .and_then(|(boundary, matched)| matched.then_some(boundary))
+}
+
+pub(in crate::augmenter) fn backspace_join_hard_break_line(
+    source: &str,
+    current_byte: usize,
+) -> Option<EditAugmentation> {
+    let (boundary, matches_previous) = matching_hard_break_boundary_before(source, current_byte)?;
     if !matches_previous {
         return Some(EditAugmentation {
             insert_text: Some(String::new()),
@@ -392,10 +475,11 @@ pub(in crate::augmenter) fn backspace_join_hard_break_line(
             cursor_byte_after: current_byte,
         });
     }
+    let cursor_after = boundary.start;
     let aug = EditAugmentation {
         insert_text: Some(String::new()),
-        replace_range: Some(marker.start..current_byte),
-        cursor_byte_after: marker.start,
+        replace_range: Some(boundary),
+        cursor_byte_after: cursor_after,
     };
     debug_assert_augmentation(&aug, source);
     Some(aug)
@@ -413,7 +497,7 @@ fn previous_container_prefix(source: &str, line_start: usize) -> Option<String> 
     Some(canonical_container_prefix(source, previous_content_start))
 }
 
-fn continuation_prefix_matches_prefix(
+pub(in crate::augmenter) fn continuation_prefix_matches_prefix(
     previous_prefix: Option<&str>,
     continuation_prefix: &str,
 ) -> bool {

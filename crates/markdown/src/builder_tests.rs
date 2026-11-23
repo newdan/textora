@@ -45,7 +45,7 @@ fn build_simple_paragraph() {
     let has_paragraph = doc.blocks.iter().any(|b| matches!(b.kind, BlockKind::Paragraph));
     assert!(has_paragraph, "should have a Paragraph block");
     // Check that text content is stored
-    let string_doc = core::document::StringDocView::new("hello world");
+    let string_doc = textora_core::document::StringDocView::new("hello world");
     let text: Vec<std::borrow::Cow<'_, str>> =
         doc.blocks.iter().flat_map(|b| b.lines(&string_doc)).collect();
     assert!(
@@ -499,7 +499,7 @@ fn block_source_range_covers_heading() {
 // ===== NovelStructure 测试 =====
 
 fn novel_scan(text: &str) -> NovelStructure {
-    NovelStructure::scan(&core::document::StringDocView::new(text))
+    NovelStructure::scan(&textora_core::document::StringDocView::new(text))
 }
 
 #[test]
@@ -591,8 +591,8 @@ fn novel_scan_matches_build_from_novel_doc() {
     // 验证 scan() 产生的 block kinds 与 byte ranges 和 build_from_novel_doc 一致
     let text =
         "《小说》\n\n第1章 序\n\n这是第一节内容。\n还有更多。\n\n第2章 开篇\n\n第二节的内容！";
-    let ns = NovelStructure::scan(&core::document::StringDocView::new(text));
-    let md = MarkdownDoc::build_from_novel_doc(&core::document::StringDocView::new(text));
+    let ns = NovelStructure::scan(&textora_core::document::StringDocView::new(text));
+    let md = MarkdownDoc::build_from_novel_doc(&textora_core::document::StringDocView::new(text));
 
     let ns_kinds: Vec<&BlockKind> = ns.blocks().iter().map(|b| &b.kind).collect();
     let md_kinds: Vec<&BlockKind> = md.blocks.iter().map(|b| &b.kind).collect();
@@ -728,4 +728,131 @@ fn nested_inline_styles_expand_outer_and_inner_delimiters() {
         None,
     );
     assert_eq!(expanded.text, "ab**cd**");
+}
+
+#[cfg(feature = "rich-markdown")]
+#[test]
+fn soft_break_before_hard_break_or_br_keeps_text_and_projection_in_sync() {
+    for source in ["hello\n<br>\nworld", "hello\n\\\nworld"] {
+        let parsed = parse_markdown(source);
+        let doc = MarkdownDoc::build(&parsed, &default_style());
+        let block = &doc.blocks[0];
+        assert_eq!(
+            block.text_lines.len(),
+            block.projected_lines.len(),
+            "line count mismatch for {source:?}"
+        );
+        for (line_idx, (text_line, projected)) in
+            block.text_lines.iter().zip(&block.projected_lines).enumerate()
+        {
+            assert_eq!(
+                projected.text, *text_line,
+                "line {line_idx} text/projection mismatch for {source:?}"
+            );
+            projected
+                .validate(source)
+                .expect("soft break before hard break must retain valid projection");
+        }
+    }
+}
+
+#[cfg(feature = "rich-markdown")]
+#[test]
+fn tight_list_item_preserves_inline_html_break_as_logical_line_break() {
+    for br in ["<br>", "<BR/>", "<br />"] {
+        let source = format!("- first{br}second");
+        let doc = MarkdownDoc::build(&parse_markdown(&source), &default_style());
+        assert_eq!(doc.blocks.len(), 1, "tight list must remain a single ListItem for {source:?}");
+        let item = &doc.blocks[0];
+        assert!(matches!(item.kind, BlockKind::ListItem { .. }));
+        assert!(item.children.is_empty(), "tight list item must not be split into paragraphs");
+        assert_eq!(item.text_lines, ["first", "second"]);
+        for projected in &item.projected_lines {
+            projected.validate(&source).expect("tight list line projection must validate");
+        }
+    }
+
+    let leading_br = "- <br>second";
+    let doc = MarkdownDoc::build(&parse_markdown(leading_br), &default_style());
+    assert_eq!(doc.blocks[0].text_lines, ["", "second"]);
+    for projected in &doc.blocks[0].projected_lines {
+        projected.validate(leading_br).expect("leading br in tight list must validate");
+    }
+
+    let with_nested = "- first<br>\n  - nested";
+    let nested_doc = MarkdownDoc::build(&parse_markdown(with_nested), &default_style());
+    assert_eq!(nested_doc.blocks[0].text_lines, ["first", ""]);
+    assert_eq!(nested_doc.blocks[0].children.len(), 1);
+}
+
+#[cfg(feature = "rich-markdown")]
+#[test]
+fn consecutive_hard_breaks_and_br_preserve_empty_logical_lines() {
+    fn leaf_lines(block: &BlockNode) -> &[String] {
+        if !block.text_lines.is_empty() {
+            &block.text_lines
+        } else {
+            leaf_lines(&block.children[0])
+        }
+    }
+    fn leaf_projections(block: &BlockNode) -> &[crate::projection::ProjectedText] {
+        if !block.projected_lines.is_empty() {
+            &block.projected_lines
+        } else {
+            leaf_projections(&block.children[0])
+        }
+    }
+
+    for (source, expected) in [
+        ("a<br><br>b", vec!["a", "", "b"]),
+        ("a\\\n\\\nb", vec!["a", "", "b"]),
+        ("a<br>  \nb", vec!["a", "", "b"]),
+        ("> a\\\n> \\\n> b", vec!["a", "", "b"]),
+        ("- a\\\n  \\\n  b", vec!["a", "", "b"]),
+        ("a<br>\nb", vec!["a", "b"]),
+        ("a<br>\n<br>b", vec!["a", "", "b"]),
+    ] {
+        let doc = MarkdownDoc::build(&parse_markdown(source), &default_style());
+        assert_eq!(leaf_lines(&doc.blocks[0]), expected.as_slice(), "source={source:?}");
+        let projections = leaf_projections(&doc.blocks[0]);
+        assert_eq!(projections.len(), expected.len(), "source={source:?}");
+        let mut all_bytes = Vec::new();
+        for (line_idx, projected) in projections.iter().enumerate() {
+            assert_eq!(projected.text, expected[line_idx], "source={source:?}");
+            projected.validate(source).expect("projected line must be valid");
+            all_bytes.extend(projected.boundaries.iter().map(|anchor| anchor.byte));
+        }
+        assert!(
+            all_bytes.windows(2).all(|pair| pair[0] <= pair[1]),
+            "anchors across consecutive break lines must be non-decreasing for {source:?}: {all_bytes:?}"
+        );
+    }
+}
+
+#[cfg(feature = "rich-markdown")]
+#[test]
+fn trailing_inline_html_break_retains_editable_continuation_line() {
+    let heading = "# Title<br>";
+    let heading_doc =
+        MarkdownDoc::build_for_editing(&parse_markdown(heading), &default_style(), heading);
+    assert_eq!(heading_doc.blocks[0].text_lines, ["Title", ""]);
+    assert_eq!(heading_doc.blocks[0].projected_lines.len(), 2);
+    heading_doc.blocks[0].projected_lines[1].validate(heading).expect("heading tail validates");
+
+    let empty_heading = "# <br>";
+    let empty_heading_doc = MarkdownDoc::build_for_editing(
+        &parse_markdown(empty_heading),
+        &default_style(),
+        empty_heading,
+    );
+    assert_eq!(empty_heading_doc.blocks[0].text_lines, ["", ""]);
+    assert_eq!(empty_heading_doc.blocks[0].projected_lines.len(), 2);
+
+    let table = "| a |\n| --- |\n| cell<br> |";
+    let table_doc = MarkdownDoc::build_for_editing(&parse_markdown(table), &default_style(), table);
+    let body_row = &table_doc.blocks[0].children[1];
+    let body_cell = &body_row.children[0];
+    assert_eq!(body_cell.text_lines, ["cell", ""]);
+    assert_eq!(body_cell.projected_lines.len(), 2);
+    body_cell.projected_lines[1].validate(table).expect("table cell tail validates");
 }

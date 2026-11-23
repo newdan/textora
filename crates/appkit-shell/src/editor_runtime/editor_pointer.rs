@@ -1,14 +1,14 @@
 //! 产品无关的编辑器指针命中与选择会话。
 
 use ui::core::widget::PointerClickKind;
-use ui::plugin::EditHitTarget;
-use ui::plugin::{CanvasDragPhase, CanvasDragRequest, CanvasDragResponse};
+use ui::plugin::{CanvasDragPhase, CanvasDragRequest, CanvasDragResponse, EditHitTarget, EditPlan};
 
 use super::input_session::TextSelectionGranularity;
 use super::{EditorInputContext, EditorOutcome, EditorPointerOutcome, EditorRuntime, MouseCapture};
+use crate::cursor_motion::{hit_test_row_byte, hit_test_visual_row};
 use crate::event::ShellEffect;
 use crate::mouse_state::{CanvasDragEligibility, CanvasDragSession};
-use crate::tab_session::TabSessionMut;
+use crate::tab_session::{TabSession, TabSessionMut};
 
 const CANVAS_DRAG_THRESHOLD_PX: f32 = 5.0;
 
@@ -206,7 +206,7 @@ impl EditorRuntime {
         let tab_id = self.active_tab_id()?;
         let dpi = self.scale_factor() as f32;
         let bounds = super::editor_painter::plugin_bounds(editor_rect, dpi, true);
-        let edit_plan = {
+        let source_range = {
             let tab = self.tab_session(tab_id)?;
             if !tab.is_canvas() || !tab.runtime.plugin.handles_own_rendering() {
                 return None;
@@ -216,16 +216,24 @@ impl EditorRuntime {
             else {
                 return None;
             };
-            tab.canvas_control_edit_plan(source_range, tab.document.generation())
+            source_range
         };
+        Some(self.handle_canvas_control(source_range))
+    }
+
+    /// Apply the control identified by a product's semantic pointer hit test.
+    pub fn handle_canvas_control(&mut self, source_range: std::ops::Range<usize>) -> EditorOutcome {
         self.end_pointer_capture();
-        let Some(ui::plugin::EditPlan::Apply(transaction)) = edit_plan else {
-            return Some(redraw_outcome());
+        let plan = self.active_tab_id().and_then(|tab_id| {
+            let tab = self.tab_session(tab_id)?;
+            tab.canvas_control_edit_plan(source_range, tab.document.generation())
+        });
+        let Some(EditPlan::Apply(transaction)) = plan else {
+            return redraw_outcome();
         };
-        Some(
-            self.model_session
-                .apply_active_edit_transaction(transaction, self.editor_line_height()),
-        )
+        self.model_session
+            .apply_active_edit_transaction(transaction, self.editor_line_height())
+            .merge(redraw_outcome())
     }
 
     fn begin_canvas_source_drag(
@@ -277,30 +285,13 @@ impl EditorRuntime {
         editor_rect: ui::Rect,
         position: (f32, f32),
     ) -> EditorOutcome {
-        let (phase, session) = {
-            let Some(session) = self.input_session.canvas_drag_session_mut() else {
-                return EditorOutcome::default();
-            };
-            if session.eligibility == CanvasDragEligibility::Disabled {
-                return EditorOutcome::default();
-            }
-            if !session.started {
-                let horizontal_distance = position.0 - session.pressed_at.0;
-                let vertical_distance = position.1 - session.pressed_at.1;
-                let threshold_squared = CANVAS_DRAG_THRESHOLD_PX * CANVAS_DRAG_THRESHOLD_PX;
-                if horizontal_distance * horizontal_distance + vertical_distance * vertical_distance
-                    <= threshold_squared
-                {
-                    return EditorOutcome::default();
-                }
-                session.started = true;
-                (CanvasDragPhase::Start, session.clone())
-            } else {
-                (CanvasDragPhase::Update, session.clone())
-            }
-        };
-        let response = self.dispatch_canvas_drag(editor_rect, position, phase, &session);
-        self.canvas_drag_response(phase, response)
+        let bounds =
+            super::editor_painter::plugin_bounds(editor_rect, self.scale_factor() as f32, true);
+        let request = self
+            .input_session
+            .canvas_drag_session_mut()
+            .and_then(|session| session.move_request(position, bounds));
+        request.map(|request| self.handle_canvas_drag_request(request)).unwrap_or_default()
     }
 
     fn finish_canvas_source_drag(
@@ -310,56 +301,31 @@ impl EditorRuntime {
     ) -> EditorOutcome {
         let session = self.input_session.take_canvas_drag_session();
         self.end_pointer_capture();
-        let Some(session) = session.filter(|session| session.started) else {
+        let bounds =
+            super::editor_painter::plugin_bounds(editor_rect, self.scale_factor() as f32, true);
+        let Some(request) = session.and_then(|session| session.release_request(position, bounds))
+        else {
             return redraw_outcome();
         };
-        let response =
-            self.dispatch_canvas_drag(editor_rect, position, CanvasDragPhase::Drop, &session);
-        let mut outcome = self.canvas_drag_response(CanvasDragPhase::Drop, response);
-        outcome.shell_effect = outcome.shell_effect.merge(ShellEffect::REDRAW);
-        outcome
+        self.handle_canvas_drag_request(request)
     }
 
-    fn dispatch_canvas_drag(
-        &mut self,
-        editor_rect: ui::Rect,
-        position: (f32, f32),
-        phase: CanvasDragPhase,
-        session: &CanvasDragSession,
-    ) -> CanvasDragResponse {
-        let Some(tab_id) = self.active_tab_id() else {
-            return CanvasDragResponse::Ignore;
-        };
-        let dpi = self.scale_factor() as f32;
-        let bounds = super::editor_painter::plugin_bounds(editor_rect, dpi, true);
-        let Some(mut tab) = self.tab_session_mut(tab_id) else {
-            return CanvasDragResponse::Ignore;
-        };
-        tab.handle_canvas_drag_plugin(CanvasDragRequest {
-            phase,
-            source_range: session.source_range.clone(),
-            pointer_x: position.0,
-            pointer_y: position.1,
-            pressed_x: session.pressed_at.0,
-            pressed_y: session.pressed_at.1,
-            offset_x: bounds.x,
-            offset_y: bounds.y,
-            source_generation: session.source_generation,
-        })
-    }
-
-    fn canvas_drag_response(
-        &mut self,
-        phase: CanvasDragPhase,
-        response: CanvasDragResponse,
-    ) -> EditorOutcome {
-        match response {
-            CanvasDragResponse::Ignore => EditorOutcome::default(),
-            CanvasDragResponse::Preview(_) => redraw_outcome(),
-            CanvasDragResponse::Apply(transaction) if phase == CanvasDragPhase::Drop => self
+    /// Route a captured drag to the active plugin and apply edits on drop.
+    pub fn handle_canvas_drag_request(&mut self, request: CanvasDragRequest) -> EditorOutcome {
+        let phase = request.phase;
+        let response = self
+            .active_tab_id()
+            .and_then(|tab_id| self.tab_session_mut(tab_id))
+            .map(|mut tab| tab.handle_canvas_drag_plugin(request))
+            .unwrap_or(CanvasDragResponse::Ignore);
+        match (phase, response) {
+            (CanvasDragPhase::Drop, CanvasDragResponse::Apply(transaction)) => self
                 .model_session
-                .apply_active_edit_transaction(transaction, self.editor_line_height()),
-            CanvasDragResponse::Apply(_) => EditorOutcome::default(),
+                .apply_active_edit_transaction(transaction, self.editor_line_height())
+                .merge(redraw_outcome()),
+            (CanvasDragPhase::Drop | CanvasDragPhase::Cancel, _)
+            | (_, CanvasDragResponse::Preview(_)) => redraw_outcome(),
+            _ => EditorOutcome::default(),
         }
     }
 
@@ -485,9 +451,7 @@ impl EditorRuntime {
             let Some(tab) = self.tab_session(tab_id) else {
                 return false;
             };
-            tab.hit_test_byte(position.0, position.1, bounds.x, bounds.y).or_else(|| {
-                (position.1 - bounds.y > tab.content_height()).then(|| tab.document.buffer_len())
-            })
+            tab.hit_test_plugin_byte_or_end(position, bounds)
         };
         let Some(candidate) = candidate else {
             return false;
@@ -514,13 +478,7 @@ impl EditorRuntime {
             let Some(tab) = self.tab_session(tab_id) else {
                 return false;
             };
-            let expanded_position = expanded_plugin_hit_position(
-                position,
-                tab.query_cursor_screen_rect(snapped_candidate),
-                bounds,
-            );
-            tab.hit_test_byte(expanded_position.0, expanded_position.1, bounds.x, bounds.y)
-                .unwrap_or(snapped_candidate)
+            tab.hit_test_expanded_plugin_byte(snapped_candidate, position, bounds)
         };
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return false;
@@ -555,12 +513,10 @@ impl EditorRuntime {
         let Some(tab_id) = self.active_tab_id() else {
             return;
         };
-        let Some(tab) = self.tab_session_mut(tab_id) else {
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return;
         };
-        if tab.document.cursor().selection_anchor == Some(tab.document.cursor_offset().to_usize()) {
-            tab.document.cursor_mut().selection_anchor = None;
-        }
+        tab.clear_collapsed_pointer_selection();
     }
 
     fn current_text_selection_range(&self) -> Option<std::ops::Range<usize>> {
@@ -569,6 +525,100 @@ impl EditorRuntime {
         let selection_anchor = tab.document.cursor().selection_anchor?;
         let cursor_offset = tab.document.cursor_offset().to_usize();
         Some(selection_anchor.min(cursor_offset)..selection_anchor.max(cursor_offset))
+    }
+}
+
+impl CanvasDragSession {
+    pub fn move_request(
+        &mut self,
+        position: (f32, f32),
+        bounds: ui::Rect,
+    ) -> Option<CanvasDragRequest> {
+        if self.eligibility == CanvasDragEligibility::Disabled {
+            return None;
+        }
+        if self.started {
+            return Some(self.request(CanvasDragPhase::Update, position, bounds));
+        }
+
+        let horizontal_distance = position.0 - self.pressed_at.0;
+        let vertical_distance = position.1 - self.pressed_at.1;
+        let distance_squared =
+            horizontal_distance * horizontal_distance + vertical_distance * vertical_distance;
+        if distance_squared > CANVAS_DRAG_THRESHOLD_PX * CANVAS_DRAG_THRESHOLD_PX {
+            self.started = true;
+            return Some(self.request(CanvasDragPhase::Start, position, bounds));
+        }
+        None
+    }
+
+    pub fn release_request(
+        &self,
+        position: (f32, f32),
+        bounds: ui::Rect,
+    ) -> Option<CanvasDragRequest> {
+        self.started.then(|| self.request(CanvasDragPhase::Drop, position, bounds))
+    }
+
+    pub fn cancel_request(&self, bounds: ui::Rect) -> Option<CanvasDragRequest> {
+        self.started.then(|| self.request(CanvasDragPhase::Cancel, self.pressed_at, bounds))
+    }
+
+    fn request(
+        &self,
+        phase: CanvasDragPhase,
+        position: (f32, f32),
+        bounds: ui::Rect,
+    ) -> CanvasDragRequest {
+        CanvasDragRequest {
+            phase,
+            source_range: self.source_range.clone(),
+            pointer_x: position.0,
+            pointer_y: position.1,
+            pressed_x: self.pressed_at.0,
+            pressed_y: self.pressed_at.1,
+            offset_x: bounds.x,
+            offset_y: bounds.y,
+            source_generation: self.source_generation,
+        }
+    }
+}
+
+impl TabSession<'_> {
+    pub fn hit_test_plugin_byte_or_end(
+        &self,
+        position: (f32, f32),
+        bounds: ui::Rect,
+    ) -> Option<usize> {
+        self.hit_test_byte(position.0, position.1, bounds.x, bounds.y).or_else(|| {
+            (position.1 - bounds.y > self.content_height()).then(|| self.document.buffer_len())
+        })
+    }
+
+    pub fn hit_test_expanded_plugin_byte(
+        &self,
+        candidate: usize,
+        position: (f32, f32),
+        bounds: ui::Rect,
+    ) -> usize {
+        let expanded_position = expanded_plugin_hit_position(
+            position,
+            self.query_cursor_screen_rect(candidate),
+            bounds,
+        );
+        self.hit_test_byte(expanded_position.0, expanded_position.1, bounds.x, bounds.y)
+            .unwrap_or(candidate)
+    }
+}
+
+impl TabSessionMut<'_> {
+    pub fn clear_collapsed_pointer_selection(&mut self) -> bool {
+        let cursor = self.document.cursor();
+        if cursor.selection_anchor != Some(cursor.offset.to_usize()) {
+            return false;
+        }
+        self.document.cursor_mut().selection_anchor = None;
+        true
     }
 }
 
@@ -655,15 +705,14 @@ fn place_text_pointer_selection(
         PointerClickKind::Triple => {
             tab.document.set_cursor_offset_synced(byte_offset);
             let document_line = tab.document.cursor_line();
-            let selection_start = tab.document.line_byte_offset(document_line).unwrap_or(0);
-            let selection_end = tab
+            let range = tab
                 .document
-                .line_byte_offset(document_line + 1)
-                .unwrap_or_else(|| tab.document.buffer_len());
+                .source_line_selection_range(document_line)
+                .unwrap_or_else(|| 0..tab.document.buffer_len());
             place_text_range_selection(
                 tab,
-                selection_start,
-                selection_end,
+                range.start,
+                range.end,
                 extend,
                 byte_offset,
                 initial_range,
@@ -725,32 +774,44 @@ fn hit_test_text_byte(
     settings: &ui::settings::Settings,
     metrics: &ui::settings::UiMetrics,
 ) -> Option<usize> {
-    let sub_line_offset = tab.display().viewport.sub_line_pixel_offset(metrics.line_height);
-    let adjusted_y = position.1 - editor_rect.y - sub_line_offset;
-    if adjusted_y < 0.0 {
-        return None;
-    }
-    let visual_line = (adjusted_y / metrics.line_height) as usize;
-    let entry = tab.display().advance_cache.get(visual_line)?;
+    let display = tab.display();
+    let sub_line_offset = display.viewport.sub_line_pixel_offset(metrics.line_height);
+    let (_, entry) = hit_test_visual_row(
+        position.1,
+        editor_rect.y,
+        sub_line_offset,
+        metrics.line_height,
+        &display.advance_cache,
+    )?;
     let gutter_width = metrics
         .content_left_margin
         .max(settings.gutter_width(tab.document.line_count()) * metrics.dpi);
-    let left_margin = editor_rect.x + gutter_width;
-    let mut previous_x = left_margin;
-    let mut previous_byte = entry.vl_byte_start;
-    for &(cluster_end, cluster_x, _) in &entry.clusters {
-        let current_byte = entry.vl_byte_start + cluster_end;
-        if position.0 <= cluster_x {
-            let midpoint = previous_x + (cluster_x - previous_x) * 0.5;
-            let line_byte = if position.0 >= midpoint { current_byte } else { previous_byte };
-            return tab.document.line_byte_offset(entry.doc_line).map(|start| start + line_byte);
-        }
-        previous_x = cluster_x;
-        previous_byte = current_byte;
-    }
-    tab.document.line_byte_offset(entry.doc_line).map(|start| start + previous_byte)
+    let line_byte = hit_test_row_byte(position.0, editor_rect.x + gutter_width, entry);
+    tab.document.line_byte_offset(entry.doc_line).map(|start| start + line_byte)
 }
 
 fn redraw_outcome() -> EditorOutcome {
     EditorOutcome { shell_effect: ShellEffect::REDRAW, ..EditorOutcome::default() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expanded_plugin_hit_position;
+
+    #[test]
+    fn expanded_plugin_hit_position_uses_cursor_rect_when_available() {
+        let bounds = ui::Rect::new(10.0, 30.0, 400.0, 500.0);
+        let hit_position =
+            expanded_plugin_hit_position((40.0, 12.0), Some((120.0, 24.0, 2.0, 18.0)), bounds);
+
+        assert_eq!(hit_position, (130.0, 63.0));
+    }
+
+    #[test]
+    fn expanded_plugin_hit_position_uses_pointer_when_cursor_rect_is_unavailable() {
+        let bounds = ui::Rect::new(10.0, 30.0, 400.0, 500.0);
+        let hit_position = expanded_plugin_hit_position((40.0, 12.0), None, bounds);
+
+        assert_eq!(hit_position, (40.0, 12.0));
+    }
 }

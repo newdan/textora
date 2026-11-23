@@ -1,15 +1,18 @@
 //! Vertex generation and GPU submission. Extracted from app.rs.
 //! Methods here are part of `impl App`, just defined in a separate file.
 
-use core::document::ReadableDocument;
 use render::GlyphVertex;
 use std::ops::Deref;
 use std::sync::OnceLock;
 use std::time::Instant;
+use textora_core::document::ReadableDocument;
 
 use crate::app::App;
-use crate::render_state::GpuState;
-use appkit_shell::editor_runtime::{EditorFrame, RenderResources};
+use appkit_shell::editor_runtime::{
+    EditorFrame, EditorPaintStyle, EmptyFrameTarget, PluginContentTarget, PreeditAdvanceMeasure,
+    RenderResources, SearchHighlightStyle, SurfaceFrameOptions, TextSurfaceLayout,
+    WindowCornerClip,
+};
 use ui::canvas::CanvasViewportSnapshot;
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_NOVEL_VIEW};
 
@@ -19,6 +22,9 @@ const DEFAULT_PERF_LOG_THRESHOLD_US: u128 = 1_000;
 const WYSIWYG_CURSOR_LOG_ENV: &str = "EDIT_PLUS_WYSIWYG_CURSOR_LOG";
 const MACOS_TRAFFIC_LIGHT_INSET_LOGICAL: f32 = 68.0;
 const WINDOWS_FRAMELESS_RESIZE_INSET_LOGICAL: f32 = crate::events::WINDOW_RESIZE_MARGIN_LOGICAL;
+const DARK_SURFACE_LUMINANCE_THRESHOLD: f32 = 0.5;
+const DARK_SURFACE_GAMMA: f32 = 2.2;
+const LIGHT_SURFACE_GAMMA: f32 = 1.45;
 
 #[derive(Clone, Copy)]
 enum SidebarWindowChrome {
@@ -159,7 +165,7 @@ fn plugin_selection_pull_is_safe(mouse_is_down: bool, plugin_needs_source_update
 
 fn active_mindmap_style_input(
     session: Option<crate::tab_session::TabSession<'_>>,
-) -> Option<ui::mindmap_style_panel::MindmapStylePanelInput> {
+) -> Option<appkit_shell::mindmap_style_panel::MindmapStylePanelInput> {
     let session = session?;
     let panel = session.mindmap_style_panel();
     if session.plugin_name() != ui::plugin::PLUGIN_MINDMAP || !panel.is_visible() {
@@ -167,7 +173,7 @@ fn active_mindmap_style_input(
     }
 
     let selection = session.mindmap_theme_selection();
-    Some(ui::mindmap_style_panel::MindmapStylePanelInput::from_selection(
+    Some(appkit_shell::mindmap_style_panel::MindmapStylePanelInput::from_selection(
         selection,
         panel.presets_expanded(),
     ))
@@ -204,11 +210,15 @@ mod tests {
     #[test]
     fn first_frame_queues_background_services_after_present() {
         let source = include_str!("app_renderer.rs");
-        let present_position =
-            source.find("output.present();").expect("renderer should present the frame");
-        let startup_event = ["AppEvent::StartBackground", "Services"].concat();
-        let startup_position =
-            source.find(&startup_event).expect("renderer should queue deferred background startup");
+        let (_, render) = source
+            .rsplit_once("    fn render_with_runtime_resources(")
+            .expect("renderer should compose frames with runtime resources");
+        let present_position = render
+            .find(".submit_surface_frame(")
+            .expect("renderer should present through the shared surface submission");
+        let startup_position = render
+            .find("AppEvent::StartBackgroundServices")
+            .expect("renderer should queue deferred background startup");
 
         assert!(startup_position > present_position);
     }
@@ -464,7 +474,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -473,7 +483,11 @@ mod tests {
             ui::core::paint::DrawList::new()
         }
 
-        fn query(&self, query: PluginQuery, _doc: &dyn core::document::DocView) -> PluginResponse {
+        fn query(
+            &self,
+            query: PluginQuery,
+            _doc: &dyn textora_core::document::DocView,
+        ) -> PluginResponse {
             match query {
                 PluginQuery::MindmapThemeSelection => {
                     PluginResponse::MindmapThemeSelection(self.selection.clone())
@@ -512,7 +526,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -524,7 +538,7 @@ mod tests {
 
         fn prepare_canvas(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
             _dpi_scale: f32,
@@ -538,7 +552,7 @@ mod tests {
 
         fn render_canvas(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _viewport: &ui::canvas::CanvasViewportSnapshot,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -588,7 +602,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -599,7 +613,7 @@ mod tests {
 
         fn prepare_canvas(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
             _dpi_scale: f32,
@@ -619,7 +633,7 @@ mod tests {
 
         fn render_canvas(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _viewport: &ui::canvas::CanvasViewportSnapshot,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -632,7 +646,7 @@ mod tests {
         fn handle_message(
             &mut self,
             message: PluginMessage,
-            _doc: &mut dyn core::document::DocViewMut,
+            _doc: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             let PluginMessage::UpdateSource { text, generation } = message else {
                 return false;
@@ -645,7 +659,11 @@ mod tests {
             true
         }
 
-        fn query(&self, query: PluginQuery, _doc: &dyn core::document::DocView) -> PluginResponse {
+        fn query(
+            &self,
+            query: PluginQuery,
+            _doc: &dyn textora_core::document::DocView,
+        ) -> PluginResponse {
             let PluginQuery::NeedsSourceUpdate(generation) = query else {
                 return PluginResponse::None;
             };
@@ -656,26 +674,6 @@ mod tests {
             true
         }
     }
-}
-
-/// Measure IME preedit text advance width in physical pixels.
-/// Returns 0.0 when preedit_text is empty.
-fn measure_preedit_advance_px(
-    shaper: &mut shaping::Shaper,
-    preedit_text: &str,
-    font_size: f32,
-) -> f32 {
-    if preedit_text.is_empty() {
-        return 0.0;
-    }
-    let old_font_size = shaper.font_size();
-    shaper.set_font_size(font_size);
-    let adv = shaper
-        .shape(preedit_text)
-        .map(|s| s.clusters.iter().map(|c| c.advance.max(1.0)).sum::<f32>())
-        .unwrap_or(0.0);
-    shaper.set_font_size(old_font_size);
-    adv
 }
 
 impl App {
@@ -816,83 +814,41 @@ impl App {
         resources: &mut RenderResources,
     ) -> Vec<GlyphVertex> {
         self.refresh_active_source_spacing_state();
-        let lc = self.active_document_line_count();
-        let gutter_w = self.settings.gutter_width(lc) * metrics.dpi;
-        let left_margin =
-            self.toc_left_offset() + self.editor_left_margin_with_metrics(lc, metrics);
-        let text_spacing_mode = self.settings.text_spacing_mode;
-        let semantic_version = self.settings.version;
-
-        let Some(tab_id) = self.active_tab_id() else {
-            return vec![];
+        let line_count = self.active_document_line_count();
+        let Some(gpu) = resources.gpu.as_ref() else {
+            return Vec::new();
         };
-        let App { editor_runtime, ui_shell, preedit_advance_px, current_theme, settings, .. } =
-            self;
-        let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
-            return vec![];
-        };
-        text.shaper.set_font_family(Some(&settings.font_family));
-        text.shaper.set_font_size(metrics.font_size);
-        let (preedit_text, _) = editor_runtime.preedit();
-
-        let screen_w = gpu.ctx.config.width as f32;
-        let screen_h = gpu.ctx.config.height as f32;
-
-        let Some(mut tab) = editor_runtime.tab_session_mut(tab_id) else {
-            return vec![];
+        let layout = TextSurfaceLayout {
+            screen: ui::Screen { w: gpu.ctx.config.width as f32, h: gpu.ctx.config.height as f32 },
+            left_margin: self.toc_left_offset()
+                + self.editor_left_margin_with_metrics(line_count, metrics),
+            top: tab_bar_height,
+            gutter_width: self.settings.gutter_width(line_count) * metrics.dpi,
         };
         let search_has_focus =
-            tab.search_state().panel_visible && ui_shell.search_bar_has_keyboard_focus();
-
-        let (preedit_advance, preedit_cursor_col) = if !preedit_text.is_empty() && !search_has_focus
-        {
-            let font_size = metrics.font_size;
-            let advance = measure_preedit_advance_px(&mut text.shaper, &preedit_text, font_size);
-            *preedit_advance_px = advance;
-            (advance, tab.document.cursor_column())
-        } else {
-            *preedit_advance_px = 0.0;
-            (0.0, 0)
+            self.active_tab_session().is_some_and(|tab| tab.search_state().panel_visible)
+                && self.ui_shell.search_bar_has_keyboard_focus();
+        let (preedit_text, _) = self.editor_runtime.preedit();
+        let preedit_text = if search_has_focus { "" } else { &preedit_text };
+        let style =
+            EditorPaintStyle { theme: &self.current_theme, settings: &self.settings, metrics };
+        let Some(shaped) = self.editor_runtime.shape_active_text_surface(
+            resources,
+            layout,
+            &style,
+            preedit_text,
+            PreeditAdvanceMeasure::AtLeastOnePixel,
+        ) else {
+            return Vec::new();
         };
-
-        let context = ui::gutter::RenderContext {
-            theme: current_theme,
-            screen_w,
-            screen_h,
-            left_margin,
-            tab_bar_height,
-            is_active_tab: true,
-            gutter_width: gutter_w,
-            preedit_advance_px: preedit_advance,
-            preedit_cursor_col,
-        };
-
-        let mut advance_cache = tab.take_advance_cache();
-        let mut presentation = tab.take_presentation();
-        let vertices = crate::render_pipeline::shape_visible_lines(
-            metrics,
-            text_spacing_mode,
-            semantic_version,
-            &context,
-            tab.document,
-            &mut presentation,
-            text,
-            gpu,
-            &mut advance_cache,
-            &mut resources.frame_cache.cluster_pool,
-            &mut resources.frame_cache.first_line,
-            &mut resources.frame_cache.last_line,
-            tree_dirty,
-            settings.word_wrap,
-        );
-        tab.restore_presentation(presentation);
-        tab.restore_advance_cache(advance_cache);
-        vertices
+        self.preedit_advance_px = shaped.preedit_advance_px;
+        *tree_dirty = shaped.tree_dirty;
+        shaped.vertices
     }
 
     pub(crate) fn render(&mut self) -> Option<()> {
-        let mut render_resources = self.editor_runtime.take_render_resources();
         let mut frame = self.editor_runtime.begin_frame().ok()?;
+        let mut render_resources = self.editor_runtime.take_render_resources();
         let result = self.render_with_runtime_resources(&mut render_resources, &mut frame);
         let _frame_outcome = frame.present();
         self.editor_runtime.restore_render_resources(render_resources);
@@ -919,13 +875,7 @@ impl App {
         let metrics = self.ui_metrics();
         let mut perf_mode = "editor";
         let mut perf_plugin_name = String::new();
-        let mut perf_plugin_setup_us = 0;
-        let mut perf_plugin_render_us = 0;
-        let mut perf_plugin_drain_us = 0;
-        let mut perf_plugin_selection_us = 0;
-        let mut perf_plugin_selection_drain_us = 0;
-        let mut perf_plugin_search_us = 0;
-        let mut perf_plugin_search_drain_us = 0;
+        let mut perf_plugin_paint_us = 0;
         let mut perf_editor_reshape_us = 0;
         let mut perf_editor_shape_us = 0;
         let mut perf_editor_selection_us = 0;
@@ -976,158 +926,33 @@ impl App {
                     .map(str::to_string)
                     .unwrap_or_else(|| "unknown".to_string());
             }
-            let dpi = metrics.dpi;
-            let bounds = self.plugin_render_bounds();
-
-            let (dl, needs_drain) = if let Some(frame) = normal_canvas_frame {
-                (frame.draw_list, true)
+            let plugin_paint_started_at = Instant::now();
+            let content = if let Some(frame) = normal_canvas_frame {
+                frame.draw_list
             } else {
-                let handles_own_rendering = self.active_handles_own_rendering();
-                let active_id = self.active_tab_id();
-                let theme = self.current_theme.clone();
-                let font_family = self.settings.font_family.clone();
-                let toc_max_depth = self.settings.toc_max_depth;
-                let markdown_first_line_indent = self.settings.markdown_first_line_indent;
-                let text_spacing_mode = self.settings.text_spacing_mode;
-                let shaper = resources.text.as_mut().map(|text| &mut text.shaper);
-                let session = active_id.and_then(|id| self.editor_runtime.tab_session_mut(id));
-                if let Some(mut tab) = session
-                    && handles_own_rendering
-                {
-                    let plugin_setup_started_at = Instant::now();
-                    // Push render settings (logical pixels) before rendering
-                    tab.send_message(ui::plugin::PluginMessage::SetRenderSettings {
-                        font_family,
-                        font_size: metrics.font_size / dpi,
-                        line_height: metrics.line_height / dpi,
-                        toc_max_depth,
-                        markdown_first_line_indent,
-                    });
-                    tab.send_message(ui::plugin::PluginMessage::SetTextSpacingMode(
-                        text_spacing_mode,
-                    ));
-                    // Forward blink phase to all rendering plugins so they can hide/show cursor
-                    let (visible, _) = crate::app::compute_cursor_phase(tab.cursor_blink_instant());
-                    tab.send_message(ui::plugin::PluginMessage::SetCursorVisible(visible));
-                    perf_plugin_setup_us = plugin_setup_started_at.elapsed().as_micros();
-                    if let Some(shaper) = shaper {
-                        let plugin_render_started_at = Instant::now();
-                        let dl = tab.render_plugin(bounds, &theme, shaper, dpi);
-                        perf_plugin_render_us = plugin_render_started_at.elapsed().as_micros();
-                        (dl, true)
-                    } else {
-                        (ui::core::paint::DrawList::new(), true)
-                    }
-                } else {
-                    (ui::core::paint::DrawList::new(), true)
-                }
-            };
-
-            let screen = ui::core::Screen::new(screen_w, screen_h);
-            let mut deferred_preview_verts: Option<Vec<render::GlyphVertex>> = None;
-            if needs_drain {
-                if let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) {
-                    // Vertex caching handled by plugin internally
-                    let plugin_drain_started_at = Instant::now();
-                    deferred_preview_verts =
-                        Some(crate::paint_backend::drain(dl, screen, Some(text), Some(gpu)));
-                    perf_plugin_drain_us = plugin_drain_started_at.elapsed().as_micros();
-                }
-            } else {
-                // Cached vertices handled by plugin internally
-            }
-
-            let mut deferred_sel_verts = None;
-            let mut deferred_search_verts = None;
-
-            // Render selection highlights (deferred until after preview content)
-            if self.active_handles_own_rendering()
-                && let Some(tab) = self.active_tab_session()
-            {
-                let selection_started_at = Instant::now();
-                let has_sel = tab.has_selection();
-                let sel_dl = if has_sel {
-                    tab.selection_highlights(self.current_theme.editor.selection)
-                } else {
-                    ui::core::paint::DrawList::new()
+                let bounds = self.plugin_render_bounds();
+                let style = EditorPaintStyle {
+                    theme: &self.current_theme,
+                    settings: &self.settings,
+                    metrics: &metrics,
                 };
-                perf_plugin_selection_us = selection_started_at.elapsed().as_micros();
-                if !sel_dl.cmds.is_empty() {
-                    let sel_drain_started_at = Instant::now();
-                    let sel_verts = crate::paint_backend::drain(
-                        sel_dl,
-                        screen,
-                        resources.text.as_mut().map(|t| &mut *t),
-                        resources.gpu.as_ref(),
-                    );
-                    perf_plugin_selection_drain_us = sel_drain_started_at.elapsed().as_micros();
-
-                    // We don't push to vertices here; we defer it until after preview_verts
-                    deferred_sel_verts = Some(sel_verts);
-                }
-            }
-
-            // Render search match highlights underneath preview content
-            let mut search_info = None;
-            if let Some(tab) = self.active_tab_session()
-                && tab.search_state().is_active()
-                && !tab.search_state().query.is_empty()
-            {
-                search_info = Some((
-                    tab.search_state().query.clone(),
-                    tab.search_state().options.match_case,
-                    tab.search_state().options.use_regex,
-                    tab.search_state().active_match_idx,
-                ));
-            }
-            if let Some((query, match_case, use_regex, active_match_idx)) = search_info
-                && let Some(tab) = self.active_tab_session()
-            {
-                let search_started_at = Instant::now();
-                let search_dl = tab.search_highlights(
-                    query.clone(),
-                    match_case,
-                    use_regex,
-                    active_match_idx,
-                    self.current_theme.palette.highlight,
-                    self.current_theme.palette.inactive_highlight,
-                );
-                perf_plugin_search_us = search_started_at.elapsed().as_micros();
-                let _ = (
-                    &query,
-                    match_case,
-                    use_regex,
-                    active_match_idx,
-                    active_match_idx,
-                    self.current_theme.palette.highlight,
-                    self.current_theme.palette.inactive_highlight,
-                );
-                if !search_dl.cmds.is_empty() {
-                    let search_drain_started_at = Instant::now();
-                    let search_verts = crate::paint_backend::drain(
-                        search_dl,
-                        screen,
-                        resources.text.as_mut().map(|t| &mut *t),
-                        resources.gpu.as_ref(),
-                    );
-                    perf_plugin_search_drain_us = search_drain_started_at.elapsed().as_micros();
-                    deferred_search_verts = Some(search_verts);
-                }
-            }
-
-            // Now draw preview text content
-            if let Some(preview_verts) = deferred_preview_verts {
-                vertices.extend(preview_verts);
-            }
-
-            // Draw highlights ON TOP of the preview content so they are not
-            // occluded by opaque block backgrounds (like CodeBlocks).
-            if let Some(sel_verts) = deferred_sel_verts {
-                vertices.extend(sel_verts);
-            }
-            if let Some(search_verts) = deferred_search_verts {
-                vertices.extend(search_verts);
-            }
+                self.editor_runtime
+                    .render_active_plugin_content(
+                        PluginContentTarget::Bounds(bounds),
+                        &style,
+                        resources.text.as_mut().map(|text| &mut text.shaper),
+                    )
+                    .unwrap_or_default()
+            };
+            self.editor_runtime.paint_active_plugin_layers(
+                content,
+                resources,
+                ui::Screen::new(screen_w, screen_h),
+                &self.current_theme,
+                SearchHighlightStyle::Theme,
+                &mut vertices,
+            );
+            perf_plugin_paint_us = plugin_paint_started_at.elapsed().as_micros();
 
             // Compute preedit advance so IME candidate window X tracks
             // the end of the composing text (shared with update_ime_cursor_area).
@@ -1137,7 +962,7 @@ impl App {
             let (preedit_text, _) = self.editor_runtime.preedit();
             if !preedit_text.is_empty() && !search_has_focus {
                 if let Some(text) = resources.text.as_mut() {
-                    self.preedit_advance_px = measure_preedit_advance_px(
+                    self.preedit_advance_px = PreeditAdvanceMeasure::AtLeastOnePixel.measure(
                         &mut text.shaper,
                         &preedit_text,
                         metrics.font_size,
@@ -1166,81 +991,29 @@ impl App {
                 }
                 self.needs_redraw = true;
             }
-            // Selection highlight
-            {
-                let selection_started_at = Instant::now();
-                if let Some(tab) = self.active_tab_session() {
-                    let dv = tab.document;
-                    let left_margin = toc_off + self.editor_left_margin(dv.line_count());
-                    let sub_line_offset = tab.sub_line_pixel_offset(metrics.line_height);
-                    let max_doc_line =
-                        tab.advance_cache().iter().map(|e| e.doc_line).max().unwrap_or(0);
-                    let mut line_offsets = vec![0usize; max_doc_line + 1];
-                    let mut seen = std::collections::HashSet::new();
-                    for entry in tab.advance_cache() {
-                        let dl = entry.doc_line;
-                        if seen.insert(dl) {
-                            line_offsets[dl] = dv.line_byte_offset(dl).unwrap_or(0);
-                        }
-                    }
-                    let verts = ui::decorations::selection_vertices(
-                        dv.selection_range(),
-                        tab.advance_cache(),
-                        &metrics,
-                        screen_w,
-                        screen_h,
-                        left_margin,
-                        &self.current_theme,
-                        content_top,
-                        sub_line_offset,
-                        &line_offsets,
-                    );
-                    vertices.extend(verts);
-                }
-                perf_editor_selection_us = selection_started_at.elapsed().as_micros();
-            }
+            let text_layout = TextSurfaceLayout {
+                screen: ui::Screen { w: screen_w, h: screen_h },
+                left_margin: toc_off + self.editor_left_margin(line_count),
+                top: content_top,
+                gutter_width: self.settings.gutter_width(line_count) * metrics.dpi,
+            };
+            let style = EditorPaintStyle {
+                theme: &self.current_theme,
+                settings: &self.settings,
+                metrics: &metrics,
+            };
+            let selection_started_at = Instant::now();
+            vertices
+                .extend(self.editor_runtime.active_text_selection_vertices(text_layout, &style));
+            perf_editor_selection_us = selection_started_at.elapsed().as_micros();
 
-            // Search match highlights
-            {
-                let search_started_at = Instant::now();
-                if let Some(tab) = self.active_tab_session()
-                    && tab.search_state().is_active()
-                {
-                    let dv = tab.document;
-                    let left_margin = toc_off + self.editor_left_margin(dv.line_count());
-                    let sub_line_offset = tab.sub_line_pixel_offset(metrics.line_height);
-                    let max_doc_line =
-                        tab.advance_cache().iter().map(|e| e.doc_line).max().unwrap_or(0);
-                    let mut line_offsets = vec![0usize; max_doc_line + 1];
-                    let mut seen = std::collections::HashSet::new();
-                    for entry in tab.advance_cache() {
-                        let dl = entry.doc_line;
-                        if seen.insert(dl) {
-                            line_offsets[dl] = dv.line_byte_offset(dl).unwrap_or(0);
-                        }
-                    }
-                    let verts = ui::decorations::search_match_vertices(
-                        &tab.search_state()
-                            .matches
-                            .iter()
-                            .map(|r| (r.start, r.end))
-                            .collect::<Vec<_>>(),
-                        tab.search_state().active_match_idx,
-                        tab.search_state().is_active(),
-                        tab.advance_cache(),
-                        &metrics,
-                        screen_w,
-                        screen_h,
-                        left_margin,
-                        &self.current_theme,
-                        content_top,
-                        sub_line_offset,
-                        &line_offsets,
-                    );
-                    vertices.extend(verts);
-                }
-                perf_editor_search_us = search_started_at.elapsed().as_micros();
-            }
+            let search_started_at = Instant::now();
+            vertices.extend(self.editor_runtime.active_text_search_vertices(
+                text_layout,
+                &style,
+                SearchHighlightStyle::Theme,
+            ));
+            perf_editor_search_us = search_started_at.elapsed().as_micros();
 
             vertices.extend(shape_verts);
 
@@ -1316,119 +1089,25 @@ impl App {
         frame.drain_into(ui::core::Screen::new(screen_w, screen_h), resources, &mut vertices);
         let perf_chrome_drain_us = frame_drain_started_at.elapsed().as_micros();
 
-        let gpu = resources.gpu.as_mut()?;
-        let gpu: &mut GpuState = gpu;
-        let output = match gpu.ctx.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(tex)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
-            _ => return None,
-        };
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = gpu.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render encoder"),
-        });
-
-        if let Some(text) = resources.text.as_mut() {
-            if !vertices.is_empty() {
-                let vertex_bytes = bytemuck::cast_slice(&vertices);
-                let needed = vertices.len() as u32;
-
-                if needed > text.vertex_capacity {
-                    let new_cap = needed.next_power_of_two();
-                    text.vertex_buffer = gpu.ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("vertex buffer"),
-                        size: (new_cap as usize * std::mem::size_of::<GlyphVertex>()) as u64,
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-                    text.vertex_capacity = new_cap;
-                }
-
-                gpu.ctx.queue.write_buffer(&text.vertex_buffer, 0, vertex_bytes);
-
-                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("text pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &gpu.ctx.msaa_view,
-                        depth_slice: None,
-                        resolve_target: Some(&view),
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: self.current_theme.editor.background[0] as f64,
-                                g: self.current_theme.editor.background[1] as f64,
-                                b: self.current_theme.editor.background[2] as f64,
-                                a: 1.0,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    ..Default::default()
-                });
-
-                render_pass.set_pipeline(text.renderer.pipeline());
-
-                {
-                    let bg = self.current_theme.editor.background;
-                    let bg_brightness = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2];
-                    let gamma = if bg_brightness < 0.5 { 2.2 } else { 1.45 };
-                    text.update_gamma_if_changed(
-                        &gpu.ctx.queue,
-                        render::GammaUniform { contrast: 1.0, gamma },
-                    );
-                }
-
-                render_pass.set_bind_group(0, &text.bind_group, &[]);
-                render_pass.set_vertex_buffer(0, text.vertex_buffer.slice(..));
-                render_pass.draw(0..vertices.len() as u32, 0..1);
-            } else {
-                let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("clear pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &gpu.ctx.msaa_view,
-                        depth_slice: None,
-                        resolve_target: Some(&view),
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: self.current_theme.editor.background[0] as f64,
-                                g: self.current_theme.editor.background[1] as f64,
-                                b: self.current_theme.editor.background[2] as f64,
-                                a: 1.0,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    ..Default::default()
-                });
-            }
+        let [red, green, blue, _] = self.current_theme.editor.background;
+        let luminance = 0.299 * red + 0.587 * green + 0.114 * blue;
+        let gamma = if luminance < DARK_SURFACE_LUMINANCE_THRESHOLD {
+            DARK_SURFACE_GAMMA
         } else {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: self.current_theme.editor.background[0] as f64,
-                            g: self.current_theme.editor.background[1] as f64,
-                            b: self.current_theme.editor.background[2] as f64,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                ..Default::default()
-            });
-        }
-
-        let gpu_submit_started_at = Instant::now();
-        gpu.ctx.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
-        let perf_gpu_submit_us = gpu_submit_started_at.elapsed().as_micros();
+            LIGHT_SURFACE_GAMMA
+        };
+        let perf_gpu_submit_us = resources
+            .submit_surface_frame(
+                &vertices,
+                SurfaceFrameOptions {
+                    background: [red, green, blue, 1.0],
+                    empty_frame_target: EmptyFrameTarget::MultisampledWhenTextAvailable,
+                    window_corner_clip: WindowCornerClip::Preserve,
+                    gamma_override: Some(render::GammaUniform { contrast: 1.0, gamma }),
+                },
+            )
+            .ok()??
+            .as_micros();
 
         if !self.editor_runtime.first_frame_presented() {
             self.editor_runtime.mark_frame_presented();
@@ -1446,17 +1125,11 @@ impl App {
         if should_log_perf(_total_render_us) {
             if perf_mode == "plugin" {
                 eprintln!(
-                    "[perf:app_render] mode=plugin plugin={} total={}us sync_prepare={}us setup={}us plugin_render={}us plugin_drain={}us selection={}us selection_drain={}us search={}us search_drain={}us chrome_drain={}us gpu_submit={}us vertices={}",
+                    "[perf:app_render] mode=plugin plugin={} total={}us sync_prepare={}us plugin_paint={}us chrome_drain={}us gpu_submit={}us vertices={}",
                     perf_plugin_name,
                     _total_render_us,
                     perf_sync_prepare_us,
-                    perf_plugin_setup_us,
-                    perf_plugin_render_us,
-                    perf_plugin_drain_us,
-                    perf_plugin_selection_us,
-                    perf_plugin_selection_drain_us,
-                    perf_plugin_search_us,
-                    perf_plugin_search_drain_us,
+                    perf_plugin_paint_us,
                     perf_chrome_drain_us,
                     perf_gpu_submit_us,
                     vertices.len(),
@@ -1750,27 +1423,16 @@ impl App {
         self.update_shell_layout(shaper);
 
         let metrics = self.ui_metrics();
-        let dpi = metrics.dpi;
-        let font_size = metrics.font_size / dpi;
-        let line_height = metrics.line_height / dpi;
-        let font_family = self.settings.font_family.clone();
-        let toc_max_depth = self.settings.toc_max_depth;
-        let markdown_first_line_indent = self.settings.markdown_first_line_indent;
-        let text_spacing_mode = self.settings.text_spacing_mode;
-        let theme = self.current_theme.clone();
-        let mut tab = self.active_tab_session_mut()?;
-
-        tab.send_message(ui::plugin::PluginMessage::SetRenderSettings {
-            font_family,
-            font_size,
-            line_height,
-            toc_max_depth,
-            markdown_first_line_indent,
-        });
-        tab.send_message(ui::plugin::PluginMessage::SetTextSpacingMode(text_spacing_mode));
-        let (cursor_visible, _) = crate::app::compute_cursor_phase(tab.cursor_blink_instant());
-        tab.send_message(ui::plugin::PluginMessage::SetCursorVisible(cursor_visible));
-        let draw_list = tab.render_canvas_plugin(&snapshot, &theme, shaper, dpi);
+        let style = EditorPaintStyle {
+            theme: &self.current_theme,
+            settings: &self.settings,
+            metrics: &metrics,
+        };
+        let draw_list = self.editor_runtime.render_active_plugin_content(
+            PluginContentTarget::PreparedCanvas(&snapshot),
+            &style,
+            Some(shaper),
+        )?;
 
         Some(NormalCanvasFrame { snapshot, draw_list })
     }

@@ -1,8 +1,8 @@
 //! Edit operations — insert, delete, undo/redo, and cursor sync helpers.
 
 use crate::line_index::LineIndex;
-use core::buffer::text_buffer::CursorMovement;
-use core::types::ByteIndex;
+use textora_core::buffer::text_buffer::CursorMovement;
+use textora_core::types::ByteIndex;
 
 use super::{DocumentView, replace_null_bytes};
 
@@ -68,11 +68,11 @@ impl DocumentView {
         // Assign stable snapshot ID when tab becomes dirty (for hot exit).
         if self.dirty && self.dirty_snapshot_id.is_none() {
             self.dirty_snapshot_id = Some(if self.file_path.is_some() {
-                crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::path_id(
+                appkit_core::snapshot::snapshot_filename(&appkit_core::snapshot::path_id(
                     self.file_path.as_ref().unwrap(),
                 ))
             } else {
-                crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::untitled_id())
+                appkit_core::snapshot::snapshot_filename(&appkit_core::snapshot::untitled_id())
             });
         }
         let (tb, line_index) = (&self.model.tb, &mut self.model.line_index);
@@ -97,11 +97,11 @@ impl DocumentView {
         // Assign stable snapshot ID when tab becomes dirty (for hot exit).
         if self.dirty && self.dirty_snapshot_id.is_none() {
             self.dirty_snapshot_id = Some(if self.file_path.is_some() {
-                crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::path_id(
+                appkit_core::snapshot::snapshot_filename(&appkit_core::snapshot::path_id(
                     self.file_path.as_ref().unwrap(),
                 ))
             } else {
-                crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::untitled_id())
+                appkit_core::snapshot::snapshot_filename(&appkit_core::snapshot::untitled_id())
             });
         }
 

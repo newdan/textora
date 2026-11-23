@@ -4,8 +4,10 @@
 //! into grapheme-cluster-indexed maps so that cursor, hit-test, and selection
 //! never split a UAX#29 grapheme cluster (combining marks, ZWJ emoji, etc.).
 
-use core::unicode::{
-    ucd_grapheme_cluster_joins, ucd_grapheme_cluster_joins_done, ucd_grapheme_cluster_lookup,
+pub(crate) use textora_core::unicode::grapheme_byte_boundaries;
+use textora_core::unicode::{
+    grapheme_start_indices, ucd_grapheme_cluster_joins, ucd_grapheme_cluster_joins_done,
+    ucd_grapheme_cluster_lookup,
 };
 
 /// Maps visual grapheme indices to absolute source byte offsets.
@@ -107,53 +109,15 @@ pub(crate) fn build_visual_grapheme_map(
     text: &str,
     source_bytes_by_char: &[usize],
 ) -> VisualGraphemeMap {
-    let mut source_bytes_by_grapheme: Vec<usize> = Vec::new();
-
-    let mut char_indices = text.char_indices().peekable();
-    let mut ci = 0; // index into source_bytes_by_char
-
-    while let Some((byte_start, ch)) = char_indices.next() {
-        // Record the start of this grapheme cluster.
-        let source_byte = source_bytes_by_char.get(ci).copied().unwrap_or(byte_start);
-        source_bytes_by_grapheme.push(source_byte);
-
-        // Advance through chars that extend the current grapheme cluster.
-        let mut state = 0u32;
-        let mut prev_props = ucd_grapheme_cluster_lookup(ch);
-
-        while let Some(&(_, next_ch)) = char_indices.peek() {
-            let next_props = ucd_grapheme_cluster_lookup(next_ch);
-            state = ucd_grapheme_cluster_joins(state, prev_props, next_props);
-            if ucd_grapheme_cluster_joins_done(state) {
-                break;
-            }
-            prev_props = next_props;
-            char_indices.next();
-            ci += 1;
-        }
-
-        ci += 1;
-    }
-
-    // One-past-end sentinel: total byte length (or last entry in source_bytes_by_char).
     let total_bytes = source_bytes_by_char.last().copied().unwrap_or(text.len());
-    source_bytes_by_grapheme.push(total_bytes);
-
-    VisualGraphemeMap { source_bytes_by_grapheme }
-}
-
-/// Return the UTF-8 byte boundaries of every extended grapheme in `text`.
-///
-/// The returned vector always includes the one-past-end sentinel. This makes
-/// it suitable for pairing each byte range with a corresponding visual edge.
-pub(crate) fn grapheme_byte_boundaries(text: &str) -> Vec<usize> {
-    let source_bytes_by_char: Vec<usize> = text
-        .char_indices()
-        .map(|(byte_offset, _)| byte_offset)
-        .chain(std::iter::once(text.len()))
+    let source_bytes_by_grapheme = grapheme_start_indices(text)
+        .map(|(char_index, byte_offset)| {
+            source_bytes_by_char.get(char_index).copied().unwrap_or(byte_offset)
+        })
+        .chain(std::iter::once(total_bytes))
         .collect();
 
-    build_visual_grapheme_map(text, &source_bytes_by_char).as_slice().to_vec()
+    VisualGraphemeMap { source_bytes_by_grapheme }
 }
 
 /// Count grapheme clusters in `text` using UAX#29 extended grapheme cluster rules.
@@ -212,6 +176,28 @@ mod tests {
         let mut v: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
         v.push(text.len());
         v
+    }
+
+    #[test]
+    fn grapheme_byte_boundaries_preserve_ucd_clusters_and_end_sentinel() {
+        let cases: &[(&str, &[usize])] = &[
+            ("", &[0]),
+            ("a中b", &[0, 1, 4, 5]),
+            ("xe\u{0301}y", &[0, 1, 4, 5]),
+            ("A👨\u{200D}👩\u{200D}👧中", &[0, 1, 19, 22]),
+            ("🇨🇳🇺🇸🇯", &[0, 8, 16, 20]),
+            ("a\r\nb", &[0, 1, 3, 4]),
+            ("\u{1100}\u{1161}\u{11A8}a", &[0, 9, 10]),
+            ("\u{0915}\u{094D}\u{0937}a", &[0, 9, 10]),
+        ];
+        for &(text, expected) in cases {
+            assert_eq!(grapheme_byte_boundaries(text), expected, "text: {text:?}");
+            assert_eq!(
+                build_visual_grapheme_map(text, &char_sentinel_map(text)).as_slice(),
+                expected,
+                "identity source map for text: {text:?}"
+            );
+        }
     }
 
     // ── ASCII ──────────────────────────────────────────────────────────

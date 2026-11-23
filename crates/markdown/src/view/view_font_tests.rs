@@ -15,7 +15,7 @@ fn set_engine_font(engine: &mut PreviewEngine, font_family: &str) {
 
 fn assert_plugin_matches_source_font(plugin: &mut dyn ViewPlugin, font_family: &str, dpi: f32) {
     let theme = ui::theme::test_theme();
-    let doc = core::document::StringDocView::new(SOURCE_TEXT);
+    let doc = textora_core::document::StringDocView::new(SOURCE_TEXT);
     let mut shaper = shaping::Shaper::new().expect("font consistency requires system fonts");
     shaper.set_font_family(Some(font_family));
     shaper.set_font_size(LOGICAL_FONT_SIZE * dpi);

@@ -9,7 +9,7 @@ const POSITION_TOLERANCE: f32 = 0.001;
 fn assert_render_matches_layout(source: &str, width: f32, render_with_shaper: bool) {
     let style = crate::test_utils::default_style();
     let doc = MarkdownDoc::build(&parse_markdown(source), &style);
-    let doc_view = core::document::StringDocView::new(source);
+    let doc_view = textora_core::document::StringDocView::new(source);
     let mut shaper = shaping::Shaper::new().expect("spacing regression requires system fonts");
     let laid_out = layout_doc_with_shaper_for_rendering(
         &doc.blocks,

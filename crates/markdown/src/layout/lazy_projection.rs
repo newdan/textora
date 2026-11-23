@@ -78,7 +78,7 @@ impl<S: BlockSource> LazyLayout<S> {
     ///
     /// Phase 4: only iterates blocks in `viewport_range` (visible + buffer).
     /// Blocks outside this range that are None are skipped safely.
-    pub fn build_flat_lines(&mut self, _doc_view: &dyn core::document::DocView) {
+    pub fn build_flat_lines(&mut self, _doc_view: &dyn textora_core::document::DocView) {
         let (code_viewport, changed_indices) = crate::layout::code_viewport::update(
             &mut self.laid_out,
             &self.precise,

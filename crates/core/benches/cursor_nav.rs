@@ -1,6 +1,6 @@
-use core::helpers::CoordType;
-use core::types::VisualPoint;
 use criterion::{Criterion, criterion_group, criterion_main};
+use textora_core::helpers::CoordType;
+use textora_core::types::VisualPoint;
 
 fn make_ascii_1mb() -> Vec<u8> {
     let line = "The quick brown fox jumps over the lazy dog. ";
@@ -16,7 +16,7 @@ fn bench_cursor_nav_walk_terminal_1mb(c: &mut Criterion) {
     c.bench_function("cursor_nav_walk_terminal_1mb", |b| {
         b.iter(|| {
             let slice = buf.as_slice();
-            let mut cfg = core::unicode::CursorNav::new(&slice);
+            let mut cfg = textora_core::unicode::CursorNav::new(&slice);
             let _ = cfg.goto_visual(VisualPoint { column: CoordType::MAX, row: usize::MAX });
         });
     });
@@ -24,11 +24,11 @@ fn bench_cursor_nav_walk_terminal_1mb(c: &mut Criterion) {
 
 fn bench_cursor_nav_walk_pixel_1mb(c: &mut Criterion) {
     let buf = make_ascii_1mb();
-    let advance = core::unicode::PixelAdvance::default();
+    let advance = textora_core::unicode::PixelAdvance::default();
     c.bench_function("cursor_nav_walk_pixel_1mb", |b| {
         b.iter(|| {
             let slice = buf.as_slice();
-            let mut cfg = core::unicode::CursorNav::with_advance(&slice, advance.clone());
+            let mut cfg = textora_core::unicode::CursorNav::with_advance(&slice, advance.clone());
             let _ = cfg.goto_visual(VisualPoint { column: CoordType::MAX, row: usize::MAX });
         });
     });

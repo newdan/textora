@@ -1,8 +1,7 @@
-extern crate core as doc_core;
 #[path = "support/editing_audit.rs"]
 mod editing_audit;
-use doc_core::document::StringDocView;
 use editing_audit::*;
+use textora_core::document::StringDocView;
 use textora_markdown::view::MarkdownEditorView;
 use ui::plugin::{EditIntent, PluginMessage, ViewPlugin};
 use unicode_segmentation::UnicodeSegmentation;

@@ -94,16 +94,16 @@ impl App {
                 return;
             }
 
-            use core::document::ReadableDocument;
+            use textora_core::document::ReadableDocument;
             let chunk1 = tab.document.tb.gap_buffer().read_forward(0);
             let chunk2 = tab.document.tb.gap_buffer().read_forward(chunk1.len());
 
             let query_bytes = query.as_bytes();
             let search_fn: fn(&[u8], &[u8]) -> Vec<std::ops::Range<usize>> =
                 if tab.search_state().options.match_case {
-                    core::buffer::simd_search::find_all
+                    textora_core::buffer::simd_search::find_all
                 } else {
-                    core::buffer::simd_search::find_all_case_insensitive_ascii
+                    textora_core::buffer::simd_search::find_all_case_insensitive_ascii
                 };
 
             let mut matches = Vec::new();

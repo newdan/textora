@@ -168,7 +168,7 @@ impl PersistedDiskRevision {
         let file_identity = self
             .file_device
             .zip(self.file_inode)
-            .map(|(device, inode)| core::disk_revision::FileIdentity { device, inode });
+            .map(|(device, inode)| textora_core::disk_revision::FileIdentity { device, inode });
 
         Some(crate::file_safety::DiskRevision {
             path: path.to_owned(),

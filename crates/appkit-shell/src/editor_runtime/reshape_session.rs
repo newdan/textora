@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use appkit_core::workspace::types::TabId;
+
 use crate::reshape_worker::{ReshapeRequest, ReshapeResult, ReshapeWorker};
 
 const AHEAD_SUBMIT_DEBOUNCE: Duration = Duration::from_millis(16);
@@ -13,6 +15,7 @@ pub(crate) struct ReshapeSession {
     shared_font_system: Option<Arc<Mutex<shaping::FontSystem>>>,
     worker: Option<ReshapeWorker>,
     generation: u64,
+    active_source: Option<(TabId, u64)>,
     pending_lines: HashSet<usize>,
     last_observed_anchor: Option<usize>,
     last_submitted_anchor: Option<usize>,
@@ -26,6 +29,7 @@ impl ReshapeSession {
             shared_font_system: None,
             worker: None,
             generation: 0,
+            active_source: None,
             pending_lines: HashSet::new(),
             last_observed_anchor: None,
             last_submitted_anchor: None,
@@ -81,6 +85,7 @@ impl ReshapeSession {
 
     pub(crate) fn invalidate(&mut self) -> u64 {
         self.generation = self.generation.saturating_add(1);
+        self.active_source = None;
         self.pending_lines.clear();
         self.last_observed_anchor = None;
         self.last_submitted_anchor = None;
@@ -89,6 +94,14 @@ impl ReshapeSession {
             worker.cancel_before(self.generation);
         }
         self.generation
+    }
+
+    pub(crate) fn observe_source(&mut self, tab_id: TabId, content_revision: u64) {
+        let source = (tab_id, content_revision);
+        if self.active_source.is_some_and(|previous| previous != source) {
+            self.invalidate();
+        }
+        self.active_source = Some(source);
     }
 
     pub(crate) fn generation(&self) -> u64 {

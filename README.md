@@ -2,13 +2,15 @@
 
 [English](README.en.md)
 
-Textora 是一款使用 Rust 和 [wgpu](https://github.com/gfx-rs/wgpu) 构建的原生纯文本与 Markdown 桌面编辑器。
+本仓库包含两个使用 Rust 和 [wgpu](https://github.com/gfx-rs/wgpu) 构建的原生桌面应用：**Textora** 是纯文本与 Markdown 编辑器，**Notora** 是带本地笔记库的笔记应用。两者共享编辑器内核与桌面宿主。
 
-> **项目状态：** Textora 正在积极开发中。
+> **项目状态：** 项目正在积极开发中。
 >
-> **平台支持：** 目前应用面向 **macOS 12 及更高版本**。可复用的工作区 crate 保持可移植性设计，但桌面应用尚未支持跨平台。
+> **平台支持：** 两个桌面应用均以 **macOS 12 及更高版本**为运行和打包目标。
 
-## 功能特性
+新接手项目？从[新人接手指南](docs/onboarding.md)开始，照着一次点击、一次编辑和一次保存走读代码。
+
+## Textora 功能特性
 
 - 支持标签页、侧边栏导航、自动换行、行号与状态信息的纯文本编辑。
 - 提供源码、所见即所得和预览视图的 Markdown 编辑。
@@ -27,19 +29,21 @@ Textora 是一款使用 Rust 和 [wgpu](https://github.com/gfx-rs/wgpu) 构建�
 
 ### 运行
 
-不指定初始文件启动 Textora：
+从仓库根目录运行。Cargo 默认成员是 `textora-app`；启动 Notora 时需要显式选择 `notora-app`。
 
 ```bash
-cargo run -p textora-app
+# Textora
+cargo run -p textora-app --bin textora
+cargo run -p textora-app --bin textora -- path/to/file.md
+
+# Notora（传入文件路径时，按外部文件打开）
+cargo run -p notora-app --bin notora
+cargo run -p notora-app --bin notora -- path/to/file.md
 ```
 
-启动时打开文件：
+启动代码分别位于 [`crates/app/src/main.rs`](crates/app/src/main.rs) 和 [`crates/notora-app/src/main.rs`](crates/notora-app/src/main.rs)。
 
-```bash
-cargo run -p textora-app -- path/to/file.md
-```
-
-初始化 GPU 后端而不创建窗口：
+仅初始化 Textora 的 GPU 后端，不创建窗口：
 
 ```bash
 cargo run -p textora-app -- --headless
@@ -47,10 +51,11 @@ cargo run -p textora-app -- --headless
 
 ### 构建
 
-以调试模式构建应用：
+以调试模式构建两个应用：
 
 ```bash
 cargo build -p textora-app
+cargo build -p notora-app
 ```
 
 构建精简版可执行文件（保留基础 Markdown 和思维导图，不编译 LaTeX、Mermaid 图表与 HTML 富文本粘贴支持）：
@@ -61,25 +66,34 @@ cargo lite
 
 产物位于 `target/lite/textora`。精简版将数学公式和 HTML 标签显示为原文，`mermaid` 代码块仍按普通代码块显示。
 
-构建 macOS 发布版 `.app` 包：
+构建 macOS 发布包：
 
 ```bash
 ./scripts/bundle-mac.sh
+./scripts/bundle-notora-mac.sh
 ```
 
-生成的应用包位于 `target/textora.app`。
+默认的应用包路径为 `target/textora.app` 和 `target/notora.app`。
 
 ### 验证
 
-运行完整项目验证套件：
+运行仓库的常规验证入口：
 
 ```bash
 ./scripts/verify.sh
 ```
 
-该命令会检查架构边界、代码格式、Clippy 和整个工作区的测试套件。
+[`scripts/verify.sh`](scripts/verify.sh) 的覆盖范围：
 
-## 文件视图
+| 检查 | 覆盖范围 |
+| --- | --- |
+| 架构边界 | 运行 [`scripts/check_architecture.sh`](scripts/check_architecture.sh)；`TEXTORA_ARCHITECTURE_MIGRATION` 非空时跳过此项 |
+| 格式与 Clippy | 全工作区格式检查；`cargo clippy --workspace --all-targets -- -D warnings` |
+| 默认测试 | `notora-app` 单独以单线程运行；其余工作区包一起测试，但排除 `textora-sync` |
+
+`textora-sync` 仍在 Clippy 检查范围内，测试需单独运行 `cargo test -p textora-sync`（部分测试使用本地回环端口）。默认测试不执行标记为 `#[ignore]` 的用例，也不会实际操作桌面界面。专项编辑验证见 [`scripts/verify-editing.sh`](scripts/verify-editing.sh)。
+
+## Textora 文件视图
 
 | 文件模式 | 默认视图 |
 | --- | --- |
@@ -92,21 +106,30 @@ Markdown 文档可在编辑和预览视图间切换。思维导图使用后缀�
 
 ## 工作区结构
 
-| Crate | 职责 |
-| --- | --- |
-| [`crates/app`](crates/app) | 桌面应用、产品行为和平台集成 |
-| [`crates/ui`](crates/ui) | 可复用 UI 组件、布局、主题和小部件 |
-| [`crates/core`](crates/core) | 文本缓冲区、文档模型、编辑和搜索基础能力 |
-| [`crates/markdown`](crates/markdown) | Markdown 编辑、预览、阅读和思维导图视图 |
-| [`crates/render`](crates/render) | GPU 渲染原语 |
-| [`crates/shaping`](crates/shaping) | 文本塑形与字形布局 |
-| [`crates/appkit-core`](crates/appkit-core) / [`crates/appkit-shell`](crates/appkit-shell) | 共享的应用模型和桌面壳层基础设施 |
+| 目录 | Cargo 包名 | 职责 |
+| --- | --- | --- |
+| [`crates/app`](crates/app) | `textora-app` | Textora 产品层：窗口、命令路由、文件工作区与同步集成 |
+| [`crates/notora-app`](crates/notora-app) | `notora-app` | Notora 产品层：笔记库界面、笔记操作、自动保存与编辑器适配 |
+| [`crates/notora-core`](crates/notora-core) | `notora-core` | 笔记域：笔记库目录、SQLite 索引、笔记命令和文件监控 |
+| [`crates/appkit-core`](crates/appkit-core) | `textora-appkit-core` | 无界面的 `DocumentModel`、标签工作区模型、会话持久化与文件安全 |
+| [`crates/appkit-shell`](crates/appkit-shell) | `textora-appkit-shell` | 共享桌面宿主：`EditorRuntime`、标签运行态、输入和绘制管线、保存任务 |
+| [`crates/core`](crates/core) | `textora-core` | 文本缓冲区、撤销历史、Unicode 导航、搜索、高亮和文件读写原语 |
+| [`crates/ui`](crates/ui) | `textora-ui` | 可复用控件、主题和视口几何；定义编辑器视图的插件协议 |
+| [`crates/markdown`](crates/markdown) | `textora-markdown` | Markdown 解析、源码与视觉投影、编辑策略、预览与阅读 |
+| [`crates/mindmap`](crates/mindmap) | `textora-mindmap` | MMF 解析与编辑、思维导图布局和交互视图 |
+| [`crates/render`](crates/render) | `textora-render` | GPU 绘制原语与字形图集 |
+| [`crates/shaping`](crates/shaping) | `textora-shaping` | 字体选择、文本塑形、字形光栅化与缓存 |
+| [`crates/sync`](crates/sync) | `textora-sync` | Textora 的 Syncthing 客户端、同步命令与状态 |
+| [`crates/encryption`](crates/encryption) | `textora-encryption` | 加密 Markdown 格式、加解密和解锁会话 |
+| [`crates/lsh`](crates/lsh) | `lsh` | 语法高亮语言定义、编译器和运行时 |
+| [`crates/stdext`](crates/stdext) | `stdext` | 内存分配、容器、Unicode 和系统原语等底层工具 |
 
 UI 层接收来自应用层的纯数据输入，不依赖应用状态类型。详细架构规则见 [`AGENTS.md`](AGENTS.md)，开发约定见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
 ## 项目文档
 
-计划和项目文档索引见 [`docs/README.md`](docs/README.md)。
+- [新人接手指南](docs/onboarding.md)：编辑提交、保存完成、点击映射的代码入口和验证用例。
+- [计划与既有文档索引](docs/README.md)：查阅历史整改和设计背景。
 
 ## 许可证
 

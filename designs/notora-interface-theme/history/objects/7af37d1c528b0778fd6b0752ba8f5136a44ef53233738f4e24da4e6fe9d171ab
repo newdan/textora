@@ -1,0 +1,139 @@
+# 界面主题优化方案：从“暖白”到“纸”
+
+状态：执行中（2026-11-02）。本轮只实施 P0；P1 是候选研究，P2 是后续系统工作。执行清单见 `docs/plans/2026-11-02-notora-interface-theme-optimization.md`。
+
+## 决策与现状
+
+共享的 `default-light` / `default-dark` 同时服务 Textora 与 notora。P0 修正共享主题的可读性，不改布局、纸面、原有 `accent` 填充、Markdown 语法色与思维导图配色。P1 只面向 notora 的纸面方向，本轮不注册、不应用 `notora-light` / `notora-dark`，也不改变 Textora 的纸面观感。
+
+浅色存在强调色当文字/焦点、橙底白字、错误/警告正文、输入边界与行号的可读性问题。深色主体文字已有较高对比度，本轮新增语义角色，但深色输入边框和行号保持生产值。
+
+以下为生产源值审计的展示近似值，不能用四舍五入后的表格数字判定达标：
+
+| 组合 | 浅色 | 深色 | 判断 |
+|---|---:|---:|---|
+| `ink` / 四层纸面 | 15.65–16.29 | 11.18–15.48 | 主体文字通过 |
+| `ink-muted` / 四层纸面 | 5.55–5.77 | 5.91–7.15 | 次要文字通过 |
+| `ink-row-selected` / `surface-row-selected` | 5.17 | 5.69 | 选中行文字通过 |
+| `accent` / 纸面 | 2.79–2.91 | 6.20–8.23 | 浅色不适合作正文与焦点 |
+| `ink-inverse` / `accent` | 2.91 | 7.58 | 浅色段选、勾选图形需修复 |
+| `danger` / 纸面 | 3.67 | 4.91 | 错误正文须有独立角色 |
+| `warning` / 纸面 | 3.20 | 10.37 | 警告正文须有独立角色 |
+| `danger-label` / `button-bg` | 6.64 | 8.61 | 危险按钮保留成对派生 |
+| `control-border` / 纸面 | 1.41 | 3.16 | 浅色输入边界需修复 |
+| `button-border` / `button-bg` | 1.54 | 3.70 | 普通按钮边界的增强属于 P1 候选 |
+| 编辑器行号 / 画布 | 2.81 | 6.66 | 浅色行号需修复 |
+
+审计更正：
+
+- `highlight` / `inactive_highlight` 有搜索高亮消费者，见 `crates/ui/src/decorations.rs:183` 与 `crates/app/src/app_renderer.rs:1092`。本轮保留，不能因与 `accent` 同值或色相孤立就废弃。
+- `hover_surface` / `button_hover_surface` 即使当前同源，也分别表达外壳与按钮语义。值相等不足以证明字段冗余，删除必须另做消费者与兼容性审计。
+- 浅色中性轴、纸面阶梯和冷灰悬停属于 P1 材质议题，不混入 P0。
+- notora 目前只有内置浅/深模式；共享 `ui` 的 TOML 加载能力尚未接成 notora 的用户主题选择入口。
+
+## P0：可读性修正
+
+### 前置数据协议
+
+五个角色必须先进入 `ColorPalette`，作为 `ThemeDefinition.palette` 的 sRGB 源值，再完整经过 `Theme::from_definition` 的颜色转换、`ApplicationTheme`、`SettingsTheme` 到达控件。禁止只在控件中硬编码或重新由 `accent` / `text_inverse` 推导。
+
+| 角色 | 浅色源值 | 深色源值 | 消费者 |
+|---|---|---|---|
+| `on_accent` | `#2a1808` | `#2a1504` | 段选文字、checkbox 勾形、switch 已选文字/图形 |
+| `accent_text` | `#9a4815` | `#f2a659` | 活动文字、菜单/ghost 选中文字、需要可辨识的活动图标 |
+| `danger_text` | `#b3261e` | `#f08a7f` | 错误正文、无匹配结果等错误说明 |
+| `warning_text` | `#8a5a00` | `#e5ca9a` | 警告正文 |
+| `focus_ring` | `#c2410c` | `#f59a4a` | TextBox 与其他控件焦点轮廓 |
+| `input_border`（`control-border`） | `#9f8d76` | 保持 `#77695d` | 输入框普通态边界 |
+| `editor.line_number` | `#75695c` | 保持 `#a99b8e` | 编辑器行号 |
+
+`ThemeFile.palette` 为上述五个新角色提供 `Option<String>` 覆盖；旧 TOML 没有新字段时继承所选基主题。保留已有解析规则，不添加对用户主题低对比度的自动拒绝，不扩展 schema/meta。
+
+### 消费者修正
+
+- `segmented.selected_foreground` 改为 `on_accent`，`selected_background` 继续为原 `accent`。
+- checkbox 勾形、switch 已选文字/图形使用 `on_accent`；填充继续使用 `accent`。不能只修段选后留下相同问题。
+- TextBox 聚焦边框改用 `focus_ring`，保持现有宽度；checkbox、switch 等已走 SettingsTheme 的焦点角色同步受益。
+- 菜单/ghost/category 的选中文字和活动图标用 `accent_text`。`accent` 保留为填充与混色源；不得全局搜索替换所有 `accent`。
+- 错误/警告正文使用 `danger_text` / `warning_text`；危险按钮保留自己的成对派生前景/背景，危险指示条与混色源继续使用原状态色。没有现存警告正文时只传通角色，不凭空增加 UI。
+- 普通按钮边框、表面阶梯与 hover 公式在 P0 保持不变，不能宣称 P0 已实现所有按钮边界 ≥3。
+
+## P1：notora 纸面候选（本轮不落地）
+
+保留总体方向：暖纸、暖墨、暖悬停，不加纹理或投影。下表是候选目标，尚未形成可直接写入底层色板的完整协议。
+
+| token | 浅色生产 → 候选 | 深色生产 → 候选 |
+|---|---|---|
+| `surface-window` | `#fcfaf8` → `#f4eee4` | `#332d29` → `#2c251f` |
+| `surface-navigation` | `#fefdfc` → `#faf6ed` | `#27221f` → `#241e19` |
+| `surface-editor` | `#ffffff` → `#fffcf6` | `#191614` → `#171310` |
+| `surface-overlay` | `#ffffff` → `#fffdf8` | `#36302b` → `#352c25` |
+| `surface-row-hover` | `#f9f7f4` → `#efe7da` | `#433a33` → `#3a2f26` |
+| `surface-row-selected` | `#f8e5d2` → `#f6e3cc` | `#493529` → `#3e2c1e` |
+| `surface-selected` | `#f8e5d2` → `#f6e3cc`（实心候选，待重算） | `#f59a4a24` → `#f59a4a2e`（约 18%） |
+| `ink` | `#202020` → `#2a2119` | `#f2ede8` → `#f3eae0` |
+| `ink-muted` | `#62666c` → `#6a5c4e` | `#b8ada3` → `#bfb0a0` |
+| `divider` | `#efeae3` → `#e8e0d2` | `#463c35` → `#3e342b` |
+| `line-strong` | `#ded8d1` → `#d8cdbc` | `#77695d` → `#776758` |
+| `control-bg` | `#ffffff` → `#fbf7ef` | `#211d1a` → `#1e1915` |
+| `button-bg` | `#fbfbfb` → `#f7f2e8` | `#2f2c2a` → `#302821` |
+| `button-border` | `#d2ccc5` → `#98866f` | `#8d8279` → `#8a7865` |
+| `button-hover` | `#f7f7f7` → `#f1eadd` | `#3d3b3a` → `#3a3028` |
+| `button-pressed` | `#f1f1f1` → `#eadfce` | `#454341` → `#443830` |
+
+### 候选尚未解决的派生关系
+
+`button-*` 是 `ApplicationTheme` / `ButtonStyle` 的线性空间派生结果，并非可任意独立填色的现有 palette 字段。将候选底色代入现公式，浅色约得到 `button-bg #fbf9f4`、`button-border #ccc2b2`，不会得到表中的 `#f7f2e8` / `#98866f`。P1 必须先选择“增加明确语义覆盖”或“修改派生公式”，再连同危险按钮全部状态一起重算，不能声称只换 palette 即可得到目标。
+
+`#9f8d76` 对候选 window 约 2.78、navigation 约 2.97、control-bg 约 3.002；不是全局 ≥3 的边界色。P1 必须依真实内外相邻背景重新选边框，并保留精度判定。边框 ≥3 是本产品对必要控件边界的政策，并非所有装饰分隔线都被 WCAG 强制要求 3:1。
+
+浅色候选 window/navigation/editor 的 L* 约为 94.31 / 96.96 / 99.04，overlay 约 99.33；相邻差值约 2.65 / 2.08，不能标成“相邻 3–6”。未来先用视觉与测量共同确定阶梯，不把一个未经验证的数字范围当验收。
+
+### 三类选中规则
+
+1. 导航行/卡片：实心 `surface-row-selected` + 专用 `ink-row-selected`。
+2. 菜单/ghost：水洗 `surface-selected` + `accent_text`。浅色候选 `#f6e3cc` 是不透明实心色，不能标成 18% 水洗；若采用水洗规则，须重新给出 alpha 源值、底色和合成结果。
+3. 分段控件：实心 `accent` + `on_accent`。不归入菜单水洗，也不改用行卡纸面。
+
+候选 hover 的“暖褐 5%”也要明确叠加源和底面；表中实心目标不等于现有运行时叠加公式。`accent`、行卡专用字与危险按钮角色优先保留，全部组合仍需回归。
+
+### 后续入口与边界
+
+若未来注册 notora 专属主题对，必须同时检查 `crates/notora-app/src/runtime.rs`、`crates/notora-app/src/runtime/frame_runtime.rs`、`crates/notora-app/src/render.rs` 的解析点，统一初始化、帧更新与渲染取主题路径。当前不新增 registry、不增加主题列表、不改共享默认纸面。
+
+P1 保留 Markdown 语法色，但更换编辑器背景后必须回归标题、链接、行内/块代码、目录、引用与 scopes 的实际对比度。“不改语法色”不代表可以跳过正文回归。思维导图配色仍在范围外。
+
+## 对比度与验收协议
+
+- **范围**：CI 对内置及仓库维护的主题严格验证。任意用户主题不应被测试遍历后强制拒绝；未来 P2 可以给 warning，但继续加载。
+- **颜色计算**：源值审计采用准确 sRGB 分段解码：通道 `c <= 0.04045` 时为 `c / 12.92`，否则为 `((c + 0.055) / 1.055)^2.4`；亮度为 `0.2126R + 0.7152G + 0.0722B`，对比度为 `(Lmax + 0.05) / (Lmin + 0.05)`。
+- **运行时区别**：当前主题转换是 `powf(2.2)`，并在线性空间派生/合成；不能把运行时颜色再次按 sRGB 解码，也不能把十六进制审计结果冒充运行时结果。测试分别标明“源 sRGB 审计”和“运行时派生”，后者直接在线性空间算亮度与 alpha 合成，按实际渲染结果验收。本轮不擅自更换全局 gamma 算法。
+- **组合覆盖**：检查 normal、hover、pressed、selected、focused、disabled；透明前景、背景、控件全局 alpha 先合成到真实承载面，再比较。覆盖实际相邻底面，不仅是一个默认画布。禁用控件记录结果和例外，不强行套用启用正文阈值。
+- **P0 门槛**：正文与必要选中文字 ≥4.5；必要图形/活动图标、焦点与输入边界 ≥3；行号 ≥4.5。数字必须以未舍入值比较，`2.999…` 不能打印为 3.0 后通过。深色保留项做回归，新增角色按实际状态配对检查。
+- **P1 门槛**：后续单独验收按钮等必要边界 ≥3、三类选中、纸面与 Markdown 背景回归。纸面浅色 window < navigation < editor、深色反向的方向约束仅用于 notora 纸面候选，不强加给任意主题。overlay 的可分辨性用具体组合和视觉确认，不能用浮点“不相等”代替。
+- **视觉检查**：浅/深检查 Button、NavigationItem、NoteCard、SearchField、SegmentedControl、Dialog，额外覆盖 checkbox/switch、活动图标、错误/警告文案；P0 保持布局与纸面，P1 截图不能冒充当前生产。
+- **最终回归**：`cargo fmt --all -- --check`、定向主题/控件测试、`cargo check --workspace`，最终 `./scripts/verify.sh`。没有实际通过的检查不得宣称完成。
+
+## 实施切分与文档同步
+
+按依赖依次实施，每个子任务最多修改三个文件；跨任务完成新增字段链路后统一编译，任何提交前必须编译通过。具体文件、命令与检查点以执行计划为准。
+
+1. P0 源值与转换：`theme/color.rs`、`theme/mod.rs`、`theme/application.rs`。
+2. P0 Settings 与 TOML 兼容：`theme/settings.rs`、`theme_file.rs`。
+3. P0 按钮、焦点与设置测试：`widgets/button/style.rs`、`widgets/text_box.rs`、`widgets/settings_view/widget.rs`。
+4. P0 勾选/开关：`widgets/checkbox.rs`、`widgets/switch.rs`。
+5. P0 活动/错误文案消费者：按实际检索结果分批，每批最多三文件，保留填充/指示条角色。
+6. P0 对比度与生产同步：新增/扩展针对维护主题的测试；README、tokens.json、tokens.css 同步为验证后的生产值，文档与 token 同步另成最多三文件的子任务。
+
+README 是当前生产说明。本次先纠正其错误陈述；五个新角色与目标数值只能在代码真正落地后写成生产值，token 文件交由后续同步任务。本轮不做 P1 注册、去重删除、schema/meta、主题列表或用户主题 warning。
+
+## P2：后续系统工作
+
+用户主题低对比度 warnings、notora 主题选择入口与主题元数据另立需求。字段去重只有在完整消费者、外部兼容与迁移审计后才可决定，不能以同值作依据。Markdown 语法配色优化另起一轮，仍先审实际背景与对比度。
+
+## 不建议做
+
+- 纸纹噪声、贴图、发光、彩色左边框或大范围投影。
+- 为“纸感”扩大所有圆角、修改布局或改变控件尺寸。
+- 给选中行叠加左侧色条和额外图标强调。
+- 在 notora 渲染代码里硬编码候选纸面颜色，或为本轮顺手增加主题 schema/meta。

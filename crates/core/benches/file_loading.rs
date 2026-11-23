@@ -59,7 +59,7 @@ fn bench_open_50mb_ascii(c: &mut Criterion) {
 
     c.bench_function("open_50mb_ascii", |b| {
         b.iter(|| {
-            let (buf, meta) = core::file::load_file(&path).expect("load failed");
+            let (buf, meta) = textora_core::file::load_file(&path).expect("load failed");
             std::hint::black_box((&buf, &meta));
         });
     });
@@ -72,7 +72,7 @@ fn bench_open_50mb_cjk(c: &mut Criterion) {
 
     c.bench_function("open_50mb_cjk", |b| {
         b.iter(|| {
-            let (buf, meta) = core::file::load_file(&path).expect("load failed");
+            let (buf, meta) = textora_core::file::load_file(&path).expect("load failed");
             std::hint::black_box((&buf, &meta));
         });
     });
@@ -85,7 +85,8 @@ fn bench_open_50mb_dense_cjk(c: &mut Criterion) {
 
     c.bench_function("open_50mb_dense_cjk", |b| {
         b.iter(|| {
-            let (buf, meta) = core::file::load_file(&path).expect("load dense CJK benchmark file");
+            let (buf, meta) =
+                textora_core::file::load_file(&path).expect("load dense CJK benchmark file");
             assert_eq!(meta.original_encoding, None);
             std::hint::black_box((&buf, &meta));
         });
@@ -99,7 +100,7 @@ fn bench_open_200mb_ascii(c: &mut Criterion) {
 
     c.bench_function("open_200mb_ascii", |b| {
         b.iter(|| {
-            let (buf, meta) = core::file::load_file(&path).expect("load failed");
+            let (buf, meta) = textora_core::file::load_file(&path).expect("load failed");
             std::hint::black_box((&buf, &meta));
         });
     });
@@ -119,7 +120,7 @@ fn validate_thresholds(c: &mut Criterion) {
                 let mut times = Vec::with_capacity(10);
                 for _ in 0..10 {
                     let start = Instant::now();
-                    let (buf, _meta) = core::file::load_file(&path).expect("load failed");
+                    let (buf, _meta) = textora_core::file::load_file(&path).expect("load failed");
                     times.push(start.elapsed());
                     std::hint::black_box(&buf);
                 }
@@ -143,7 +144,7 @@ fn validate_thresholds(c: &mut Criterion) {
                 let mut times = Vec::with_capacity(10);
                 for _ in 0..10 {
                     let start = Instant::now();
-                    let (buf, _meta) = core::file::load_file(&path).expect("load failed");
+                    let (buf, _meta) = textora_core::file::load_file(&path).expect("load failed");
                     times.push(start.elapsed());
                     std::hint::black_box(&buf);
                 }
@@ -167,7 +168,7 @@ fn validate_thresholds(c: &mut Criterion) {
                 let mut times = Vec::with_capacity(10);
                 for _ in 0..10 {
                     let start = Instant::now();
-                    let (buf, _meta) = core::file::load_file(&path).expect("load failed");
+                    let (buf, _meta) = textora_core::file::load_file(&path).expect("load failed");
                     times.push(start.elapsed());
                     std::hint::black_box(&buf);
                 }

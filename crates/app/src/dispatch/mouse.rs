@@ -4,19 +4,14 @@ use crate::dispatch::wysiwyg::{
     apply_edit_hit_target, query_visual_caret_hit, set_wysiwyg_cursor_and_selection,
     set_wysiwyg_visual_caret_and_selection,
 };
-use crate::edit_transaction::execute_edit_plan;
 use crate::mouse::CanvasDragEligibility;
-use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
-use core::types::UniCharOffset;
+use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
+use textora_core::types::UniCharOffset;
 use ui::canvas::CanvasPoint;
-use ui::plugin::{
-    CanvasDragPhase, CanvasDragRequest, CanvasDragResponse, CursorAffinity, EditHitTarget,
-    EditPlan, EditTransaction, PluginMessage, VisualCaretPosition,
-};
+use ui::plugin::{CursorAffinity, EditHitTarget, PluginMessage, VisualCaretPosition};
 use winit::event::ElementState;
 
 const PLUGIN_SELECTION_DRAG_THRESHOLD_LOGICAL_PX: f32 = 5.0;
-const CANVAS_DRAG_THRESHOLD_PX: f32 = 5.0;
 
 fn visual_caret_for_hit(app: &App, byte_offset: usize, x: f32, y: f32) -> VisualCaretPosition {
     let bounds = app.plugin_render_bounds();
@@ -26,34 +21,11 @@ fn visual_caret_for_hit(app: &App, byte_offset: usize, x: f32, y: f32) -> Visual
         .unwrap_or(VisualCaretPosition { byte_offset, affinity: CursorAffinity::Downstream })
 }
 
-fn editor_input_context(app: &App) -> EditorInputContext {
-    let editor_focus =
-        matches!(app.ui_shell.keyboard_focus(), crate::ui_shell::KeyboardFocusTarget::Editor)
-            && app.editor_runtime.window_focused();
-    EditorInputContext {
-        focus: if editor_focus { EditorFocus::Active } else { EditorFocus::Inactive },
-        modal_blocked: app.ui_shell.active_overlay_is_modal(),
-    }
-}
-
 fn semantic_drag_stays_within_scope(
     start_scope: Option<&std::ops::Range<usize>>,
     current_scope: Option<&std::ops::Range<usize>>,
 ) -> bool {
     start_scope.is_none_or(|scope| current_scope == Some(scope))
-}
-
-fn expanded_wysiwyg_hit_point(
-    mouse_x: f32,
-    mouse_y: f32,
-    cursor_rect: Option<(f32, f32, f32, f32)>,
-    offset_x: f32,
-    offset_y: f32,
-) -> (f32, f32) {
-    let Some((cursor_x, cursor_y, _cursor_width, cursor_height)) = cursor_rect else {
-        return (mouse_x, mouse_y);
-    };
-    (offset_x + cursor_x, offset_y + cursor_y + cursor_height * 0.5)
 }
 
 fn plugin_selection_drag_started(
@@ -66,13 +38,6 @@ fn plugin_selection_drag_started(
     let dy = py - mouse.last_click_pos.1;
     let threshold = PLUGIN_SELECTION_DRAG_THRESHOLD_LOGICAL_PX * scale_factor as f32;
     let threshold_sq = threshold * threshold;
-    dx * dx + dy * dy > threshold_sq
-}
-
-fn canvas_drag_started(session: &crate::mouse::CanvasDragSession, px: f32, py: f32) -> bool {
-    let dx = px - session.pressed_at.0;
-    let dy = py - session.pressed_at.1;
-    let threshold_sq = CANVAS_DRAG_THRESHOLD_PX * CANVAS_DRAG_THRESHOLD_PX;
     dx * dx + dy * dy > threshold_sq
 }
 
@@ -97,21 +62,12 @@ impl App {
             };
             let pressed = state.is_pressed();
             if pressed {
-                let _ = self.editor_runtime.begin_text_selection(editor_input_context(self));
+                let _ = self.editor_runtime.begin_text_selection(self.editor_input_context());
             } else {
                 self.editor_runtime.end_pointer_capture();
             }
             if pressed {
-                let now = std::time::Instant::now();
-                let elapsed = now.duration_since(self.mouse.last_click_time);
-                let dx = px - self.mouse.last_click_pos.0;
-                let dy = py - self.mouse.last_click_pos.1;
-                if elapsed.as_millis() > 500 || dx * dx + dy * dy > 25.0 {
-                    self.mouse.click_count = 0;
-                }
-                self.mouse.click_count = (self.mouse.click_count + 1).min(3);
-                self.mouse.last_click_time = now;
-                self.mouse.last_click_pos = (px, py);
+                self.mouse.record_editor_press((px, py));
             }
             self.mouse.is_down = pressed;
             let click_count = self.mouse.click_count;
@@ -159,17 +115,7 @@ impl App {
             if state.is_pressed() {
                 self.editor_runtime.end_pointer_capture();
                 let _ = self.cancel_canvas_drag();
-                let now = std::time::Instant::now();
-                let elapsed = now.duration_since(self.mouse.last_click_time);
-                let dx = px - self.mouse.last_click_pos.0;
-                let dy = py - self.mouse.last_click_pos.1;
-                let dist_sq = dx * dx + dy * dy;
-                if elapsed.as_millis() > 500 || dist_sq > 25.0 {
-                    self.mouse.click_count = 0;
-                }
-                self.mouse.click_count = (self.mouse.click_count + 1).min(3);
-                self.mouse.last_click_time = now;
-                self.mouse.last_click_pos = (px, py);
+                self.mouse.record_editor_press((px, py));
 
                 self.sync_plugin_state();
                 // Pointer-driven caret placement splits any ongoing undo
@@ -209,32 +155,18 @@ impl App {
                         }
                         self.editor_runtime.set_preferred_x(None);
                         let _ =
-                            self.editor_runtime.begin_text_selection(editor_input_context(self));
+                            self.editor_runtime.begin_text_selection(self.editor_input_context());
                         self.mouse.is_down = true;
                         return AppEffect::REDRAW;
                     }
                     Some(Some(EditHitTarget::CanvasControl { source_range })) => {
-                        self.editor_runtime.end_pointer_capture();
                         self.mouse.wysiwyg_selection_scope = None;
-                        let source_generation = self
-                            .active_tab_session()
-                            .map(|tab| tab.document.generation())
-                            .unwrap_or_default();
-                        let plan = self.active_tab_session().and_then(|tab| {
-                            tab.canvas_control_edit_plan(source_range, source_generation)
-                        });
-                        if let Some(EditPlan::Apply(transaction)) = plan {
-                            if let Some(tab) = self.active_tab_session_mut() {
-                                let _ =
-                                    execute_edit_plan(EditPlan::Apply(transaction), tab.document);
-                            }
-                            self.sync_plugin_state();
-                        }
                         self.mouse.is_down = false;
-                        return AppEffect::REDRAW;
+                        let outcome = self.editor_runtime.handle_canvas_control(source_range);
+                        return self.apply_canvas_pointer_outcome(outcome);
                     }
                     Some(Some(EditHitTarget::SourceObject { source_range })) => {
-                        let _ = self.editor_runtime.begin_canvas_drag(editor_input_context(self));
+                        let _ = self.editor_runtime.begin_canvas_drag(self.editor_input_context());
                         self.mouse.wysiwyg_selection_scope = None;
                         if let Some(mut tab) = self.active_tab_session_mut() {
                             let source_generation = tab.document.generation();
@@ -256,7 +188,7 @@ impl App {
                     }
                     Some(Some(target)) => {
                         let _ =
-                            self.editor_runtime.begin_text_selection(editor_input_context(self));
+                            self.editor_runtime.begin_text_selection(self.editor_input_context());
                         self.mouse.wysiwyg_selection_scope = None;
                         if let Some(mut tab) = self.active_tab_session_mut() {
                             apply_edit_hit_target(&mut tab, target);
@@ -278,7 +210,7 @@ impl App {
                     return AppEffect::NONE;
                 };
                 self.mouse.wysiwyg_selection_scope = None;
-                let _ = self.editor_runtime.begin_text_selection(editor_input_context(self));
+                let _ = self.editor_runtime.begin_text_selection(self.editor_input_context());
                 let click_count = self.mouse.click_count;
                 if let Some(mut tab) = self.active_tab_session_mut() {
                     if click_count == 2 {
@@ -303,20 +235,19 @@ impl App {
                 self.mouse.is_down = false;
                 self.mouse.wysiwyg_selection_scope = None;
                 if let Some(session) = self.mouse.canvas_drag.take() {
-                    if !session.started {
+                    let Some(request) =
+                        session.release_request((px, py), self.plugin_render_bounds())
+                    else {
                         return AppEffect::REDRAW;
-                    }
-                    let response =
-                        self.dispatch_canvas_drag(CanvasDragPhase::Drop, &session, px, py);
-                    return self.handle_canvas_drag_response(CanvasDragPhase::Drop, response);
+                    };
+                    let outcome = self.editor_runtime.handle_canvas_drag_request(request);
+                    return self.apply_canvas_pointer_outcome(outcome);
                 }
                 // Clear empty selection on mouse release (matching code editor
                 // path behavior in handle_mouse_input).
                 if let Some(mut tab) = self.active_tab_session_mut()
-                    && tab.document.cursor().selection_anchor
-                        == Some(tab.document.cursor_offset().to_usize())
+                    && tab.clear_collapsed_pointer_selection()
                 {
-                    tab.document.cursor_mut().selection_anchor = None;
                     tab.send_message(ui::plugin::PluginMessage::SetSelAnchorByte(None));
                     tab.send_message(ui::plugin::PluginMessage::SetSelCursorByte(None));
                 }
@@ -326,11 +257,18 @@ impl App {
             let line_height = self.ui_metrics().line_height;
             let modifiers = self.editor_runtime.input_modifiers();
             if state.is_pressed() {
-                let _ = self.editor_runtime.begin_text_selection(editor_input_context(self));
+                let _ = self.editor_runtime.begin_text_selection(self.editor_input_context());
             } else {
                 self.editor_runtime.end_pointer_capture();
             }
-            if self.handle_editor_mouse_input(state, px, py, modifiers, hit, line_height) {
+            if self.editor_runtime.handle_source_pointer_button(
+                state,
+                (px, py),
+                &mut self.mouse,
+                modifiers,
+                hit,
+                line_height,
+            ) {
                 return AppEffect::REDRAW;
             }
             AppEffect::NONE
@@ -399,15 +337,12 @@ impl App {
             };
         }
 
-        let tab = self.active_tab_session()?;
-        let expanded_cursor_rect = tab.query_cursor_screen_rect(snapped_candidate);
-        let (expanded_x, expanded_y) =
-            expanded_wysiwyg_hit_point(px, py, expanded_cursor_rect, offset_x, offset_y);
-
         // ---- Phase 2: hit-test on the NEW layout ----
-        let final_byte = tab
-            .hit_test_byte(expanded_x, expanded_y, offset_x, offset_y)
-            .unwrap_or(snapped_candidate);
+        let final_byte = self.active_tab_session()?.hit_test_expanded_plugin_byte(
+            snapped_candidate,
+            (px, py),
+            render_bounds,
+        );
 
         let snapped_final = if final_byte != snapped_candidate {
             let mut tab = self.active_tab_session_mut()?;
@@ -423,14 +358,9 @@ impl App {
         Some(snapped_final)
     }
 
-    fn hit_test_plugin_byte_from_point(&mut self, px: f32, py: f32) -> Option<usize> {
+    fn hit_test_plugin_byte_from_point(&self, px: f32, py: f32) -> Option<usize> {
         let render_bounds = self.plugin_render_bounds();
-        let offset_x = render_bounds.x;
-        let offset_y = render_bounds.y;
-        let tab = self.active_tab_session_mut()?;
-
-        tab.hit_test_byte(px, py, offset_x, offset_y)
-            .or_else(|| (py - offset_y > tab.content_height()).then(|| tab.document.buffer_len()))
+        self.active_tab_session()?.hit_test_plugin_byte_or_end((px, py), render_bounds)
     }
 
     pub(crate) fn query_plugin_edit_hit_target(
@@ -446,89 +376,36 @@ impl App {
         tab.hit_test_edit_target(px, py, offset_x, offset_y)
     }
 
-    fn dispatch_canvas_drag(
-        &mut self,
-        phase: CanvasDragPhase,
-        session: &crate::mouse::CanvasDragSession,
-        pointer_x: f32,
-        pointer_y: f32,
-    ) -> CanvasDragResponse {
-        let render_bounds = self.plugin_render_bounds();
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return CanvasDragResponse::Ignore;
-        };
-        tab.handle_canvas_drag_plugin(CanvasDragRequest {
-            phase,
-            source_range: session.source_range.clone(),
-            pointer_x,
-            pointer_y,
-            pressed_x: session.pressed_at.0,
-            pressed_y: session.pressed_at.1,
-            offset_x: render_bounds.x,
-            offset_y: render_bounds.y,
-            source_generation: session.source_generation,
-        })
-    }
-
-    fn handle_canvas_drag_response(
-        &mut self,
-        phase: CanvasDragPhase,
-        response: CanvasDragResponse,
-    ) -> AppEffect {
-        match response {
-            CanvasDragResponse::Ignore => AppEffect::NONE,
-            CanvasDragResponse::Preview(_) => AppEffect::REDRAW,
-            CanvasDragResponse::Apply(transaction) if phase == CanvasDragPhase::Drop => {
-                self.apply_canvas_drag_transaction(transaction)
+    fn apply_canvas_pointer_outcome(&self, outcome: EditorOutcome) -> AppEffect {
+        for notification in outcome.notifications {
+            if let EditorNotification::DirtyChanged { dirty, .. } = notification {
+                self.update_document_edited(dirty);
             }
-            CanvasDragResponse::Apply(_) => AppEffect::NONE,
         }
-    }
-
-    fn apply_canvas_drag_transaction(&mut self, transaction: EditTransaction) -> AppEffect {
-        if let Some(tab) = self.active_tab_session_mut() {
-            let _ = execute_edit_plan(EditPlan::Apply(transaction), tab.document);
-        }
-        self.sync_plugin_state();
-        AppEffect::REDRAW
+        outcome.shell_effect
     }
 
     fn dispatch_canvas_drag_moved(&mut self, px: f32, py: f32) -> AppEffect {
-        let (phase, session) = {
-            let Some(session) = self.mouse.canvas_drag.as_mut() else {
-                return AppEffect::NONE;
-            };
-            if session.eligibility == CanvasDragEligibility::Disabled {
-                return AppEffect::NONE;
-            }
-            if !session.started {
-                if !canvas_drag_started(session, px, py) {
-                    return AppEffect::NONE;
-                }
-                session.started = true;
-                (CanvasDragPhase::Start, session.clone())
-            } else {
-                (CanvasDragPhase::Update, session.clone())
-            }
+        let bounds = self.plugin_render_bounds();
+        let Some(request) = self
+            .mouse
+            .canvas_drag
+            .as_mut()
+            .and_then(|session| session.move_request((px, py), bounds))
+        else {
+            return AppEffect::NONE;
         };
-        let response = self.dispatch_canvas_drag(phase, &session, px, py);
-        self.handle_canvas_drag_response(phase, response)
+        self.editor_runtime.handle_canvas_drag_request(request).shell_effect
     }
 
     pub(crate) fn cancel_canvas_drag(&mut self) -> AppEffect {
         let Some(session) = self.mouse.canvas_drag.take() else {
             return AppEffect::NONE;
         };
-        if !session.started {
+        let Some(request) = session.cancel_request(self.plugin_render_bounds()) else {
             return AppEffect::NONE;
-        }
-        let response = self.dispatch_canvas_drag(
-            CanvasDragPhase::Cancel,
-            &session,
-            session.pressed_at.0,
-            session.pressed_at.1,
-        );
-        self.handle_canvas_drag_response(CanvasDragPhase::Cancel, response).merge(AppEffect::REDRAW)
+        };
+        self.editor_runtime.handle_canvas_drag_request(request).shell_effect
     }
 
     pub(crate) fn dispatch_editor_cursor_moved(
@@ -648,7 +525,7 @@ impl App {
             }
             AppEffect::NONE
         } else {
-            if self.handle_editor_cursor_moved(px, py, hit) {
+            if self.editor_runtime.move_source_pointer_selection(&mut self.mouse, hit) {
                 return AppEffect::REDRAW;
             }
             AppEffect::NONE
@@ -716,7 +593,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -733,7 +610,11 @@ mod tests {
             true
         }
 
-        fn query(&self, query: PluginQuery, _doc: &dyn core::document::DocView) -> PluginResponse {
+        fn query(
+            &self,
+            query: PluginQuery,
+            _doc: &dyn textora_core::document::DocView,
+        ) -> PluginResponse {
             match query {
                 PluginQuery::NeedsSourceUpdate(_) => PluginResponse::Bool(false),
                 PluginQuery::HitTestEditTarget { .. } => {
@@ -747,7 +628,7 @@ mod tests {
         fn handle_message(
             &mut self,
             _message: PluginMessage,
-            _doc: &mut dyn core::document::DocViewMut,
+            _doc: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             false
         }
@@ -755,7 +636,7 @@ mod tests {
         fn handle_canvas_drag(
             &mut self,
             request: CanvasDragRequest,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
         ) -> CanvasDragResponse {
             let mut state = self.state.borrow_mut();
             let response = state.response_for(request.phase);
@@ -783,7 +664,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -800,7 +681,11 @@ mod tests {
             true
         }
 
-        fn query(&self, query: PluginQuery, _doc: &dyn core::document::DocView) -> PluginResponse {
+        fn query(
+            &self,
+            query: PluginQuery,
+            _doc: &dyn textora_core::document::DocView,
+        ) -> PluginResponse {
             match query {
                 PluginQuery::NeedsSourceUpdate(_) => PluginResponse::Bool(false),
                 PluginQuery::HitTestEditTarget { .. } => {
@@ -819,7 +704,7 @@ mod tests {
         fn handle_message(
             &mut self,
             message: PluginMessage,
-            _doc: &mut dyn core::document::DocViewMut,
+            _doc: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             if let PluginMessage::SetCanvasPointer(point) = message {
                 self.state.borrow_mut().pointer_positions.push(point);
@@ -831,7 +716,7 @@ mod tests {
         fn handle_canvas_drag(
             &mut self,
             request: CanvasDragRequest,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
         ) -> CanvasDragResponse {
             self.state.borrow_mut().drag_requests.push(request);
             CanvasDragResponse::Ignore
@@ -941,7 +826,7 @@ mod tests {
     #[cfg(feature = "markdown")]
     fn canvas_control_end_to_end() {
         let source = "# Root\n## Parent\n### Child\n#### Grandchild";
-        let tree = textora_markdown::mmf::parser::parse(source).expect("mmap fixture must parse");
+        let tree = textora_mindmap::mmf::parser::parse(source).expect("mmap fixture must parse");
         let parent_range = tree.root.children[0].subtree_source_range.clone();
         let root_range = tree.root.subtree_source_range.clone();
         let child_range = tree.root.children[0].children[0].subtree_source_range.clone();
@@ -950,7 +835,7 @@ mod tests {
         let document = DocumentView::new(source.lines().map(str::to_owned).collect(), 80, 10.0);
         app.push_entry_for_test(
             document,
-            Box::new(textora_markdown::mindmap_view::MindmapView::new()),
+            Box::new(textora_mindmap::mindmap_view::MindmapView::new()),
         );
         app.switch_workspace_for_test(0);
         let _ = render_mindmap_canvas_for_control_test(&mut app);
@@ -1108,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn canvas_drag_ignore_does_not_modify_document() {
+    fn canvas_drag_ignored_drop_redraws_without_modifying_document() {
         let state =
             Rc::new(RefCell::new(CanvasDragTestState::with_response(CanvasDragResponse::Ignore)));
         let mut app = app_with_canvas_drag_plugin("abc", state);
@@ -1121,13 +1006,14 @@ mod tests {
             None,
         );
         app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
-        app.dispatch_editor_mouse_input(
+        let release_effect = app.dispatch_editor_mouse_input(
             ElementState::Released,
             bounds.x + 20.0,
             bounds.y + 20.0,
             None,
         );
 
+        assert_eq!(release_effect, AppEffect::REDRAW);
         assert_eq!(active_text(&app), "abc");
     }
 
@@ -1367,25 +1253,5 @@ mod tests {
 
         let entry = app.active_tab_session().expect("active entry");
         assert_eq!(entry.document.selection_range(), Some((0, "title".len())));
-    }
-
-    #[test]
-    fn expanded_wysiwyg_hit_point_uses_cursor_rect_when_available() {
-        let hit_point = super::expanded_wysiwyg_hit_point(
-            40.0,
-            12.0,
-            Some((120.0, 24.0, 2.0, 18.0)),
-            10.0,
-            30.0,
-        );
-
-        assert_eq!(hit_point, (130.0, 63.0));
-    }
-
-    #[test]
-    fn expanded_wysiwyg_hit_point_falls_back_to_mouse_point_without_cursor_rect() {
-        let hit_point = super::expanded_wysiwyg_hit_point(40.0, 12.0, None, 10.0, 30.0);
-
-        assert_eq!(hit_point, (40.0, 12.0));
     }
 }

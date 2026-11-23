@@ -1,0 +1,71 @@
+<!-- @dsCard group="导航" height=280 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>NavigationItem — 预览</title>
+<style>
+  html, body { margin:0; height:100%; }
+  body { background:var(--surface-window); color:var(--ink); font-family:var(--font-sans); -webkit-font-smoothing:antialiased; }
+  .frame { height:100%; display:flex; }
+  .rail { box-sizing:border-box; width:220px; height:100%; padding:8px; background:var(--surface-window); }
+  .rail-head { box-sizing:border-box; height:36px; padding:0 8px 6px; display:flex; flex-direction:column; justify-content:flex-end; gap:2px; }
+  .eyebrow { font-size:11px; line-height:14px; color:var(--ink-muted); }
+  .workspace { font-size:13px; line-height:18px; font-weight:600; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rows { display:flex; flex-direction:column; }
+  .row { position:relative; box-sizing:border-box; height:28px; padding:0 8px 0 8px; display:flex; align-items:center; gap:6px;
+         font-size:13px; line-height:18px; color:var(--ink); }
+  .row .hit { position:absolute; inset:1px 2px; border-radius:8px; z-index:0; }
+  .row > * { position:relative; z-index:1; }
+  .row.hover .hit { background:var(--surface-row-hover); }
+  .row.selected .hit { background:var(--surface-row-selected); }
+  .row.selected { color:var(--ink-row-selected); font-weight:600; }
+  .row .icon { width:16px; height:16px; flex:none; color:var(--ink-muted); }
+  .row .label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row .chev { width:14px; height:14px; flex:none; color:var(--ink-muted); }
+  .badge { box-sizing:border-box; min-width:20px; height:19px; padding:0 6px; border-radius:10px; background:var(--surface-overlay);
+           display:inline-flex; align-items:center; justify-content:center; font-size:13px; line-height:18px; font-weight:400; color:var(--ink-muted); }
+  .row.nested { padding-left:24px; }
+  .gap { height:12px; }
+  .row.muted { color:var(--ink-muted); }
+</style>
+</head>
+<body>
+<div class="frame">
+  <nav class="rail">
+    <div class="rail-head">
+      <span class="eyebrow">工作区</span>
+      <span class="workspace">我的笔记</span>
+    </div>
+    <div class="rows">
+      <div class="row selected"><span class="hit"></span>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
+        <span class="label">全部笔记</span><span class="badge">24</span>
+      </div>
+      <div class="row"><span class="hit"></span>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+        <span class="label">星标</span><span class="badge">6</span>
+      </div>
+      <div class="row"><span class="hit"></span>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z"/><circle cx="7.5" cy="7.5" r=".5"/></svg>
+        <span class="label">标签</span>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </div>
+      <div class="row nested"><span class="hit"></span>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z"/><circle cx="7.5" cy="7.5" r=".5"/></svg>
+        <span class="label">产品</span><span class="badge">12</span>
+      </div>
+      <div class="row nested"><span class="hit"></span>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z"/><circle cx="7.5" cy="7.5" r=".5"/></svg>
+        <span class="label">会议</span>
+      </div>
+      <div class="gap"></div>
+      <div class="row muted"><span class="hit"></span>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+        <span class="label">回收站</span><span class="badge">2</span>
+      </div>
+    </div>
+  </nav>
+</div>
+</body>
+</html>

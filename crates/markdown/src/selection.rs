@@ -7,7 +7,7 @@
 use crate::grapheme_map::byte_at_grapheme_index;
 use crate::layout::{FlatLine, grapheme_at_x, grapheme_x};
 use crate::projection::ProjectionOwnerId;
-use core::text::word_class::{CharClass, classify};
+use textora_core::text::word_class::{CharClass, classify};
 use ui::core::geom::Rect;
 use ui::core::paint::{DrawCmd, DrawList};
 

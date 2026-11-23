@@ -3522,3 +3522,256 @@ fn multiline_insert_in_containers_preserves_blockquote_and_list_continuation_pre
     assert_eq!(edited, "> hello a\n> b");
     assert_eq!(sel_aug.cursor_byte_after, "> hello a\n> b".len());
 }
+
+#[test]
+fn indented_code_block_line_break_inserts_literal_newline_without_backslash() {
+    for (source, needle, expected) in [
+        ("    let x = 1;", "1;", "    let x = \n    1;"),
+        ("    let x = 1;", "    let x = 1;", "    let x = 1;\n    "),
+        ("\tlet x = 1;", "\tlet x = 1;", "\tlet x = 1;\n\t"),
+        ("- item\n\n      code", "code", "- item\n\n      \n      code"),
+        (">     code", "code", ">     \n>     code"),
+        ("    - literal", "literal", "    - \n    literal"),
+        (">     > literal", "literal", ">     > \n>     literal"),
+    ] {
+        let cursor = if needle == source {
+            source.len()
+        } else {
+            source.find(needle).expect("fixture contains needle")
+        };
+        let augmentation = augment_edit(source, cursor, AugmentKind::LineBreak)
+            .expect("Shift+Enter in indented code block must produce augmentation");
+        let edited = apply_augmentation_at(source, cursor, &augmentation);
+        assert_eq!(edited, expected, "unexpected Shift+Enter in {source:?}");
+        assert!(!edited.contains('\\'), "indented code must not get backslash: {edited:?}");
+    }
+}
+
+#[cfg(feature = "rich-markdown")]
+#[test]
+fn heading_and_table_line_break_splits_inline_code_only() {
+    let heading_code = "# `foobar`";
+    let split = "# `foo".len();
+    let aug = augment_edit(heading_code, split, AugmentKind::LineBreak)
+        .expect("Shift+Enter inside heading inline code must augment");
+    assert_eq!(apply_augmentation_at(heading_code, split, &aug), "# `foo`<br>`bar`");
+    assert_eq!(aug.cursor_byte_after, "# `foo`<br>`".len());
+
+    let table_code = "| a |\n| --- |\n| `foobar` |";
+    let table_split = "| a |\n| --- |\n| `foo".len();
+    let table_aug = augment_edit(table_code, table_split, AugmentKind::LineBreak)
+        .expect("Shift+Enter inside table inline code must augment");
+    assert_eq!(
+        apply_augmentation_at(table_code, table_split, &table_aug),
+        "| a |\n| --- |\n| `foo`<br>`bar` |"
+    );
+
+    let heading_bold = "# **foobar**";
+    let bold_split = "# **foo".len();
+    let bold_aug = augment_edit(heading_bold, bold_split, AugmentKind::LineBreak)
+        .expect("Shift+Enter inside heading bold must augment");
+    assert_eq!(apply_augmentation_at(heading_bold, bold_split, &bold_aug), "# **foo<br>bar**");
+}
+
+#[test]
+fn multiline_inline_code_split_preserves_backtick_delimiters() {
+    let para_code = "`foo\nbar`";
+    for (needle, expected) in [("o\n", "`fo`\n\n`o\nbar`"), ("r`", "`foo\nba`\n\n`r`")] {
+        let cursor = para_code.find(needle).expect("fixture contains needle");
+        let aug = augment_edit(para_code, cursor, AugmentKind::Enter)
+            .expect("Enter inside multiline inline code must split delimiters");
+        assert_eq!(apply_augmentation_at(para_code, cursor, &aug), expected);
+    }
+
+    let quote_code = "> `foo\nbar`";
+    let cursor = "> `fo".len();
+    let aug = augment_edit(quote_code, cursor, AugmentKind::LineBreak)
+        .expect("Shift+Enter inside multiline inline code must split delimiters");
+    assert_eq!(apply_augmentation_at(quote_code, cursor, &aug), "> `fo`\\\n> `o\nbar`");
+}
+
+#[test]
+fn enter_at_line_start_after_hard_break_promotes_to_clean_boundary() {
+    for (source, expected, expected_cursor_prefix) in [
+        ("left\\\nright", "left\n\nright", "left\n\n"),
+        ("left  \nright", "left\n\nright", "left\n\n"),
+        ("left\\\\\\\nright", "left\\\\\n\nright", "left\\\\\n\n"),
+        ("left\\\r\nright", "left\r\n\r\nright", "left\r\n\r\n"),
+        ("- left\\\n  right", "- left\n- right", "- left\n- "),
+        ("1. left\\\n   right", "1. left\n2. right", "1. left\n2. "),
+        ("> left\\\n> right", "> left\n> right", "> left\n> "),
+        ("> left\\\r\n> right", "> left\r\n> right", "> left\r\n> "),
+    ] {
+        let cursor = source.find("right").expect("fixture contains right");
+        let aug = augment_edit(source, cursor, AugmentKind::Enter)
+            .unwrap_or_else(|| panic!("Enter after hard break must augment for {source:?}"));
+        assert_eq!(apply_augmentation_at(source, cursor, &aug), expected, "source={source:?}");
+        assert_eq!(
+            aug.cursor_byte_after,
+            expected_cursor_prefix.len(),
+            "cursor mismatch for {source:?}"
+        );
+    }
+
+    // Contrasts: soft break and even backslashes keep existing Enter behavior.
+    let soft = "left\nright";
+    let soft_aug = augment_edit(soft, "left\n".len(), AugmentKind::Enter).expect("soft break");
+    assert_eq!(apply_augmentation_at(soft, "left\n".len(), &soft_aug), "left\n\nright");
+
+    let escaped = "left\\\\\nright";
+    let esc_aug = augment_edit(escaped, "left\\\\\n".len(), AugmentKind::Enter).expect("escaped");
+    assert_eq!(apply_augmentation_at(escaped, "left\\\\\n".len(), &esc_aug), "left\\\\\n\nright");
+}
+
+#[cfg(feature = "rich-markdown")]
+#[test]
+fn inline_html_break_case_insensitive_deletion_and_html_block_exclusion() {
+    for html_break in ["<BR>", "<Br/>", "<BR  />", "<br >"] {
+        let source = format!("before{html_break}after");
+        let break_start = "before".len();
+        let break_end = break_start + html_break.len();
+
+        let (backspaced, backspace_cursor) = apply_backspace_with_default(&source, break_end);
+        assert_eq!(backspaced, "beforeafter", "backspace failed for {html_break:?}");
+        assert_eq!(backspace_cursor, break_start);
+
+        let (deleted, delete_cursor) = apply_delete_forward_with_default(&source, break_start);
+        assert_eq!(deleted, "beforeafter", "delete failed for {html_break:?}");
+        assert_eq!(delete_cursor, break_start);
+    }
+
+    for (source, backspace_cursor, expected_backspace, delete_cursor, expected_delete) in [
+        (
+            "<div>\n<BR>\n</div>",
+            "<div>\n<BR>".len(),
+            "<div>\n<BR\n</div>",
+            "<div>\n".len(),
+            "<div>\nBR>\n</div>",
+        ),
+        ("<BR>\n", "<BR>".len(), "<BR\n", 0, "BR>\n"),
+    ] {
+        let (backspaced, _) = apply_backspace_with_default(source, backspace_cursor);
+        assert_eq!(backspaced, expected_backspace, "html block must stay literal: {source:?}");
+
+        let (deleted, _) = apply_delete_forward_with_default(source, delete_cursor);
+        assert_eq!(deleted, expected_delete, "html block must stay literal: {source:?}");
+    }
+}
+
+#[cfg(feature = "rich-markdown")]
+#[test]
+fn inline_code_across_inline_html_break_joins_atomically_in_both_directions() {
+    for (source, br_token) in
+        [("# `foo`<br>`bar`", "<br>"), ("| a |\n| --- |\n| `foo`<BR />`bar` |", "<BR />")]
+    {
+        let backtick_before_bar = source.find("bar").expect("fixture contains bar");
+        let (backspaced, backspace_cursor) =
+            apply_backspace_with_default(source, backtick_before_bar);
+        let expected = source.replacen(&format!("`{br_token}`"), "", 1);
+        let expected_cursor = source.find(&format!("`{br_token}`")).expect("split boundary");
+        assert_eq!(backspaced, expected, "backspace join failed for {source:?}");
+        assert_eq!(backspace_cursor, expected_cursor);
+
+        let after_foo = expected_cursor;
+        let (deleted, delete_cursor) = apply_delete_forward_with_default(source, after_foo);
+        assert_eq!(deleted, expected, "delete forward join failed for {source:?}");
+        assert_eq!(delete_cursor, expected_cursor);
+    }
+
+    // Same-line adjacent inline code spans without <br> must not silently merge on Backspace.
+    let adjacent = "# `foo``bar`";
+    let cursor = "# `foo``".len();
+    let (edited, _) = apply_backspace_with_default(adjacent, cursor);
+    assert_eq!(edited, "# `foo`bar`");
+}
+
+#[test]
+fn delete_forward_joins_hard_break_symmetrically_with_backspace() {
+    for (source, cursor_needle, expected, expected_cursor_len) in [
+        ("first\\\nsecond", "first", "firstsecond", 5),
+        ("first  \nsecond", "first", "firstsecond", 5),
+        ("first\\\\\\\nsecond", "first\\\\", "first\\\\second", "first\\\\".len()),
+        ("first\\\r\nsecond", "first", "firstsecond", 5),
+        ("first\\\n   second", "first", "firstsecond", 5),
+        ("first\\\n", "first", "first", 5),
+        ("first  \n", "first", "first", 5),
+        ("- first\\\n  second", "- first", "- firstsecond", "- first".len()),
+        ("> first\\\n> second", "> first", "> firstsecond", "> first".len()),
+        ("- first\\\n  ", "- first", "- first", "- first".len()),
+        ("> first\\\n> ", "> first", "> first", "> first".len()),
+    ] {
+        let cursor = cursor_needle.len();
+        let aug = augment_delete_forward(source, cursor)
+            .unwrap_or_else(|| panic!("expected DeleteForward hard-break join for {source:?}"));
+        assert_eq!(apply_augmentation_at(source, cursor, &aug), expected, "source={source:?}");
+        assert_eq!(aug.cursor_byte_after, expected_cursor_len, "source={source:?}");
+    }
+
+    for protected in ["first\\\n- item", "first\\\n> quote", "- item\\\n  > quote"] {
+        let cursor = protected.find('\\').expect("fixture has backslash");
+        let aug = augment_delete_forward(protected, cursor)
+            .unwrap_or_else(|| panic!("must protect boundary in {protected:?}"));
+        assert_eq!(apply_augmentation_at(protected, cursor, &aug), protected);
+        assert_eq!(aug.cursor_byte_after, cursor);
+    }
+
+    assert!(augment_delete_forward("first  \n\nsecond", "first".len()).is_none());
+}
+
+#[test]
+fn delete_forward_merges_blockquote_and_list_paragraphs_cleanly() {
+    for (source, cursor, expected) in [
+        ("> first\n>\n> second", "> first".len(), "> firstsecond"),
+        ("> first\r\n>\r\n> second", "> first".len(), "> firstsecond"),
+        ("> first\n> second", "> first".len(), "> firstsecond"),
+        ("- first\n\n  second", "- first".len(), "- firstsecond"),
+        ("- first\n  second", "- first".len(), "- firstsecond"),
+        ("> quote\n\nparagraph", "> quote".len(), "> quoteparagraph"),
+    ] {
+        let aug = augment_delete_forward(source, cursor)
+            .unwrap_or_else(|| panic!("expected DeleteForward merge for {source:?}"));
+        assert_eq!(apply_augmentation_at(source, cursor, &aug), expected, "source={source:?}");
+        assert_eq!(aug.cursor_byte_after, cursor);
+    }
+
+    for protected in ["> first\n> > nested", "- first\n\n- second", "- first\n  - nested"] {
+        let cursor = protected.find('\n').expect("fixture has newline");
+        let aug = augment_delete_forward(protected, cursor)
+            .unwrap_or_else(|| panic!("expected boundary guard for {protected:?}"));
+        assert_eq!(apply_augmentation_at(protected, cursor, &aug), protected);
+        assert_eq!(aug.cursor_byte_after, cursor);
+    }
+}
+
+#[test]
+fn stateless_blockquote_backspace_merges_same_depth_paragraphs_without_split_history() {
+    for (source, expected, expected_cursor_prefix) in [
+        ("> left\n>\n> right", "> leftright", "> left"),
+        ("> left\r\n>\r\n> right", "> leftright", "> left"),
+        ("> left\n> right", "> leftright", "> left"),
+        ("> > left\n> >\n> > right", "> > leftright", "> > left"),
+        ("> # title\n>\n> right", "> # titleright", "> # title"),
+    ] {
+        let cursor = source.find("right").expect("fixture contains right");
+        let aug = augment_edit(source, cursor, AugmentKind::Backspace)
+            .unwrap_or_else(|| panic!("expected blockquote Backspace merge for {source:?}"));
+        assert_eq!(apply_augmentation_at(source, cursor, &aug), expected, "source={source:?}");
+        assert_eq!(aug.cursor_byte_after, expected_cursor_prefix.len(), "source={source:?}");
+    }
+
+    // First-line blockquote marker still unquotes.
+    let (first_line_edited, first_cursor) = apply_backspace_with_default("> hello", "> ".len());
+    assert_eq!(first_line_edited, "hello");
+    assert_eq!(first_cursor, 0);
+
+    // Different quote depth still strips only the nested line marker instead of merging into parent.
+    let nested = "> outer\n> > inner";
+    let (nested_edited, _) = apply_backspace_with_default(nested, "> outer\n> > ".len());
+    assert_eq!(nested_edited, "> outer\ninner");
+
+    // Quoted fenced code remains protected against merging into the paragraph.
+    let quoted_code = "> ```\n> code\n> ```\n>\n> right";
+    let right_cursor = quoted_code.find("right").expect("fixture has right");
+    let (code_edited, _) = apply_backspace_with_default(quoted_code, right_cursor);
+    assert!(code_edited.contains("```"), "quoted code block fence must survive: {code_edited:?}");
+}

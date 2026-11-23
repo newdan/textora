@@ -1,8 +1,8 @@
 use crate::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
 use crate::settings::UiMetrics;
 use crate::theme::Theme;
-use core::highlight::HighlightKind;
 use render::GlyphVertex;
+use textora_core::highlight::HighlightKind;
 
 /// Generate selection highlight vertices.
 pub fn is_cursor_visible(
@@ -134,7 +134,7 @@ pub fn highlight_color_for_offset(
     offset: usize,
     theme: &Theme,
 ) -> [f32; 4] {
-    use core::highlight::highlight_kind_scope;
+    use textora_core::highlight::highlight_kind_scope;
     let idx = spans.partition_point(|(start, _)| *start <= offset).saturating_sub(1);
     if let Some((_, kind)) = spans.get(idx) {
         let scope = highlight_kind_scope(*kind);
@@ -214,7 +214,7 @@ pub fn search_match_vertices(
 mod tests {
     use super::*;
     use crate::settings::Settings;
-    use core::highlight::HighlightKind;
+    use textora_core::highlight::HighlightKind;
 
     #[test]
     fn highlight_color_for_offset_foreground_fallback() {

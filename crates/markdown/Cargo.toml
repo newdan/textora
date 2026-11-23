@@ -32,11 +32,10 @@ resvg = { version = "=0.48.1", default-features = false, features = ["text", "sy
 scraper = { workspace = true, optional = true }
 ui.workspace = true
 shaping.workspace = true
-core.workspace = true
+textora_core.workspace = true
 stdext.workspace = true
 render.workspace = true
 regex = "1"
-toml.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 url.workspace = true

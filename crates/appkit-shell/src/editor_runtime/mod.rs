@@ -3,8 +3,10 @@
 mod contract;
 mod document_save;
 mod editor_frame;
+mod editor_navigation;
 mod editor_painter;
 mod editor_pointer;
+mod editor_reshape;
 #[allow(dead_code, reason = "ER4-4 wires file safety results into the App lifecycle")]
 mod file_safety_session;
 #[allow(dead_code, reason = "ER2-2 wires the product-neutral input session into event routing")]
@@ -26,8 +28,18 @@ pub use document_save::{
     PreparedDocumentSave, SaveCompletion, SavePayloadTransform, SavePrepareError,
     execute_prepared_save, execute_prepared_save_with_transform,
 };
-pub use editor_frame::{EditorFrame, RenderError, RenderResources};
-pub use editor_painter::EditorSurfacePaint;
+pub use editor_frame::{
+    EditorFrame, EmptyFrameTarget, RenderError, RenderResources, SurfaceFrameOptions,
+    WindowCornerClip,
+};
+pub use editor_navigation::{
+    apply_edit_hit_target, apply_target_to_document, query_visual_caret_hit,
+    set_wysiwyg_cursor_and_selection, set_wysiwyg_visual_caret_and_selection,
+};
+pub use editor_painter::{
+    EditorPaintStyle, EditorSurfacePaint, PluginContentTarget, PreeditAdvanceMeasure,
+    SearchHighlightStyle, ShapedTextSurface, TextSurfaceLayout,
+};
 pub use file_safety_session::{FileSafetyCandidate, FileSafetyObservation};
 pub const RESHAPE_AHEAD_LINES: usize = reshape_session::RESHAPE_AHEAD_LINES;
 
@@ -51,7 +63,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
 use crate::prepared_tab::PreparedTab;
-use crate::reshape_worker::{ReshapeRequest, ReshapeResult, ReshapeWorker};
+use crate::reshape_worker::{ReshapeResult, ReshapeWorker};
 use crate::tab_runtime::TabRuntimeStore;
 use crate::workspace::Workspace;
 
@@ -194,17 +206,6 @@ impl EditorRuntime {
                 message: format!("could not start GPU preparation worker: {error}"),
             }
         })
-    }
-
-    #[doc(hidden)]
-    pub fn new_with_model(
-        config: EditorRuntimeConfig,
-        workspace: Workspace,
-        runtimes: TabRuntimeStore,
-    ) -> Result<Self, EditorRuntimeError> {
-        let mut runtime = Self::new(config)?;
-        runtime.model_session = model_session::ModelSession::from_parts(workspace, runtimes);
-        Ok(runtime)
     }
 
     pub fn install_prepared_tab(
@@ -468,7 +469,11 @@ impl EditorRuntime {
         tab_id: appkit_core::workspace::types::TabId,
         document: appkit_core::document::DocumentModel,
     ) -> bool {
-        self.model_session.replace_document(tab_id, document)
+        let replaced = self.model_session.replace_document(tab_id, document);
+        if replaced && self.active_tab_id() == Some(tab_id) {
+            self.invalidate_reshape();
+        }
+        replaced
     }
 
     pub fn update_document_path(
@@ -691,10 +696,6 @@ impl EditorRuntime {
         self.render_session.clear_frame_cluster_pool();
     }
 
-    pub fn frame_cache_snapshot(&self) -> crate::frame_cache::FrameCache {
-        self.render_session.frame_cache_snapshot()
-    }
-
     pub fn note_render_started(&mut self, started_at: std::time::Instant) -> u128 {
         self.render_session.note_render_started(started_at)
     }
@@ -857,10 +858,21 @@ impl EditorRuntime {
             return EditorOutcome::default();
         }
         let _ = self.input_session.update_preedit(context, String::new(), None);
-        self.model_session.edit_active_document(
-            ui::plugin::EditIntent::InsertText(text),
-            self.editor_line_height(),
-        )
+        self.edit_active_document(ui::plugin::EditIntent::InsertText(text))
+    }
+
+    /// Executes an edit intent after the product has routed it to the editor.
+    pub fn edit_active_document(&mut self, intent: ui::plugin::EditIntent) -> EditorOutcome {
+        self.input_session.set_preferred_x(None);
+        self.model_session.edit_active_document(intent, self.editor_line_height())
+    }
+
+    /// Applies a source-editor command after product shortcuts and view-specific navigation.
+    pub fn execute_source_command(
+        &mut self,
+        command: &crate::input_mapper::EditCommand,
+    ) -> EditorOutcome {
+        self.model_session.execute_source_command(command, self.editor_line_height())
     }
 
     pub fn handle_key_input(
@@ -938,6 +950,10 @@ impl EditorRuntime {
             | ui::KeyCode::End
             | ui::KeyCode::PageUp
             | ui::KeyCode::PageDown => {
+                if let Some(outcome) = self.navigate_active_visual_editor_for_key(key, modifiers) {
+                    return outcome;
+                }
+                self.input_session.set_preferred_x(None);
                 return self.model_session.navigate_active_document(
                     key,
                     modifiers,
@@ -946,9 +962,7 @@ impl EditorRuntime {
             }
             ui::KeyCode::Escape | ui::KeyCode::Char(_) => None,
         };
-        intent.map_or_else(EditorOutcome::default, |intent| {
-            self.model_session.edit_active_document(intent, self.editor_line_height())
-        })
+        intent.map_or_else(EditorOutcome::default, |intent| self.edit_active_document(intent))
     }
 
     /// Identifies formatting owned by the active Markdown editor before product shortcuts.
@@ -1038,6 +1052,37 @@ impl EditorRuntime {
             pixels,
             plugin_viewport_height,
             self.editor_line_height(),
+        )
+    }
+
+    /// Scrolls a plugin surface after the product has routed the wheel event.
+    pub fn scroll_active_plugin(&mut self, pixels: f32, viewport_height: f32) -> bool {
+        self.model_session.scroll_active_plugin(pixels, viewport_height)
+    }
+
+    /// Scrolls the document viewport described by the product's current layout metrics.
+    pub fn scroll_active_text(&mut self, pixels: f32, line_height: f32) -> bool {
+        self.model_session.scroll_active_text(pixels, line_height)
+    }
+
+    pub fn page_active_document(
+        &mut self,
+        direction: crate::cursor_motion::PageDirection,
+    ) -> EditorOutcome {
+        self.model_session.page_active_document(direction, self.editor_line_height())
+    }
+
+    pub fn move_active_visual_cursor(
+        &mut self,
+        delta: isize,
+        extend_selection: bool,
+    ) -> EditorOutcome {
+        self.model_session.move_active_visual_cursor(
+            delta,
+            extend_selection,
+            self.scale_factor() as f32,
+            self.editor_line_height(),
+            self.render_session.frame_cache(),
         )
     }
 
@@ -1362,14 +1407,6 @@ impl EditorRuntime {
         self.reshape_session.has_worker()
     }
 
-    pub fn submit_reshape(&mut self, request: ReshapeRequest) -> bool {
-        self.reshape_session.submit(request)
-    }
-
-    pub fn drain_reshape_results(&self, limit: usize) -> Vec<ReshapeResult> {
-        self.reshape_session.drain_completed(limit)
-    }
-
     pub fn accepts_reshape_result(
         &self,
         result: &ReshapeResult,
@@ -1382,20 +1419,8 @@ impl EditorRuntime {
         self.reshape_session.mark_pending(line)
     }
 
-    pub fn clear_reshape_pending(&mut self, line: usize) {
-        self.reshape_session.clear_pending(line);
-    }
-
     pub fn reshape_pending(&self, line: usize) -> bool {
         self.reshape_session.is_pending(line)
-    }
-
-    pub fn mark_reshape_anchor_submitted(&mut self, anchor: usize) {
-        self.reshape_session.mark_submitted(anchor);
-    }
-
-    pub fn should_submit_reshape_anchor(&mut self, anchor: usize, now: std::time::Instant) -> bool {
-        self.reshape_session.should_submit_ahead(anchor, now)
     }
 
     pub fn mark_skip_next_reshape_submit(&mut self) {
@@ -1510,10 +1535,10 @@ mod tests {
     use crate::tab_runtime::TabRuntime;
     use crate::view_route::ViewRouteTable;
     use appkit_core::document::DocumentModel;
-    use core::buffer::TextBuffer;
     use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::rc::Rc;
+    use textora_core::buffer::TextBuffer;
     use ui::plugin::PluginFactory;
 
     const POINTER_PROBE_MIDDLE_HIT_X_PX: f32 = 220.0;
@@ -1546,7 +1571,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
             _bounds: ui::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1558,7 +1583,7 @@ mod tests {
         fn query(
             &self,
             query: ui::plugin::PluginQuery,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             match query {
                 ui::plugin::PluginQuery::HitTestEditTarget { .. } => {
@@ -1587,7 +1612,7 @@ mod tests {
         fn handle_message(
             &mut self,
             message: ui::plugin::PluginMessage,
-            _document: &mut dyn core::document::DocViewMut,
+            _document: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             let ui::plugin::PluginMessage::SetCanvasPointer(pointer) = message else {
                 return false;
@@ -1612,7 +1637,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
             _bounds: ui::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1624,7 +1649,7 @@ mod tests {
         fn query(
             &self,
             query: ui::plugin::PluginQuery,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             match query {
                 ui::plugin::PluginQuery::HitTestEditTarget { .. } => {
@@ -1639,7 +1664,7 @@ mod tests {
         fn handle_canvas_drag(
             &mut self,
             request: ui::plugin::CanvasDragRequest,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
         ) -> ui::plugin::CanvasDragResponse {
             self.phases.borrow_mut().push(request.phase);
             if request.phase == ui::plugin::CanvasDragPhase::Drop {
@@ -1671,7 +1696,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
             _bounds: ui::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1696,7 +1721,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
             _bounds: ui::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1708,7 +1733,7 @@ mod tests {
         fn query(
             &self,
             query: ui::plugin::PluginQuery,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             match query {
                 ui::plugin::PluginQuery::HitTestEditTarget { x, .. } => {
@@ -1743,7 +1768,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
             _bounds: ui::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1755,7 +1780,7 @@ mod tests {
         fn query(
             &self,
             query: ui::plugin::PluginQuery,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             match query {
                 ui::plugin::PluginQuery::HitTestByte { x, .. } => {
@@ -1769,7 +1794,7 @@ mod tests {
         fn handle_message(
             &mut self,
             message: ui::plugin::PluginMessage,
-            _document: &mut dyn core::document::DocViewMut,
+            _document: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             matches!(message, ui::plugin::PluginMessage::SetCursorByte(_))
         }
@@ -1786,7 +1811,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
             _bounds: ui::Rect,
             _theme: &ui::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1798,7 +1823,7 @@ mod tests {
         fn handle_message(
             &mut self,
             message: ui::plugin::PluginMessage,
-            _document: &mut dyn core::document::DocViewMut,
+            _document: &mut dyn textora_core::document::DocViewMut,
         ) -> bool {
             match message {
                 ui::plugin::PluginMessage::Scroll { delta, .. } => {
@@ -1813,7 +1838,7 @@ mod tests {
         fn query(
             &self,
             query: ui::plugin::PluginQuery,
-            _document: &dyn core::document::DocView,
+            _document: &dyn textora_core::document::DocView,
         ) -> ui::plugin::PluginResponse {
             match query {
                 ui::plugin::PluginQuery::ScrollY => {
@@ -2288,6 +2313,24 @@ mod tests {
     }
 
     #[test]
+    fn single_line_edit_invalidates_previous_source_reshape_results() {
+        let mut runtime = runtime_with_clean_tab();
+        runtime.apply_active_reshape_results();
+        let previous_result = ReshapeResult {
+            generation: runtime.reshape_generation(),
+            doc_line: 0,
+            entry: crate::snap_tree::DisplayLineEntry::placeholder(0, 5, 1, 1),
+            dv_idx: 0,
+        };
+
+        let outcome = runtime.edit_active_document(ui::plugin::EditIntent::InsertText("x".into()));
+        assert!(!outcome.shell_effect.reshape);
+        runtime.apply_active_reshape_results();
+
+        assert!(!runtime.accepts_reshape_result(&previous_result, 0));
+    }
+
+    #[test]
     fn committed_text_mutates_the_active_document_and_reports_content_change() {
         let mut runtime = runtime_with_clean_tab();
         let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
@@ -2714,7 +2757,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_triple_click_dragging_up_keeps_the_initial_source_line() {
+    fn plain_text_triple_click_dragging_reverses_around_the_initial_source_line() {
         let mut runtime = runtime_with_clean_tab();
         let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
         let snapshot = runtime.document_text_snapshot(tab_id).expect("text snapshot should exist");
@@ -2733,6 +2776,7 @@ mod tests {
             ui::settings::UiMetrics::from_settings(&runtime.settings, 1.0).line_height;
         let first_line_pointer = (210.0, editor_bounds.y + 5.0);
         let second_line_pointer = (210.0, first_line_pointer.1 + line_height);
+        let third_line_pointer = (210.0, second_line_pointer.1 + line_height);
         paint_editor_surface(&mut runtime, editor_bounds);
 
         for _ in 0..2 {
@@ -2769,6 +2813,22 @@ mod tests {
         let snapshot = &runtime.workspace_snapshot().tabs[0];
         assert_eq!(snapshot.selection_anchor, Some(11));
         assert_eq!(snapshot.cursor_offset, 0);
+
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseMove { px: second_line_pointer.0, py: second_line_pointer.1 },
+        );
+        let snapshot = &runtime.workspace_snapshot().tabs[0];
+        assert_eq!(snapshot.selection_anchor, Some(6));
+        assert_eq!(snapshot.cursor_offset, 11);
+
+        runtime.handle_pointer_event(
+            context,
+            &ui::Event::MouseMove { px: third_line_pointer.0, py: third_line_pointer.1 },
+        );
+        let snapshot = &runtime.workspace_snapshot().tabs[0];
+        assert_eq!(snapshot.selection_anchor, Some(6));
+        assert_eq!(snapshot.cursor_offset, 16);
     }
 
     #[test]

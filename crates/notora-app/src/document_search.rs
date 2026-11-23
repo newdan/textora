@@ -102,7 +102,7 @@ pub(crate) fn navigate(editor: &mut EditorRuntime, backwards: bool) {
 
 fn recompute_matches(tab: &mut TabSessionMut<'_>) {
     let source = tab.document.full_text();
-    let matches = core::buffer::simd_search::find_all_case_insensitive_ascii(
+    let matches = textora_core::buffer::simd_search::find_all_case_insensitive_ascii(
         tab.search_state().query.as_bytes(),
         source.as_bytes(),
     );
@@ -138,7 +138,7 @@ mod tests {
     use appkit_shell::editor_runtime::{EditorRuntimeConfig, OpenDisposition};
     use appkit_shell::prepared_tab::PreparedTab;
     use appkit_shell::tab_runtime::TabRuntime;
-    use core::buffer::TextBuffer;
+    use textora_core::buffer::TextBuffer;
 
     fn editor(text: &str) -> EditorRuntime {
         let (plugin_registry, view_routes) =

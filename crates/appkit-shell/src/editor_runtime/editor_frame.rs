@@ -1,13 +1,140 @@
 //! 产品 chrome 与编辑器共享的单帧借用 API。
 
 use crate::editor_runtime::{EditorOutcome, PaintedEditorBounds};
+use crate::gpu::GpuError;
+use crate::render_state::{GpuState, TextState};
 use render::GlyphVertex;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 pub struct RenderResources {
-    pub text: Option<crate::render_state::TextState>,
-    pub gpu: Option<crate::render_state::GpuState>,
+    pub text: Option<TextState>,
+    pub gpu: Option<GpuState>,
     pub frame_cache: crate::frame_cache::FrameCache,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EmptyFrameTarget {
+    Surface,
+    MultisampledWhenTextAvailable,
+}
+
+impl EmptyFrameTarget {
+    fn uses_multisampling(self, has_text: bool, has_vertices: bool) -> bool {
+        has_text && (has_vertices || self == Self::MultisampledWhenTextAvailable)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum WindowCornerClip {
+    Preserve,
+    Synchronize(Option<f32>),
+}
+
+pub struct SurfaceFrameOptions {
+    pub background: [f32; 4],
+    pub empty_frame_target: EmptyFrameTarget,
+    pub window_corner_clip: WindowCornerClip,
+    pub gamma_override: Option<render::GammaUniform>,
+}
+
+impl RenderResources {
+    /// 提交已按产品顺序组合的顶点，并返回 GPU 队列提交与呈现的耗时。
+    /// 缺少 GPU 或无法取得当前表面纹理时，返回 `Ok(None)`。
+    pub fn submit_surface_frame(
+        &mut self,
+        vertices: &[GlyphVertex],
+        options: SurfaceFrameOptions,
+    ) -> Result<Option<Duration>, GpuError> {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Ok(None);
+        };
+        if let WindowCornerClip::Synchronize(radius) = options.window_corner_clip {
+            gpu.ctx.set_window_corner_radius(radius)?;
+        }
+        let output = match gpu.ctx.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            _ => return Ok(None),
+        };
+        let surface_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = gpu.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("editor frame encoder"),
+        });
+        let (attachment_view, resolve_target) = if options
+            .empty_frame_target
+            .uses_multisampling(self.text.is_some(), !vertices.is_empty())
+        {
+            (&gpu.ctx.msaa_view, Some(&surface_view))
+        } else {
+            (&surface_view, None)
+        };
+        let text = self.text.as_mut().filter(|_| !vertices.is_empty()).map(|text| {
+            upload_frame_vertices(text, gpu, vertices);
+            if let Some(gamma) = options.gamma_override {
+                text.update_gamma_if_changed(&gpu.ctx.queue, gamma);
+            }
+            &*text
+        });
+        encode_surface_pass(
+            &mut encoder,
+            attachment_view,
+            resolve_target,
+            options.background,
+            text,
+            vertices.len() as u32,
+        );
+
+        let submit_started_at = Instant::now();
+        gpu.ctx.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+        Ok(Some(submit_started_at.elapsed()))
+    }
+}
+
+fn upload_frame_vertices(text: &mut TextState, gpu: &GpuState, vertices: &[GlyphVertex]) {
+    let vertex_count = vertices.len() as u32;
+    if vertex_count > text.vertex_capacity {
+        let capacity = vertex_count.next_power_of_two();
+        text.vertex_buffer = gpu.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("editor frame vertex buffer"),
+            size: (capacity as usize * std::mem::size_of::<GlyphVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        text.vertex_capacity = capacity;
+    }
+    gpu.ctx.queue.write_buffer(&text.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+}
+
+fn encode_surface_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    attachment_view: &wgpu::TextureView,
+    resolve_target: Option<&wgpu::TextureView>,
+    background: [f32; 4],
+    text: Option<&TextState>,
+    vertex_count: u32,
+) {
+    let [red, green, blue, alpha] = background.map(f64::from);
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("editor frame pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: attachment_view,
+            depth_slice: None,
+            resolve_target,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color { r: red, g: green, b: blue, a: alpha }),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    if let Some(text) = text {
+        pass.set_pipeline(text.renderer.pipeline());
+        pass.set_bind_group(0, &text.bind_group, &[]);
+        pass.set_vertex_buffer(0, text.vertex_buffer.slice(..));
+        pass.draw(0..vertex_count, 0..1);
+    }
 }
 
 /// Coverage curves calibrated against native GDI+ text on a 233-glyph,
@@ -279,6 +406,41 @@ mod tests {
 
     fn theme() -> ui::Theme {
         ui::Theme::from_definition(&ui::theme::ThemeDefinition::default_dark())
+    }
+
+    #[test]
+    fn empty_frame_multisampling_preserves_product_policy() {
+        let direct_clear = EmptyFrameTarget::Surface;
+        let multisampled_clear = EmptyFrameTarget::MultisampledWhenTextAvailable;
+
+        assert!(!direct_clear.uses_multisampling(true, false));
+        assert!(multisampled_clear.uses_multisampling(true, false));
+        for target in [direct_clear, multisampled_clear] {
+            assert!(target.uses_multisampling(true, true));
+            assert!(!target.uses_multisampling(false, false));
+            assert!(!target.uses_multisampling(false, true));
+        }
+    }
+
+    #[test]
+    fn headless_frame_submission_reports_no_presentation() {
+        let mut resources = RenderResources {
+            text: None,
+            gpu: None,
+            frame_cache: crate::frame_cache::FrameCache::new(),
+        };
+
+        let submission = resources.submit_surface_frame(
+            &[],
+            SurfaceFrameOptions {
+                background: [0.0; 4],
+                empty_frame_target: EmptyFrameTarget::Surface,
+                window_corner_clip: WindowCornerClip::Synchronize(None),
+                gamma_override: None,
+            },
+        );
+
+        assert!(matches!(submission, Ok(None)));
     }
 
     #[test]

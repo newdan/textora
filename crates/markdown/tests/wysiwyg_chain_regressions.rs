@@ -1,6 +1,5 @@
-extern crate core as doc_core;
-use doc_core::document::{DocView, DocViewMut, StringDocView};
 use std::borrow::Cow;
+use textora_core::document::{DocView, DocViewMut, StringDocView};
 use textora_markdown::view::MarkdownEditorView;
 use ui::plugin::{MoveDirection, PluginMessage, PluginQuery, PluginResponse, ViewPlugin};
 struct Document(String);

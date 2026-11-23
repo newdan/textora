@@ -104,6 +104,9 @@ pub(in crate::augmenter) fn paragraph_enter_augmentation(
     if let Some(boundary) = hard_break_boundary_after(source, current_byte) {
         return emit_block_break_replacing(source, boundary);
     }
+    if let Some(boundary) = hard_break_boundary_before(source, current_byte) {
+        return emit_block_break_replacing(source, boundary);
+    }
 
     // 段尾/段中：Typora 语义 = 切两半（`\n\n`）；跨已有 `\n` 时用
     // emit_block_break 保留光标下方的原源码行。
@@ -283,6 +286,12 @@ fn base_list_item_enter_augmentation(
         let replaced =
             extend_range_over_prefix_or_indent(source, boundary, continuation_content_prefix);
         return Some(emit_marker_break_replacing(source, replaced, indent, continuation_marker));
+    }
+    if let Some(boundary) = hard_break_boundary_before(source, current_byte)
+        && let Some((line_start, _, _)) = locate_source_line_bounds(source, current_byte)
+        && !next_source_line_has_list_marker(source, line_start, indent)
+    {
+        return Some(emit_marker_break_replacing(source, boundary, indent, continuation_marker));
     }
 
     if let Some(newline_width) = newline_sequence_width_at(source, current_byte) {
@@ -535,6 +544,9 @@ pub(in crate::augmenter) fn blockquote_enter_augmentation(
         let replaced = extend_range_over_prefix_or_indent(source, boundary, continuation_prefix);
         return Some(emit_marker_break_replacing(source, replaced, "", continuation_prefix));
     }
+    if let Some(boundary) = hard_break_boundary_before(source, current_byte) {
+        return Some(emit_marker_break_replacing(source, boundary, "", continuation_prefix));
+    }
 
     if let Some(newline_width) = newline_sequence_width_at(source, current_byte) {
         let next_line_start = current_byte + newline_width;
@@ -719,10 +731,38 @@ pub(in crate::augmenter) struct InlineWrapperFrame<'a> {
 pub(in crate::augmenter) fn preserve_inline_elements_at_split(
     source: &str,
     split_at: usize,
-    mut augmentation: EditAugmentation,
+    augmentation: EditAugmentation,
 ) -> EditAugmentation {
     let inline_split_at = inline_safe_split_point(source, split_at);
     let frames = inline_split_frames(source, inline_split_at);
+    preserve_inline_frames_at_split(source, split_at, inline_split_at, &frames, augmentation)
+}
+
+pub(in crate::augmenter) fn preserve_inline_code_at_split(
+    source: &str,
+    split_at: usize,
+    augmentation: EditAugmentation,
+) -> EditAugmentation {
+    let inline_split_at = inline_safe_split_point(source, split_at);
+    let frames = inline_wrapper_frames(source)
+        .into_iter()
+        .filter(|frame| {
+            frame.kind == InlineFrameKind::Code
+                && inline_split_at >= frame.content_start
+                && inline_split_at <= frame.content_end
+        })
+        .map(|frame| InlineSplitFrame { opening: frame.opening, closing: frame.closing })
+        .collect::<Vec<_>>();
+    preserve_inline_frames_at_split(source, split_at, inline_split_at, &frames, augmentation)
+}
+
+fn preserve_inline_frames_at_split(
+    source: &str,
+    split_at: usize,
+    inline_split_at: usize,
+    frames: &[InlineSplitFrame<'_>],
+    mut augmentation: EditAugmentation,
+) -> EditAugmentation {
     if frames.is_empty() {
         return augmentation;
     }
@@ -734,7 +774,7 @@ pub(in crate::augmenter) fn preserve_inline_elements_at_split(
     let mut insertion = String::with_capacity(
         closing_len + preserved_separator.len() + original_insertion.len() + opening_len,
     );
-    for frame in &frames {
+    for frame in frames {
         insertion.push_str(frame.closing);
     }
     insertion.push_str(preserved_separator);
@@ -868,12 +908,19 @@ pub(in crate::augmenter) fn record_inline_content(
 pub(in crate::augmenter) fn inline_code_wrapper_frame<'a>(
     source: &'a str,
     source_range: std::ops::Range<usize>,
-    code: &str,
+    _code: &str,
 ) -> Option<InlineWrapperFrame<'a>> {
     let code_source = source.get(source_range.clone())?;
-    let content_offset = code_source.find(code)?;
-    let content_start = source_range.start + content_offset;
-    let content_end = content_start + code.len();
+    let delimiter_len = code_source.bytes().take_while(|&byte| byte == b'`').count();
+    if delimiter_len == 0
+        || delimiter_len * 2 > code_source.len()
+        || !code_source[code_source.len() - delimiter_len..].bytes().all(|byte| byte == b'`')
+    {
+        return None;
+    }
+    let content = crate::builder::inline_code_content_range(code_source);
+    let content_start = source_range.start + content.start;
+    let content_end = source_range.start + content.end;
     let opening = source.get(source_range.start..content_start)?;
     let closing = source.get(content_end..source_range.end)?;
     (!opening.is_empty() && !closing.is_empty()).then_some(InlineWrapperFrame {

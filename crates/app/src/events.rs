@@ -15,11 +15,11 @@ use winit::window::{CursorIcon, ResizeDirection};
 use crate::actions::AppAction;
 use crate::app::App;
 use crate::app_effect::AppEffect;
-use crate::input::key_to_command;
 use crate::menu_handler::AppCommand;
 use crate::mouse::hit_test_with_sub_line_offset as mouse_hit_test;
 use appkit_core::workspace::types::TabId;
 use appkit_shell::editor_runtime::MouseCapture;
+use appkit_shell::input_mapper::key_to_command;
 use appkit_shell::window_input::{
     command_allowed_during_preedit, is_ime_process_key, ui_modifiers,
 };
@@ -199,8 +199,8 @@ pub(crate) fn handle_keyboard(app: &mut App, event: &winit::event::KeyEvent) -> 
     let is_reading_mode = app.active_is_reading_mode();
     let fallback_cmd = if is_reading_mode {
         match fallback_cmd {
-            Some(crate::input::EditCommand::InsertChar(s)) if s == " " => {
-                Some(crate::input::EditCommand::PageDown)
+            Some(appkit_shell::input_mapper::EditCommand::InsertChar(s)) if s == " " => {
+                Some(appkit_shell::input_mapper::EditCommand::PageDown)
             }
             other => other,
         }
@@ -370,12 +370,12 @@ fn translate_title_bar_action(ta: &ui::title_bar::TitleBarAction, actions: &mut 
         TitleBarAction::CloseWindow => actions.push(AppAction::CloseWindow),
         TitleBarAction::ToggleView => {
             actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(
-                crate::input::EditCommand::ToggleView,
+                appkit_shell::input_mapper::EditCommand::ToggleView,
             )]));
         }
         TitleBarAction::ToggleToc => {
             actions.push(AppAction::ExecuteAppCommands(vec![AppCommand::Edit(
-                crate::input::EditCommand::ToggleToc,
+                appkit_shell::input_mapper::EditCommand::ToggleToc,
             )]));
         }
         TitleBarAction::ToggleMindmapStylePanel => {
@@ -1228,7 +1228,7 @@ mod tests {
 
         fn render(
             &mut self,
-            _doc: &dyn core::document::DocView,
+            _doc: &dyn textora_core::document::DocView,
             _bounds: ui::core::geom::Rect,
             _theme: &ui::theme::Theme,
             _shaper: &mut shaping::Shaper,
@@ -1245,7 +1245,11 @@ mod tests {
             true
         }
 
-        fn query(&self, query: PluginQuery, _doc: &dyn core::document::DocView) -> PluginResponse {
+        fn query(
+            &self,
+            query: PluginQuery,
+            _doc: &dyn textora_core::document::DocView,
+        ) -> PluginResponse {
             match query {
                 PluginQuery::HitTestEditTarget { .. } => {
                     PluginResponse::EditHitTarget(self.target.borrow().clone())
@@ -2054,7 +2058,7 @@ mod tests {
         let mut measure = ui::core::NoopMeasure;
         app.ui_shell.mark_layout_initialized_for_test();
         app.ui_shell.set_mindmap_style_panel_input(
-            Some(ui::mindmap_style_panel::MindmapStylePanelInput::from_selection(
+            Some(appkit_shell::mindmap_style_panel::MindmapStylePanelInput::from_selection(
                 ui::theme::MindmapThemeSelection::Default,
                 true,
             )),
@@ -2068,7 +2072,7 @@ mod tests {
             &inputs,
         );
         app.ui_shell.focus_widget(ui::core::widget::ids::MINDMAP_STYLE_PANEL);
-        let panel_x = 1_200.0 - ui::mindmap_style_panel::PANEL_WIDTH_LOGICAL + 8.0;
+        let panel_x = 1_200.0 - appkit_shell::mindmap_style_panel::PANEL_WIDTH_LOGICAL + 8.0;
 
         let actions = handle_mouse_input_left(&mut app, ElementState::Pressed, panel_x, 400.0);
 

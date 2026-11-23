@@ -28,7 +28,7 @@ struct PersistedDirtyState {
     snapshot_filename: Option<String>,
     original_file_size: Option<u64>,
     original_mtime_secs: Option<i64>,
-    original_disk_revision: Option<crate::dirty_snapshot::PersistedDiskRevision>,
+    original_disk_revision: Option<appkit_core::snapshot::PersistedDiskRevision>,
 }
 
 #[cfg(test)]
@@ -75,19 +75,19 @@ fn snapshot_dirty_state(document: &DocumentModel, snapshots_dir: &Path) -> Persi
 
     let (filename, original_lines, file_size, modified_time, disk_revision) =
         if let Some(path) = document.file_path.as_deref() {
-            let filename = crate::dirty_snapshot::snapshot_id_for_path(path);
+            let filename = appkit_core::snapshot::snapshot_id_for_path(path);
             let disk_revision = crate::file_safety::capture_revision(path).ok();
             let (original_lines, file_size, modified_time) = read_disk_baseline(path);
             (filename, original_lines, file_size, modified_time, disk_revision)
         } else {
             let filename = document.dirty_snapshot_id.clone().unwrap_or_else(|| {
-                crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::untitled_id())
+                appkit_core::snapshot::snapshot_filename(&appkit_core::snapshot::untitled_id())
             });
             (filename, Vec::new(), 0, 0, None)
         };
 
     let write_result = if let Some(revision) = disk_revision.as_ref() {
-        crate::dirty_snapshot::write_snapshot_with_revision(
+        appkit_core::snapshot::write_snapshot_with_revision(
             snapshots_dir,
             &filename,
             revision,
@@ -95,7 +95,7 @@ fn snapshot_dirty_state(document: &DocumentModel, snapshots_dir: &Path) -> Persi
             &current_lines,
         )
     } else {
-        crate::dirty_snapshot::write_snapshot(
+        appkit_core::snapshot::write_snapshot(
             snapshots_dir,
             &filename,
             file_size,
@@ -115,7 +115,7 @@ fn snapshot_dirty_state(document: &DocumentModel, snapshots_dir: &Path) -> Persi
         original_mtime_secs: Some(modified_time),
         original_disk_revision: disk_revision
             .as_ref()
-            .map(crate::dirty_snapshot::PersistedDiskRevision::from_disk_revision),
+            .map(appkit_core::snapshot::PersistedDiskRevision::from_disk_revision),
     }
 }
 
@@ -135,19 +135,19 @@ fn snapshot_dirty_state_from_runtime(
 
     let (filename, original_lines, file_size, modified_time, disk_revision) =
         if let Some(path) = tab.path.as_deref() {
-            let filename = crate::dirty_snapshot::snapshot_id_for_path(path);
+            let filename = appkit_core::snapshot::snapshot_id_for_path(path);
             let disk_revision = crate::file_safety::capture_revision(path).ok();
             let (original_lines, file_size, modified_time) = read_disk_baseline(path);
             (filename, original_lines, file_size, modified_time, disk_revision)
         } else {
             let filename = tab.dirty_snapshot_id.clone().unwrap_or_else(|| {
-                crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::untitled_id())
+                appkit_core::snapshot::snapshot_filename(&appkit_core::snapshot::untitled_id())
             });
             (filename, Vec::new(), 0, 0, None)
         };
 
     let write_result = if let Some(revision) = disk_revision.as_ref() {
-        crate::dirty_snapshot::write_snapshot_with_revision(
+        appkit_core::snapshot::write_snapshot_with_revision(
             snapshots_dir,
             &filename,
             revision,
@@ -155,7 +155,7 @@ fn snapshot_dirty_state_from_runtime(
             &tab.content_lines,
         )
     } else {
-        crate::dirty_snapshot::write_snapshot(
+        appkit_core::snapshot::write_snapshot(
             snapshots_dir,
             &filename,
             file_size,
@@ -175,7 +175,7 @@ fn snapshot_dirty_state_from_runtime(
         original_mtime_secs: Some(modified_time),
         original_disk_revision: disk_revision
             .as_ref()
-            .map(crate::dirty_snapshot::PersistedDiskRevision::from_disk_revision),
+            .map(appkit_core::snapshot::PersistedDiskRevision::from_disk_revision),
     }
 }
 
@@ -298,13 +298,13 @@ pub(crate) fn snapshot_runtime_workspace(
 fn restore_dirty_lines(
     tab: &PersistedTab,
     snapshots_dir: &Path,
-    snapshot_baseline: &mut Option<crate::dirty_snapshot::PersistedDiskRevision>,
+    snapshot_baseline: &mut Option<appkit_core::snapshot::PersistedDiskRevision>,
 ) -> (Option<Vec<String>>, bool) {
     let Some(snapshot_filename) = tab.snapshot_filename.as_deref() else {
         return (tab.unsaved_lines.clone(), false);
     };
     let Some(path) = tab.file_path.as_deref() else {
-        let restored = crate::dirty_snapshot::read_and_apply(snapshots_dir, snapshot_filename, &[])
+        let restored = appkit_core::snapshot::read_and_apply(snapshots_dir, snapshot_filename, &[])
             .map(|(lines, _header)| lines)
             .ok();
         return (restored, false);
@@ -314,7 +314,7 @@ fn restore_dirty_lines(
         .map(|bytes| String::from_utf8_lossy(&bytes).lines().map(str::to_owned).collect::<Vec<_>>())
         .unwrap_or_default();
     let restored =
-        crate::dirty_snapshot::read_and_apply(snapshots_dir, snapshot_filename, &original_lines)
+        appkit_core::snapshot::read_and_apply(snapshots_dir, snapshot_filename, &original_lines)
             .map(|(lines, header)| {
                 if snapshot_baseline.is_none() {
                     *snapshot_baseline = header.baseline_revision;
@@ -738,7 +738,7 @@ dirty = false
             .expect("non-snapshot file should be writable");
         let active_snapshots = std::collections::HashSet::from(["active.dirty".to_owned()]);
 
-        crate::dirty_snapshot::cleanup_orphans(&snapshots_dir, &active_snapshots);
+        appkit_core::snapshot::cleanup_orphans(&snapshots_dir, &active_snapshots);
 
         assert!(!snapshots_dir.join("stale.dirty").exists());
         assert!(snapshots_dir.join("active.dirty").exists());

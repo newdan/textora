@@ -1,10 +1,8 @@
 use crate::app::App;
-use crate::app::reset_cursor_after_edit;
 use crate::app_effect::AppEffect;
-use crate::commands::EditOutcome;
-use crate::input::EditCommand;
 use crate::ui_shell::KeyboardFocusTarget;
 use appkit_shell::editor_runtime::{EditorNotification, EditorOutcome};
+use appkit_shell::input_mapper::EditCommand;
 use appkit_shell::{DocumentClipboard, SystemClipboard};
 use winit::event_loop::ActiveEventLoop;
 
@@ -91,50 +89,6 @@ impl App {
         self.ui_shell.mark_dock_dirty();
         true
     }
-}
-
-fn edit_requires_reshape(cmd: &EditCommand, outcome: &EditOutcome) -> bool {
-    if !outcome.executed {
-        return false;
-    }
-
-    if outcome.new_line_count != outcome.old_line_count {
-        return true;
-    }
-
-    if matches!(
-        cmd,
-        EditCommand::Paste
-            | EditCommand::PastePlainText
-            | EditCommand::Undo
-            | EditCommand::Redo
-            | EditCommand::Cut
-    ) {
-        return true;
-    }
-
-    outcome.dirty_lines.as_ref().is_some_and(|range| range.len() > 1)
-}
-
-fn editor_edit_outcome(
-    tab_id: appkit_core::workspace::types::TabId,
-    previous_content_revision: u64,
-    previous_dirty: bool,
-    current_content_revision: u64,
-    current_dirty: bool,
-    shell_effect: AppEffect,
-) -> EditorOutcome {
-    let mut notifications = smallvec::SmallVec::new();
-    if current_content_revision != previous_content_revision {
-        notifications.push(EditorNotification::ContentChanged {
-            tab_id,
-            content_revision: current_content_revision,
-        });
-    }
-    if current_dirty != previous_dirty {
-        notifications.push(EditorNotification::DirtyChanged { tab_id, dirty: current_dirty });
-    }
-    EditorOutcome { shell_effect, notifications }
 }
 
 fn apply_editor_dirty_notifications(
@@ -640,94 +594,14 @@ impl App {
         let ws_effect = self.upgrade_active_editor_preview();
         self.handle_nav_effect(ws_effect);
 
-        let lh = self.ui_metrics().line_height;
-        let Some(tab_id) = self.active_tab_id() else {
-            return effect;
-        };
-        let previous_summary = self.editor_runtime.document_summary(tab_id);
-        let previous_content_revision =
-            previous_summary.as_ref().map_or(0, |summary| summary.content_revision);
-        let previous_dirty = previous_summary.as_ref().is_some_and(|summary| summary.dirty);
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return effect;
-        };
-        let ac = tab.take_advance_cache();
-        let mut presentation = tab.take_presentation();
-        let page_step_rows = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
-        let outcome = crate::commands::execute_edit_command_v2_with_presentation(
-            &cmd,
-            tab.document,
-            &ac,
-            &mut presentation.cursor_render_state,
-            page_step_rows,
-        );
-        tab.restore_presentation(presentation);
-        tab.restore_advance_cache(ac);
-        let mut current_content_revision = previous_content_revision;
-        let mut current_dirty = previous_dirty;
-        if outcome.executed {
-            current_content_revision = tab.document.content_revision();
-            current_dirty = tab.document.dirty;
-            let requires_reshape = edit_requires_reshape(&cmd, &outcome);
-            if outcome.new_line_count != outcome.old_line_count {
-                let is_insertion = outcome.new_line_count > outcome.old_line_count;
-                let _edit_line = if is_insertion {
-                    tab.document.cursor_line()
-                } else {
-                    tab.document.cursor_line().min(outcome.old_line_count.saturating_sub(1))
-                };
-                if let Some(ref dirty) = outcome.dirty_lines {
-                    let new_entries_len = (dirty.len() as isize
-                        + (outcome.new_line_count as isize - outcome.old_line_count as isize))
-                        .max(0) as usize;
-                    let mut new_entries = Vec::with_capacity(new_entries_len);
-                    for dl in dirty.start..dirty.start + new_entries_len {
-                        let offset = tab.document.line_byte_offset(dl).unwrap_or(0);
-                        let length = tab.document.line_byte_length(dl).unwrap_or(0) as u32;
-                        new_entries.push(crate::snap_tree::DisplayLineEntry::placeholder(
-                            offset, length, 0, 1,
-                        ));
-                    }
-                    let _ = tab.display_mut().display_map.sync(dirty.clone(), new_entries);
-                }
-            }
-            if outcome.invalidates_all_render_cache() {
-                tab.invalidate_render_cache_all();
-            } else if let Some(cache_invalidation_range) = outcome.render_cache_invalidation_range()
-            {
-                tab.display_mut().render_cache.invalidate_range(cache_invalidation_range);
-            }
-            if let Some(range) = outcome.dirty_lines {
-                for doc_line in range.clone() {
-                    if doc_line < tab.display().display_map.line_count() {}
-                }
-            }
-            tab.clamp_scroll_anchor(lh);
-            tab.derive_scroll_top(lh);
-            tab.ensure_cursor_visible(lh);
-            reset_cursor_after_edit(tab.cursor_render_state_mut());
-            if requires_reshape {
-                effect = effect.merge(AppEffect::RESHAPE);
-            }
-            effect = effect.merge(AppEffect::REDRAW);
-        }
-        let editor_outcome = editor_edit_outcome(
-            tab_id,
-            previous_content_revision,
-            previous_dirty,
-            current_content_revision,
-            current_dirty,
-            effect,
-        );
-        apply_editor_dirty_notifications(self, &editor_outcome.notifications, current_dirty);
-
-        let allows_editing = self.active_allows_editing();
-        if allows_editing {
+        let outcome = self.editor_runtime.execute_source_command(&cmd);
+        let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+        apply_editor_dirty_notifications(self, &outcome.notifications, dirty);
+        if self.active_allows_editing() {
             self.sync_plugin_state();
             self.ensure_wysiwyg_cursor_visible();
         }
-
-        editor_outcome.shell_effect
+        effect.merge(outcome.shell_effect)
     }
 
     pub(crate) fn toggle_editor_view(&mut self) -> AppEffect {
@@ -755,117 +629,33 @@ impl App {
         intent: ui::plugin::EditIntent,
         _event_loop: Option<&ActiveEventLoop>,
     ) -> AppEffect {
-        self.editor_runtime.set_preferred_x(None);
-        let mut effect = AppEffect::NONE;
-        let Some(tab_id) = self.active_tab_id() else {
-            return effect;
-        };
-        let previous_summary = self.editor_runtime.document_summary(tab_id);
-        let previous_content_revision =
-            previous_summary.as_ref().map_or(0, |summary| summary.content_revision);
-        let previous_dirty = previous_summary.as_ref().is_some_and(|summary| summary.dirty);
-
-        self.sync_plugin_state();
-        let lh = self.ui_metrics().line_height;
-
-        let resolved_plan = {
-            let Some(tab) = self.active_tab_session() else {
-                return effect;
-            };
-            let request = crate::edit_transaction::build_edit_request(tab.document, intent);
-            let plan = tab.plan_edit_request(&request);
-            if plan == ui::plugin::EditPlan::UseDefault {
-                crate::edit_transaction::default_edit_plan(&request, tab.document)
-            } else {
-                plan
-            }
-        };
-
-        let Some(mut tab) = self.active_tab_session_mut() else {
-            return effect;
-        };
-        let outcome_result =
-            crate::edit_transaction::execute_edit_plan(resolved_plan, tab.document);
-        let should_reveal_cursor = outcome_result
-            .as_ref()
-            .is_ok_and(|outcome| outcome.edit_outcome.executed || outcome.cursor_moved);
-
-        let mut current_content_revision = previous_content_revision;
-        let mut current_dirty = previous_dirty;
-        if let Ok(outcome) = outcome_result {
-            let text_changed = outcome.edit_outcome.executed;
-            current_content_revision = outcome.content_revision;
-            current_dirty = outcome.dirty;
-            let requires_reshape = text_changed
-                && (outcome.edit_outcome.new_line_count != outcome.edit_outcome.old_line_count
-                    || outcome
-                        .edit_outcome
-                        .dirty_lines
-                        .as_ref()
-                        .is_some_and(|range| range.len() > 1));
-
-            if text_changed
-                && outcome.edit_outcome.new_line_count != outcome.edit_outcome.old_line_count
-                && let Some(ref dirty) = outcome.edit_outcome.dirty_lines
-            {
-                let new_entries_len = (dirty.len() as isize
-                    + (outcome.edit_outcome.new_line_count as isize
-                        - outcome.edit_outcome.old_line_count as isize))
-                    .max(0) as usize;
-                let mut new_entries = Vec::with_capacity(new_entries_len);
-                for dl in dirty.start..dirty.start + new_entries_len {
-                    let offset = tab.document.line_byte_offset(dl).unwrap_or(0);
-                    let length = tab.document.line_byte_length(dl).unwrap_or(0) as u32;
-                    new_entries.push(crate::snap_tree::DisplayLineEntry::placeholder(
-                        offset, length, 0, 1,
-                    ));
-                }
-                let _ = tab.display_mut().display_map.sync(dirty.clone(), new_entries);
-            }
-
-            if text_changed {
-                if outcome.edit_outcome.invalidates_all_render_cache() {
-                    tab.invalidate_render_cache_all();
-                } else if let Some(cache_range) =
-                    outcome.edit_outcome.render_cache_invalidation_range()
-                {
-                    tab.display_mut().render_cache.invalidate_range(cache_range);
-                }
-            }
-
-            if text_changed || outcome.cursor_moved {
-                tab.clamp_scroll_anchor(lh);
-                tab.derive_scroll_top(lh);
-                tab.ensure_cursor_visible(lh);
-
-                reset_cursor_after_edit(tab.cursor_render_state_mut());
-            }
-
-            if requires_reshape {
-                effect = effect.merge(AppEffect::RESHAPE);
-            }
-            if text_changed {
-                effect = effect.merge(AppEffect::REDRAW);
-            }
+        if self.active_tab_id().is_none() {
+            return AppEffect::NONE;
         }
-
         self.sync_plugin_state();
+        let outcome = self.editor_runtime.edit_active_document(intent);
+        self.finish_runtime_edit(outcome).merge(AppEffect::REDRAW)
+    }
 
-        if should_reveal_cursor {
+    pub(crate) fn dispatch_ime_commit(&mut self, text: String) -> AppEffect {
+        let context = self.editor_input_context();
+        if !self.editor_runtime.keyboard_input_allowed(context) {
+            return AppEffect::NONE;
+        }
+        self.sync_plugin_state();
+        let outcome = self.editor_runtime.commit_text(context, text);
+        self.finish_runtime_edit(outcome)
+    }
+
+    fn finish_runtime_edit(&mut self, outcome: EditorOutcome) -> AppEffect {
+        self.sync_plugin_state();
+        if outcome.shell_effect != AppEffect::NONE {
             self.ensure_wysiwyg_cursor_visible();
         }
 
-        let editor_outcome = editor_edit_outcome(
-            tab_id,
-            previous_content_revision,
-            previous_dirty,
-            current_content_revision,
-            current_dirty,
-            effect,
-        );
-        apply_editor_dirty_notifications(self, &editor_outcome.notifications, current_dirty);
-
-        editor_outcome.shell_effect.merge(AppEffect::REDRAW)
+        let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
+        apply_editor_dirty_notifications(self, &outcome.notifications, dirty);
+        outcome.shell_effect
     }
 
     fn dispatch_pre_navigation_edit_command(
@@ -946,7 +736,7 @@ impl App {
     #[cfg(test)]
     pub(crate) fn dispatch_transactional_edit_for_test(
         &mut self,
-        command: crate::input::EditCommand,
+        command: appkit_shell::input_mapper::EditCommand,
     ) -> AppEffect {
         let intent = crate::edit_transaction::edit_intent_for_command(&command)
             .expect("Command should resolve to EditIntent");
@@ -963,7 +753,9 @@ mod edit_tests {
     };
     use crate::clipboard::TestDocumentClipboard;
     use crate::document_view::DocumentView;
-    use crate::input::EditCommand;
+    use appkit_shell::edit_transaction::EditOutcome;
+    use appkit_shell::editor_commands::edit_requires_reshape;
+    use appkit_shell::input_mapper::EditCommand;
 
     fn app_with_text(text: &str) -> App {
         let mut app = App::new(None);
@@ -1211,7 +1003,7 @@ mod edit_tests {
             .find("self.break_edit_merge_for_navigation(&cmd);")
             .expect("production dispatch must keep its navigation boundary");
         let legacy_position = dispatch_source
-            .find("crate::commands::execute_edit_command_v2_with_presentation(")
+            .find("self.editor_runtime.execute_source_command(")
             .expect("production dispatch must keep its legacy fallback");
 
         assert!(route_position < navigation_position);
@@ -1368,10 +1160,10 @@ mod edit_tests {
             EditCommand::DeleteForward => ui::plugin::EditIntent::DeleteForward,
             _ => panic!("editor transaction test requires a text edit command"),
         };
-        let request = crate::edit_transaction::build_edit_request(document, intent);
-        let plan = crate::edit_transaction::default_edit_plan(&request, document);
+        let request = crate::edit_transaction::build_edit_request(&document.model, intent);
+        let plan = crate::edit_transaction::default_edit_plan(&request, &document.model);
 
-        crate::edit_transaction::execute_edit_plan(plan, document)
+        crate::edit_transaction::execute_edit_plan(plan, &mut document.model)
             .expect("default transaction plan must execute for supported editor test commands")
     }
 

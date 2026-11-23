@@ -20,8 +20,7 @@ ci-no-fonts = ["appkit-shell/ci-no-fonts"]
 [dependencies]
 appkit-core = { path = "../appkit-core", package = "textora-appkit-core" }
 appkit-shell = { path = "../appkit-shell", package = "textora-appkit-shell" }
-bytemuck = { version = "1", features = ["derive"] }
-core.workspace = true
+textora_core.workspace = true
 dirs.workspace = true
 notora-core = { path = "../notora-core" }
 render.workspace = true
@@ -29,6 +28,7 @@ rfd = { version = "0.15", default-features = false }
 serde.workspace = true
 shaping.workspace = true
 textora-markdown = { path = "../markdown" }
+textora-mindmap = { path = "../mindmap" }
 textora-encryption = { path = "../encryption" }
 toml.workspace = true
 ui.workspace = true

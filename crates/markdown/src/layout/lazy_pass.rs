@@ -267,7 +267,7 @@ impl<S: BlockSource> LazyLayout<S> {
         source: S,
         style: &MarkdownStyle,
         viewport_w: f32,
-        doc_view: &dyn core::document::DocView,
+        doc_view: &dyn textora_core::document::DocView,
     ) -> Self {
         let laid_out_est = crate::layout::block::layout_doc_for_estimation(
             source.blocks(),
@@ -527,7 +527,7 @@ impl<S: BlockSource> LazyLayout<S> {
         source: S,
         style: &MarkdownStyle,
         viewport_w: f32,
-        doc_view: &dyn core::document::DocView,
+        doc_view: &dyn textora_core::document::DocView,
     ) -> Self {
         let mut this = Self::new(source, style, viewport_w, doc_view);
         this.ensure_all_blocks(style, viewport_w, None, None, doc_view);
@@ -575,7 +575,7 @@ impl<S: BlockSource> LazyLayout<S> {
         viewport_w: f32,
         shaper: &mut shaping::Shaper,
         highlighter: Option<&dyn crate::builder::CodeHighlighter>,
-        doc: &dyn core::document::DocView,
+        doc: &dyn textora_core::document::DocView,
     ) {
         let buffer = viewport_h * VIEWPORT_BUFFER_RATIO;
         let visible_top = (scroll_y - buffer).max(0.0);
@@ -680,7 +680,7 @@ impl<S: BlockSource> LazyLayout<S> {
         viewport_w: f32,
         mut shaper: Option<&mut shaping::Shaper>,
         highlighter: Option<&dyn crate::builder::CodeHighlighter>,
-        doc: &dyn core::document::DocView,
+        doc: &dyn textora_core::document::DocView,
     ) {
         let full_range = 0..self.estimated_heights.len();
         if full_range.is_empty() {
@@ -806,7 +806,7 @@ impl<S: BlockSource> LazyLayout<S> {
         style: &MarkdownStyle,
         shaper: &mut shaping::Shaper,
         highlighter: Option<&dyn crate::builder::CodeHighlighter>,
-        doc: &dyn core::document::DocView,
+        doc: &dyn textora_core::document::DocView,
     ) -> Vec<(usize, f32)> {
         self.ensure_consistent();
         let buffer = viewport_h * VIEWPORT_BUFFER_RATIO;
@@ -876,7 +876,7 @@ impl<S: BlockSource> LazyLayout<S> {
         style: &MarkdownStyle,
         shaper: &mut shaping::Shaper,
         highlighter: Option<&dyn crate::builder::CodeHighlighter>,
-        doc: &dyn core::document::DocView,
+        doc: &dyn textora_core::document::DocView,
     ) -> Vec<(usize, f32)> {
         self.ensure_consistent();
         let buffer = viewport_h * VIEWPORT_BUFFER_RATIO;
@@ -913,7 +913,7 @@ impl<S: BlockSource> LazyLayout<S> {
         style: &MarkdownStyle,
         mut shaper: Option<&mut shaping::Shaper>,
         highlighter: Option<&dyn crate::builder::CodeHighlighter>,
-        doc: &dyn core::document::DocView,
+        doc: &dyn textora_core::document::DocView,
     ) -> Vec<(usize, f32)> {
         let Some(doc_idx) = self.laid_to_doc.get(laid_idx).copied() else {
             return Vec::new();
@@ -980,7 +980,7 @@ impl<S: BlockSource> LazyLayout<S> {
         style: &MarkdownStyle,
         shaper: &mut shaping::Shaper,
         highlighter: Option<&dyn crate::builder::CodeHighlighter>,
-        doc: &dyn core::document::DocView,
+        doc: &dyn textora_core::document::DocView,
     ) -> f32 {
         self.ensure_consistent();
         if idx >= self.estimated_heights.len() || idx >= self.y_delta.len() {

@@ -504,7 +504,7 @@ impl ViewPlugin for MarkdownEditorView {
     fn handle_message(
         &mut self,
         msg: PluginMessage,
-        _doc: &mut dyn core::document::DocViewMut,
+        _doc: &mut dyn textora_core::document::DocViewMut,
     ) -> bool {
         if let Some(result) = self.engine.handle_message_common(&msg) {
             return result;

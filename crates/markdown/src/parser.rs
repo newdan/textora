@@ -12,6 +12,7 @@ pub enum MarkdownEvent {
     Code(String),
     InlineMath(String),
     DisplayMath(String),
+    HtmlBlock(String),
     InlineHtml(String),
     SoftBreak,
     HardBreak,
@@ -74,6 +75,22 @@ pub struct ParsedMarkdown {
     pub(crate) html_block_ranges: Vec<Range<usize>>,
 }
 
+/// 是否为可映射为块内硬换行的内联 HTML `<br>` 标签（大小写及可选空白不敏感）。
+pub(crate) fn is_inline_html_break(html: &str) -> bool {
+    if !cfg!(feature = "rich-markdown") {
+        return false;
+    }
+    let trimmed = html.trim();
+    let Some(inner) = trimmed.strip_prefix('<').and_then(|s| s.strip_suffix('>')) else {
+        return false;
+    };
+    let inner = inner.strip_suffix('/').unwrap_or(inner);
+    let Some(tag) = inner.get(..2) else {
+        return false;
+    };
+    tag.eq_ignore_ascii_case("br") && inner[2..].bytes().all(|byte| matches!(byte, b' ' | b'\t'))
+}
+
 /// 渲染与编辑分类共用的 Markdown 解析选项。
 pub(crate) fn markdown_options() -> Options {
     let mut opts = Options::empty();
@@ -128,7 +145,7 @@ pub fn parse_markdown(src: &str) -> ParsedMarkdown {
             Event::Html(html) => {
                 event_ranges.push(range.clone());
                 html_block_ranges.push(range.clone());
-                events.push(MarkdownEvent::InlineHtml(html.into_string()));
+                events.push(MarkdownEvent::HtmlBlock(html.into_string()));
             }
             Event::InlineHtml(html) => {
                 event_ranges.push(range.clone());
@@ -585,5 +602,32 @@ title: hello
             matches!(e, MarkdownEvent::Start(MarkdownTag::Link { url, .. }) if url == "https://example.com")
         });
         assert!(has_link);
+    }
+
+    #[cfg(feature = "rich-markdown")]
+    #[test]
+    fn inline_html_break_recognizer_handles_case_whitespace_and_rejects_invalid() {
+        for valid in ["<br>", "<BR>", "<Br/>", "<br />", "<BR  />", "<br >", " <br\t/> "] {
+            assert!(is_inline_html_break(valid), "{valid:?} should be recognized as break");
+        }
+        for invalid in ["</br>", "<br//>", "<brx>", "<br class=\"x\">", "br", "<b >"] {
+            assert!(!is_inline_html_break(invalid), "{invalid:?} must not be treated as break");
+        }
+    }
+
+    #[cfg(feature = "rich-markdown")]
+    #[test]
+    fn parser_distinguishes_html_block_from_inline_html_in_tight_list() {
+        let block_parsed = parse_markdown("<div>\nblock\n</div>");
+        assert!(block_parsed.events.iter().any(|e| matches!(e, MarkdownEvent::HtmlBlock(_))));
+        assert!(!block_parsed.events.iter().any(|e| matches!(e, MarkdownEvent::InlineHtml(_))));
+
+        let list_parsed = parse_markdown("- first<br>second");
+        assert!(
+            list_parsed.events.iter().any(
+                |e| matches!(e, MarkdownEvent::InlineHtml(html) if is_inline_html_break(html))
+            )
+        );
+        assert!(!list_parsed.events.iter().any(|e| matches!(e, MarkdownEvent::HtmlBlock(_))));
     }
 }

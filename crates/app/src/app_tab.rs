@@ -12,9 +12,6 @@ use appkit_core::workspace::types::TabId;
 use appkit_shell::editor_runtime::OpenDisposition;
 #[cfg(test)]
 use appkit_shell::prepared_tab::PreparedTab;
-use core::types::UniCharOffset;
-use winit::event::ElementState;
-use winit::keyboard::ModifiersState;
 
 pub(crate) struct EditorSaveContext {
     pub(crate) dirty: bool,
@@ -276,7 +273,7 @@ impl App {
             original_path.file_name().and_then(|name| name.to_str()).unwrap_or("untitled");
         let suggested_file_name = Some(format!("恢复：{file_name}"));
         let dirty_snapshot_id =
-            Some(crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::untitled_id()));
+            Some(appkit_core::snapshot::snapshot_filename(&appkit_core::snapshot::untitled_id()));
         self.editor_runtime.detach_document(tab_id, suggested_file_name, dirty_snapshot_id)
     }
 
@@ -294,56 +291,6 @@ impl App {
 
     pub(crate) fn upgrade_active_editor_preview(&mut self) -> crate::navigator::NavEffect {
         self.editor_runtime.upgrade_active_preview()
-    }
-
-    pub(crate) fn handle_editor_mouse_input(
-        &mut self,
-        state: ElementState,
-        px: f32,
-        py: f32,
-        modifiers: ModifiersState,
-        hit: Option<(UniCharOffset, usize, usize)>,
-        line_height: f32,
-    ) -> bool {
-        let Some(tab_id) = self.active_tab_id() else {
-            return false;
-        };
-        let App { editor_runtime, mouse, .. } = self;
-        let Some(mut tab) = editor_runtime.tab_session_mut(tab_id) else {
-            return false;
-        };
-        let mut presentation = tab.take_presentation();
-        let handled = crate::mouse::handle_mouse_input_with_cursor_state(
-            state,
-            px,
-            py,
-            mouse,
-            tab.document,
-            &mut presentation.cursor_render_state,
-            modifiers,
-            hit,
-        );
-        tab.restore_presentation(presentation);
-        if handled {
-            tab.ensure_cursor_visible(line_height);
-        }
-        handled
-    }
-
-    pub(crate) fn handle_editor_cursor_moved(
-        &mut self,
-        px: f32,
-        py: f32,
-        hit: Option<(UniCharOffset, usize, usize)>,
-    ) -> bool {
-        let Some(tab_id) = self.active_tab_id() else {
-            return false;
-        };
-        let App { editor_runtime, mouse, .. } = self;
-        let Some(tab) = editor_runtime.tab_session_mut(tab_id) else {
-            return false;
-        };
-        crate::mouse::handle_cursor_moved(px, py, mouse, tab.document, hit)
     }
 
     pub(crate) fn switch_editor_tab(
@@ -667,7 +614,7 @@ mod tests {
 
             fn render(
                 &mut self,
-                _: &dyn core::document::DocView,
+                _: &dyn textora_core::document::DocView,
                 _: Rect,
                 _: &Theme,
                 _: &mut Shaper,

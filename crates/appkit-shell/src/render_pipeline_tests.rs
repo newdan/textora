@@ -1,7 +1,7 @@
 use crate::document_presentation::DocumentPresentation;
 use crate::snap_tree::DisplayLineEntry;
 use appkit_core::document::DocumentModel;
-use core::buffer::TextBuffer;
+use textora_core::buffer::TextBuffer;
 use ui::layout::{
     build_advance_cache_entries, compute_visual_lines, is_cjk_char, is_whitespace_cluster,
     pick_char_width, ws_cluster_advance,

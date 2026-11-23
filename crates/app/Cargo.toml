@@ -14,7 +14,7 @@ path = "src/main.rs"
 [features]
 default = ["markdown-rich"]
 ci-no-fonts = ["appkit-shell/ci-no-fonts"]
-markdown = ["dep:textora-markdown"]
+markdown = ["dep:textora-markdown", "dep:textora-mindmap"]
 markdown-rich = ["markdown", "textora-markdown/rich-markdown"]
 
 [dependencies]
@@ -24,15 +24,15 @@ winit.workspace = true
 wgpu.workspace = true
 shaping.workspace = true
 textora-markdown = { path = "../markdown", optional = true, default-features = false }
+textora-mindmap = { path = "../mindmap", optional = true }
 appkit-core = { path = "../appkit-core", package = "textora-appkit-core" }
 appkit-shell = { path = "../appkit-shell", package = "textora-appkit-shell" }
 render.workspace = true
 pollster = "0.4"
-core.workspace = true
+textora_core.workspace = true
 stdext.workspace = true
 serde = { workspace = true }
 toml = "0.5"
-bytemuck = { version = "1", features = ["derive"] }
 hashlink.workspace = true
 rfd = { version = "0.15", default-features = false }
 similar = "2"
@@ -62,6 +62,7 @@ image = { version = "0.25", default-features = false, features = ["ico"] }
 cc = "1"
 
 [dev-dependencies]
+bytemuck = "1"
 tempfile = "3"
 criterion = { workspace = true }
 

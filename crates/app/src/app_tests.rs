@@ -1,9 +1,9 @@
 use super::*;
 use crate::document_view::DocumentView;
-use crate::input::EditCommand;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
-use core::types::ByteIndex;
-use core::types::UniCharOffset;
+use appkit_shell::input_mapper::EditCommand;
+use textora_core::types::ByteIndex;
+use textora_core::types::UniCharOffset;
 use ui::layout::compute_visual_lines;
 use ui::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
 use ui::viewport::Viewport;
@@ -169,7 +169,7 @@ fn line_end_enter_invalidates_cache_for_inserted_line() {
     let mut presentation = tab.take_presentation();
     let page_step_rows = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
     let outcome = crate::commands::execute_edit_command_v2_with_presentation(
-        &crate::input::EditCommand::InsertNewline,
+        &appkit_shell::input_mapper::EditCommand::InsertNewline,
         tab.document,
         &[],
         &mut presentation.cursor_render_state,
@@ -2000,7 +2000,7 @@ impl ui::plugin::ViewPlugin for RecordingWysiwygPlugin {
 
     fn render(
         &mut self,
-        _doc: &dyn core::document::DocView,
+        _doc: &dyn textora_core::document::DocView,
         _bounds: ui::core::geom::Rect,
         _theme: &ui::theme::Theme,
         _shaper: &mut shaping::Shaper,
@@ -2025,7 +2025,7 @@ impl ui::plugin::ViewPlugin for RecordingWysiwygPlugin {
     fn query(
         &self,
         query: ui::plugin::PluginQuery,
-        _doc: &dyn core::document::DocView,
+        _doc: &dyn textora_core::document::DocView,
     ) -> ui::plugin::PluginResponse {
         match query {
             ui::plugin::PluginQuery::NeedsSourceUpdate(generation) => {
@@ -2078,7 +2078,7 @@ impl ui::plugin::ViewPlugin for RecordingWysiwygPlugin {
     fn handle_message(
         &mut self,
         msg: ui::plugin::PluginMessage,
-        _doc: &mut dyn core::document::DocViewMut,
+        _doc: &mut dyn textora_core::document::DocViewMut,
     ) -> bool {
         match msg {
             ui::plugin::PluginMessage::UpdateSource { text, generation } => {
@@ -2258,7 +2258,7 @@ impl ui::plugin::ViewPlugin for RecordingPreviewPlugin {
 
     fn render(
         &mut self,
-        _doc: &dyn core::document::DocView,
+        _doc: &dyn textora_core::document::DocView,
         _bounds: ui::core::geom::Rect,
         _theme: &ui::theme::Theme,
         _shaper: &mut shaping::Shaper,
@@ -2274,7 +2274,7 @@ impl ui::plugin::ViewPlugin for RecordingPreviewPlugin {
     fn query(
         &self,
         query: ui::plugin::PluginQuery,
-        _doc: &dyn core::document::DocView,
+        _doc: &dyn textora_core::document::DocView,
     ) -> ui::plugin::PluginResponse {
         match query {
             ui::plugin::PluginQuery::HitTest { offset_x, offset_y, .. } => {
@@ -2300,7 +2300,7 @@ impl ui::plugin::ViewPlugin for RecordingPreviewPlugin {
     fn handle_message(
         &mut self,
         msg: ui::plugin::PluginMessage,
-        _doc: &mut dyn core::document::DocViewMut,
+        _doc: &mut dyn textora_core::document::DocViewMut,
     ) -> bool {
         match msg {
             ui::plugin::PluginMessage::SetSelAnchor(position) => {
@@ -2661,7 +2661,7 @@ fn render_active_wysiwyg_plugin_for_test(app: &mut App) -> ui::core::paint::Draw
 #[test]
 #[cfg(feature = "markdown")]
 fn wysiwyg_edit_then_navigation_does_not_require_an_intervening_paint() {
-    use crate::input::EditCommand;
+    use appkit_shell::input_mapper::EditCommand;
     let mut app = App::new(None);
     let mut document = DocumentView::new(vec!["abc".into()], 80, 10.0);
     document.cursor_move_to_offset(1);
@@ -2725,7 +2725,7 @@ fn wysiwyg_search_geometry_uses_the_document_match_list() {
 #[test]
 #[cfg(feature = "markdown")]
 fn wysiwyg_ime_navigation_preview_matches_commit() {
-    use crate::input::EditCommand;
+    use appkit_shell::input_mapper::EditCommand;
     let mut app = App::new(None);
     let mut document = DocumentView::new(vec!["old tail".into()], 80, 10.0);
     document.cursor_move_to_offset(3);
@@ -2817,7 +2817,7 @@ fn mmap_cursor_window_rect_for_test(app: &App, byte_offset: usize) -> ui::core::
 fn app_with_mmap_source(source: &str) -> App {
     let mut app = App::new(None);
     let doc = DocumentView::new(source.split('\n').map(str::to_owned).collect(), 80, 10.0);
-    app.push_entry_for_test(doc, Box::new(textora_markdown::mindmap_view::MindmapView::new()));
+    app.push_entry_for_test(doc, Box::new(textora_mindmap::mindmap_view::MindmapView::new()));
     app.switch_workspace_for_test(0);
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
@@ -2903,16 +2903,16 @@ struct MmapNodeCardBounds {
 #[cfg(feature = "markdown")]
 fn mmap_node_subtree_range_by_title(source: &str, title: &str) -> std::ops::Range<usize> {
     fn find_node_by_title<'a>(
-        node: &'a textora_markdown::mmf::Node,
+        node: &'a textora_mindmap::mmf::Node,
         title: &str,
-    ) -> Option<&'a textora_markdown::mmf::Node> {
+    ) -> Option<&'a textora_mindmap::mmf::Node> {
         if node.title == title {
             return Some(node);
         }
         node.children.iter().find_map(|child| find_node_by_title(child, title))
     }
 
-    let tree = textora_markdown::mmf::parser::parse(source).expect("mmap drag fixture must parse");
+    let tree = textora_mindmap::mmf::parser::parse(source).expect("mmap drag fixture must parse");
     find_node_by_title(&tree.root, title)
         .unwrap_or_else(|| panic!("mmap drag fixture must contain node {title}"))
         .subtree_source_range
@@ -3116,7 +3116,7 @@ fn mmap_dragging_the_root_keeps_the_source_unchanged() {
 #[cfg(feature = "markdown")]
 fn mmap_dragging_title_text_selects_text_without_moving_the_node() {
     let source = "# Root\n## Alpha\n## Beta\n";
-    let tree = textora_markdown::mmf::parser::parse(source).expect("fixture must parse");
+    let tree = textora_mindmap::mmf::parser::parse(source).expect("fixture must parse");
     let alpha_range = tree.root.children[0].title_byte_range.clone();
     let mut app = app_with_mmap_source(source);
     let alpha_start_point = mmap_text_caret_hit_point(&mut app, alpha_range.start);
@@ -3146,7 +3146,7 @@ fn mmap_dragging_title_text_selects_text_without_moving_the_node() {
 #[cfg(feature = "markdown")]
 fn mmap_drag_between_titles_does_not_create_a_document_selection() {
     let source = "# Root\n## Alpha\n## Beta\n";
-    let tree = textora_markdown::mmf::parser::parse(source).expect("fixture must parse");
+    let tree = textora_mindmap::mmf::parser::parse(source).expect("fixture must parse");
     let alpha_range = tree.root.children[0].title_byte_range.clone();
     let beta_range = tree.root.children[1].title_byte_range.clone();
     let mut app = app_with_mmap_source(source);
@@ -3186,7 +3186,7 @@ fn mmap_drag_between_titles_does_not_create_a_document_selection() {
 #[cfg(feature = "markdown")]
 fn mmap_drag_within_a_title_selects_its_source_range() {
     let source = "# Root\n## Alpha\n## Beta\n";
-    let tree = textora_markdown::mmf::parser::parse(source).expect("fixture must parse");
+    let tree = textora_mindmap::mmf::parser::parse(source).expect("fixture must parse");
     let alpha_range = tree.root.children[0].title_byte_range.clone();
     let mut app = app_with_mmap_source(source);
     app.sync_plugin_state();
@@ -3210,7 +3210,7 @@ fn mmap_drag_within_a_title_selects_its_source_range() {
 #[cfg(feature = "markdown")]
 fn mmap_title_double_click_selects_the_title_word() {
     let source = "# Root\n## Alpha\n## Beta\n";
-    let tree = textora_markdown::mmf::parser::parse(source).expect("fixture must parse");
+    let tree = textora_mindmap::mmf::parser::parse(source).expect("fixture must parse");
     let alpha_range = tree.root.children[0].title_byte_range.clone();
     let mut app = app_with_mmap_source(source);
     app.sync_plugin_state();
@@ -3244,7 +3244,7 @@ fn mmap_title_double_click_selects_the_title_word() {
 #[cfg(feature = "markdown")]
 fn mmap_selected_node_typing_replaces_title_then_undo_and_redo_restore_it() {
     let source = "# Root\n## Parent\n### Child\n## Next\n";
-    let tree = textora_markdown::mmf::parser::parse(source).expect("parse fixture");
+    let tree = textora_mindmap::mmf::parser::parse(source).expect("parse fixture");
     let parent_range = tree.root.children[0].subtree_source_range.clone();
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, parent_range);
@@ -3270,7 +3270,7 @@ fn mmap_selected_node_typing_replaces_title_then_undo_and_redo_restore_it() {
 #[cfg(feature = "markdown")]
 fn mmap_tab_creates_empty_child_and_enter_creates_empty_sibling() {
     let source = "# Root\n## Parent\n";
-    let tree = textora_markdown::mmf::parser::parse(source).expect("parse fixture");
+    let tree = textora_mindmap::mmf::parser::parse(source).expect("parse fixture");
     let mut app = app_with_mmap_source(source);
     {
         let mut tab = app.active_tab_session_mut().expect("active mmap tab");
@@ -3285,7 +3285,7 @@ fn mmap_tab_creates_empty_child_and_enter_creates_empty_sibling() {
 
     app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
     let after_sibling = active_document_text(&app);
-    let parsed = textora_markdown::mmf::parser::parse(&after_sibling).expect("parse edited map");
+    let parsed = textora_mindmap::mmf::parser::parse(&after_sibling).expect("parse edited map");
     assert_eq!(parsed.root.children[0].children.len(), 2);
     assert!(parsed.root.children[0].children.iter().all(|child| child.title.is_empty()));
 }
@@ -3294,7 +3294,7 @@ fn mmap_tab_creates_empty_child_and_enter_creates_empty_sibling() {
 #[cfg(feature = "markdown")]
 fn mmap_demote_adjusts_whole_subtree_and_undoes_once() {
     let source = "# Root\n## First\n## Second\n### Leaf\n";
-    let tree = textora_markdown::mmf::parser::parse(source).expect("parse fixture");
+    let tree = textora_mindmap::mmf::parser::parse(source).expect("parse fixture");
     let second_range = tree.root.children[1].subtree_source_range.clone();
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, second_range);
@@ -3310,7 +3310,7 @@ fn mmap_demote_adjusts_whole_subtree_and_undoes_once() {
 #[cfg(feature = "markdown")]
 fn mmap_selected_node_delete_removes_subtree_then_undo_restores_it() {
     let source = "# Root\n## Parent\n### Child\n## Next\n";
-    let tree = textora_markdown::mmf::parser::parse(source).expect("parse fixture");
+    let tree = textora_mindmap::mmf::parser::parse(source).expect("parse fixture");
     let parent_range = tree.root.children[0].subtree_source_range.clone();
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, parent_range);
@@ -3326,7 +3326,7 @@ fn mmap_selected_node_delete_removes_subtree_then_undo_restores_it() {
 #[cfg(feature = "markdown")]
 fn mmap_preedit_does_not_change_document_until_commit() {
     let source = "# Root\n## Original\n";
-    let tree = textora_markdown::mmf::parser::parse(source).expect("parse fixture");
+    let tree = textora_mindmap::mmf::parser::parse(source).expect("parse fixture");
     let selected_range = tree.root.children[0].subtree_source_range.clone();
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, selected_range);
@@ -3344,7 +3344,7 @@ fn mmap_preedit_does_not_change_document_until_commit() {
 fn mmap_invalid_source_exposes_no_edit_target() {
     const INVALID_SOURCE: &str = "## Orphan\n";
 
-    let diagnostic = textora_markdown::mmf::parser::parse(INVALID_SOURCE)
+    let diagnostic = textora_mindmap::mmf::parser::parse(INVALID_SOURCE)
         .expect_err("fixture must be invalid mmap source");
     let mut app = app_with_mmap_source("# Root\n");
     {
@@ -3391,7 +3391,7 @@ fn mmap_canvas_tab_switch_restores_each_session_and_new_doc_item_refits() {
         document.file_path = Some(std::path::PathBuf::from(SHARED_PATH));
         app.push_entry_for_test(
             document,
-            Box::new(textora_markdown::mindmap_view::MindmapView::new()),
+            Box::new(textora_mindmap::mindmap_view::MindmapView::new()),
         );
     }
 
@@ -3463,7 +3463,7 @@ fn mmap_canvas_tab_switch_restores_each_session_and_new_doc_item_refits() {
     reopened_document.file_path = Some(std::path::PathBuf::from(SHARED_PATH));
     let reopened_id = app.push_entry_for_test(
         reopened_document,
-        Box::new(textora_markdown::mindmap_view::MindmapView::new()),
+        Box::new(textora_mindmap::mindmap_view::MindmapView::new()),
     );
     let reopened_snapshot = app
         .tab_session_mut(reopened_id)
@@ -3681,7 +3681,8 @@ fn move_left_reaches_range_without_cycle(
         if !visited.insert(current) {
             return false;
         }
-        let effect = app.dispatch_wysiwyg_navigation(&crate::input::EditCommand::MoveLeft);
+        let effect =
+            app.dispatch_wysiwyg_navigation(&appkit_shell::input_mapper::EditCommand::MoveLeft);
         if !effect.redraw {
             return false;
         }
@@ -3709,7 +3710,7 @@ fn interior_x_for_visible_grapheme(grapheme_x: &[f32], grapheme_index: usize) ->
 #[test]
 #[cfg(feature = "markdown")]
 fn wysiwyg_promotion_blockquote_line_three_click_and_up_navigation_reach_its_source_range() {
-    use crate::input::EditCommand;
+    use appkit_shell::input_mapper::EditCommand;
 
     let source = "# Promotion & Marketing\n\n> Applicable scenarios: Brand launches, marketing campaigns, art/fashion/culture showcases, product introductions, etc.\n> Style anchor: Apple Keynote / Xiaomi product launch / High-end fashion brands / Art exhibitions / Cultural promotion / Premium brand visual systems\n\n## Design Philosophy\n";
     let line_three_start =

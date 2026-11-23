@@ -1398,7 +1398,7 @@ impl DocumentRuntime {
         let Some(snapshot) = self.editor_runtime.document_text_snapshot(tab_id) else {
             return;
         };
-        let Ok(tree) = textora_markdown::mmf::parser::parse(&snapshot.text) else {
+        let Ok(tree) = textora_mindmap::mmf::parser::parse(&snapshot.text) else {
             return;
         };
         let Some(tab) = self.editor_runtime.tab_session_mut(tab_id) else {
@@ -1835,7 +1835,7 @@ fn title_edit_error_message(error: DocumentTextEditError) -> String {
 pub(super) fn initial_title_from_document(kind: DocumentKind, source: &str) -> Option<String> {
     let candidate = match kind {
         DocumentKind::Markdown => document_title_projection(kind, source).title,
-        DocumentKind::Mindmap => textora_markdown::mmf::parser::parse(source).ok()?.root.title,
+        DocumentKind::Mindmap => textora_mindmap::mmf::parser::parse(source).ok()?.root.title,
         DocumentKind::Text => return None,
     };
     let trimmed_candidate = candidate.trim();

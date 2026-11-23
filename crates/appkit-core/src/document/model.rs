@@ -2,10 +2,10 @@ use std::borrow::Cow;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use core::buffer::text_buffer::{CursorMovement, TextBuffer};
-use core::document::ReadableDocument;
-use core::highlight::{FILE_ASSOCIATIONS, Language};
-use core::types::{ByteIndex, LogicalPoint, UniCharOffset};
+use textora_core::buffer::text_buffer::{CursorMovement, TextBuffer};
+use textora_core::document::ReadableDocument;
+use textora_core::highlight::{FILE_ASSOCIATIONS, Language};
+use textora_core::types::{ByteIndex, LogicalPoint, UniCharOffset};
 
 use crate::document::CursorState;
 use crate::file_safety::DiskRevision;
@@ -95,7 +95,7 @@ impl DocumentModel {
 
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let started_at = std::time::Instant::now();
-        let (buffer, metadata) = core::file::load_file(path)
+        let (buffer, metadata) = textora_core::file::load_file(path)
             .map_err(|error| format!("failed to load {}: {error}", path.display()))?;
         let disk_revision = crate::file_safety::capture_revision(path).ok();
         let load_elapsed_us = started_at.elapsed().as_micros();
@@ -140,7 +140,7 @@ impl DocumentModel {
         };
         let write_elapsed_us = started_at.elapsed().as_micros();
 
-        if metadata.line_ending == core::file::LineEnding::Crlf {
+        if metadata.line_ending == textora_core::file::LineEnding::Crlf {
             text_buffer.set_crlf(true);
         }
         text_buffer.mark_as_clean();
@@ -150,7 +150,7 @@ impl DocumentModel {
         document.file_path = Some(path.to_path_buf());
         document.disk_revision = disk_revision;
         document.dirty = metadata.original_encoding.is_some();
-        document.crlf = metadata.line_ending == core::file::LineEnding::Crlf;
+        document.crlf = metadata.line_ending == textora_core::file::LineEnding::Crlf;
         document.had_bom = metadata.had_bom;
         document.original_encoding = metadata.original_encoding;
         document.set_language_from_path(path);
@@ -302,8 +302,9 @@ impl DocumentModel {
             .then_some(self.disk_revision.as_ref())
             .flatten();
         let contents = self.serialized_contents_for_save();
-        let revision = core::file::save_file_if_unchanged(path, &contents, expected_revision)
-            .map_err(map_save_error)?;
+        let revision =
+            textora_core::file::save_file_if_unchanged(path, &contents, expected_revision)
+                .map_err(map_save_error)?;
         self.file_path = Some(path.to_path_buf());
         self.disk_revision = Some(revision);
         self.dirty = false;
@@ -314,9 +315,12 @@ impl DocumentModel {
     /// Produce an immutable byte snapshot for an off-thread save.
     pub fn serialized_contents_for_save(&self) -> Vec<u8> {
         let text = self.full_text();
-        let ending =
-            if self.crlf { core::file::LineEnding::Crlf } else { core::file::LineEnding::Mixed };
-        core::file::serialized_file_contents(text.as_bytes(), ending, self.had_bom)
+        let ending = if self.crlf {
+            textora_core::file::LineEnding::Crlf
+        } else {
+            textora_core::file::LineEnding::Mixed
+        };
+        textora_core::file::serialized_file_contents(text.as_bytes(), ending, self.had_bom)
     }
 
     /// Apply a successful worker save without clearing newer edits.
@@ -528,8 +532,17 @@ impl DocumentModel {
         if self.tb.text_length() == 0 || offset >= self.tb.text_length() {
             return (offset, offset);
         }
-        let range = core::buffer::word_select(&self.tb, offset);
+        let range = textora_core::buffer::word_select(&self.tb, offset);
         (range.start, range.end)
+    }
+
+    pub fn source_line_selection_range(
+        &self,
+        document_line: usize,
+    ) -> Option<std::ops::Range<usize>> {
+        let start = self.line_byte_offset(document_line)?;
+        let end = self.line_byte_offset(document_line + 1).unwrap_or_else(|| self.buffer_len());
+        Some(start..end)
     }
 
     pub fn ensure_selection_active(&mut self) {
@@ -712,15 +725,15 @@ impl DocumentModel {
     }
 }
 
-fn map_save_error(error: core::file::SaveError) -> DocumentSaveError {
+fn map_save_error(error: textora_core::file::SaveError) -> DocumentSaveError {
     match error {
-        core::file::SaveError::ConcurrentModification { .. } => {
+        textora_core::file::SaveError::ConcurrentModification { .. } => {
             DocumentSaveError::ConcurrentModification
         }
-        core::file::SaveError::Io { source, .. } => {
+        textora_core::file::SaveError::Io { source, .. } => {
             DocumentSaveError::Io { message: source.to_string() }
         }
-        core::file::SaveError::ReadOnly => {
+        textora_core::file::SaveError::ReadOnly => {
             DocumentSaveError::Io { message: "file is read-only".to_owned() }
         }
     }
@@ -746,7 +759,7 @@ mod tests {
     use super::DocumentModel;
 
     fn model_from_text(text: &str) -> DocumentModel {
-        let mut text_buffer = core::buffer::TextBuffer::new(false)
+        let mut text_buffer = textora_core::buffer::TextBuffer::new(false)
             .expect("TextBuffer creation should not require UI settings");
         text_buffer.write_raw(text.as_bytes());
         text_buffer.mark_as_clean();
@@ -755,14 +768,14 @@ mod tests {
 
     #[test]
     fn builds_editing_metadata_without_viewport_state() {
-        let mut text_buffer = core::buffer::TextBuffer::new(false)
+        let mut text_buffer = textora_core::buffer::TextBuffer::new(false)
             .expect("TextBuffer creation should not require UI settings");
         text_buffer.write_raw(b"hello\nworld");
 
         let model = DocumentModel::new(text_buffer);
 
         assert_eq!(model.line_index.line_count(), 2);
-        assert_eq!(model.cursor.offset, core::types::ByteIndex::ZERO);
+        assert_eq!(model.cursor.offset, textora_core::types::ByteIndex::ZERO);
         assert_eq!(model.file_path, None);
         assert!(!model.dirty);
     }
@@ -781,6 +794,18 @@ mod tests {
         assert_eq!(model.cursor_line(), 1);
         assert_eq!(model.cursor_column(), 2);
         assert_eq!(model.selection_range(), Some((1, 8)));
+    }
+
+    #[test]
+    fn source_line_selection_range_includes_line_endings_but_not_the_next_line() {
+        let model = model_from_text("中\n\n尾\n");
+
+        assert_eq!(model.source_line_selection_range(0), Some(0..4));
+        assert_eq!(model.source_line_selection_range(1), Some(4..5));
+        assert_eq!(model.source_line_selection_range(2), Some(5..9));
+        assert_eq!(model.source_line_selection_range(3), Some(9..9));
+        assert_eq!(model.source_line_selection_range(4), None);
+        assert_eq!(model_from_text("中\n尾").source_line_selection_range(1), Some(4..7));
     }
 
     #[test]
@@ -824,9 +849,9 @@ mod tests {
         {
             for had_bom in [false, true] {
                 std::fs::write(&path, original).expect("loaded-source fixture must be written");
-                let (gap, _) = core::file::load_file(&path)
+                let (gap, _) = textora_core::file::load_file(&path)
                     .expect("loaded-source fixture must use the production loading path");
-                let buffer = core::buffer::TextBuffer::from_gap_buffer(gap)
+                let buffer = textora_core::buffer::TextBuffer::from_gap_buffer(gap)
                     .expect("loaded-source fixture must preserve its original bytes");
                 let mut model = DocumentModel::new(buffer);
                 model.crlf = true;
@@ -850,9 +875,9 @@ mod tests {
         let path = directory.path().join("mixed.md");
         let source = "a\r\nb\nc\r";
         std::fs::write(&path, source).expect("mixed history fixture writes");
-        let (gap, _) = core::file::load_file(&path).expect("mixed history fixture loads");
-        let buffer =
-            core::buffer::TextBuffer::from_gap_buffer(gap).expect("mixed bytes remain intact");
+        let (gap, _) = textora_core::file::load_file(&path).expect("mixed history fixture loads");
+        let buffer = textora_core::buffer::TextBuffer::from_gap_buffer(gap)
+            .expect("mixed bytes remain intact");
         let mut model = DocumentModel::new(buffer);
         model.replace_range(0..source.len(), "replacement");
         model.undo();

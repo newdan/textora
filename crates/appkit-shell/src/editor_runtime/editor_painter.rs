@@ -1,10 +1,12 @@
 //! 产品矩形内的共享编辑器绘制。
 
 use render::GlyphVertex;
+use std::time::Instant;
+use ui::canvas::CanvasViewportSnapshot;
 use ui::plugin::PluginMessage;
 
 use super::{EditorFrame, EditorRuntime, RenderError, RenderResources};
-use crate::tab_session::TabSession;
+use crate::tab_session::{TabSession, TabSessionMut};
 
 const PLUGIN_CONTENT_TOP_PADDING_LOGICAL: f32 = 16.0;
 const PLUGIN_CONTENT_BOTTOM_PADDING_LOGICAL: f32 = 24.0;
@@ -19,23 +21,32 @@ fn search_overlay_colors(theme: &ui::Theme) -> ([f32; 4], [f32; 4]) {
     (active, inactive)
 }
 
-fn measure_preedit_advance_px(
-    shaper: &mut shaping::Shaper,
-    preedit_text: &str,
-    font_size: f32,
-) -> f32 {
-    if preedit_text.is_empty() {
-        return 0.0;
-    }
+#[derive(Clone, Copy)]
+pub enum PreeditAdvanceMeasure {
+    NonNegative,
+    AtLeastOnePixel,
+}
 
-    let previous_font_size = shaper.font_size();
-    shaper.set_font_size(font_size);
-    let advance = shaper
-        .shape(preedit_text)
-        .map(|shaped| shaped.clusters.iter().map(|cluster| cluster.advance.max(0.0)).sum())
-        .unwrap_or(0.0);
-    shaper.set_font_size(previous_font_size);
-    advance
+impl PreeditAdvanceMeasure {
+    pub fn measure(self, shaper: &mut shaping::Shaper, preedit_text: &str, font_size: f32) -> f32 {
+        if preedit_text.is_empty() {
+            return 0.0;
+        }
+        let minimum_advance = match self {
+            Self::NonNegative => 0.0,
+            Self::AtLeastOnePixel => 1.0,
+        };
+        let previous_font_size = shaper.font_size();
+        shaper.set_font_size(font_size);
+        let advance = shaper
+            .shape(preedit_text)
+            .map(|shaped| {
+                shaped.clusters.iter().map(|cluster| cluster.advance.max(minimum_advance)).sum()
+            })
+            .unwrap_or(0.0);
+        shaper.set_font_size(previous_font_size);
+        advance
+    }
 }
 
 fn plain_text_preedit_origin(
@@ -70,7 +81,103 @@ pub enum EditorSurfacePaint {
     },
 }
 
+pub struct EditorPaintStyle<'a> {
+    pub theme: &'a ui::Theme,
+    pub settings: &'a ui::Settings,
+    pub metrics: &'a ui::UiMetrics,
+}
+
+#[derive(Clone, Copy)]
+pub struct TextSurfaceLayout {
+    pub screen: ui::Screen,
+    pub left_margin: f32,
+    pub top: f32,
+    pub gutter_width: f32,
+}
+
+pub struct ShapedTextSurface {
+    pub vertices: Vec<GlyphVertex>,
+    pub tree_dirty: bool,
+    pub preedit_advance_px: f32,
+}
+
+pub enum PluginContentTarget<'a> {
+    Bounds(ui::Rect),
+    EditorRect(ui::Rect),
+    PreparedCanvas(&'a CanvasViewportSnapshot),
+}
+
+#[derive(Clone, Copy)]
+pub enum SearchHighlightStyle {
+    Theme,
+    TranslucentWhilePanelVisible,
+}
+
 impl EditorRuntime {
+    /// 在产品完成源同步和窗口布局后绘制活动插件内容。
+    pub fn render_active_plugin_content(
+        &mut self,
+        source: PluginContentTarget<'_>,
+        style: &EditorPaintStyle<'_>,
+        shaper: Option<&mut shaping::Shaper>,
+    ) -> Option<ui::DrawList> {
+        let tab_id = self.active_tab_id()?;
+        let cursor_paint_enabled = self.active_cursor_paint_enabled();
+        let mut tab = self.tab_session_mut(tab_id)?;
+        Some(render_plugin_content(&mut tab, source, style, shaper, cursor_paint_enabled))
+    }
+
+    /// 按内容、选区、搜索的顺序将活动插件的绘制命令转换为顶点。
+    pub fn paint_active_plugin_layers(
+        &self,
+        content: ui::DrawList,
+        resources: &mut RenderResources,
+        screen: ui::Screen,
+        theme: &ui::Theme,
+        search_highlights: SearchHighlightStyle,
+        vertices: &mut Vec<GlyphVertex>,
+    ) {
+        let Some(tab) = self.active_tab_id().and_then(|tab_id| self.tab_session(tab_id)) else {
+            return;
+        };
+        paint_plugin_layers(&tab, content, resources, screen, theme, search_highlights, vertices);
+    }
+
+    /// 整形活动纯文本视口，并维护显示行和光标缓存。
+    pub fn shape_active_text_surface(
+        &mut self,
+        resources: &mut RenderResources,
+        layout: TextSurfaceLayout,
+        style: &EditorPaintStyle<'_>,
+        preedit_text: &str,
+        preedit_measure: PreeditAdvanceMeasure,
+    ) -> Option<ShapedTextSurface> {
+        let tab_id = self.active_tab_id()?;
+        let mut tab = self.tab_session_mut(tab_id)?;
+        shape_text_surface(&mut tab, resources, layout, style, preedit_text, preedit_measure)
+    }
+
+    pub fn active_text_selection_vertices(
+        &self,
+        layout: TextSurfaceLayout,
+        style: &EditorPaintStyle<'_>,
+    ) -> Vec<GlyphVertex> {
+        self.active_tab_id()
+            .and_then(|tab_id| self.tab_session(tab_id))
+            .map_or_else(Vec::new, |tab| text_selection_vertices(&tab, layout, style))
+    }
+
+    pub fn active_text_search_vertices(
+        &self,
+        layout: TextSurfaceLayout,
+        style: &EditorPaintStyle<'_>,
+        highlights: SearchHighlightStyle,
+    ) -> Vec<GlyphVertex> {
+        self.active_tab_id()
+            .and_then(|tab_id| self.tab_session(tab_id))
+            .map_or_else(Vec::new, |tab| text_search_vertices(&tab, layout, style, highlights))
+    }
+
     pub fn paint_active_editor(
         &mut self,
         frame: &mut EditorFrame,
@@ -101,11 +208,7 @@ impl EditorRuntime {
                 resources,
                 editor_rect,
                 screen,
-                &theme,
-                &metrics,
-                settings.toc_max_depth,
-                settings.markdown_first_line_indent,
-                settings.text_spacing_mode,
+                &EditorPaintStyle { theme: &theme, settings: &settings, metrics: &metrics },
                 preedit,
             )
         } else {
@@ -132,72 +235,142 @@ fn paint_plugin_editor(
     resources: &mut RenderResources,
     editor_rect: ui::Rect,
     screen: ui::Screen,
-    theme: &ui::Theme,
-    metrics: &ui::settings::UiMetrics,
-    toc_max_depth: u8,
-    markdown_first_line_indent: bool,
-    text_spacing_mode: ui::typography::TextSpacingMode,
+    style: &EditorPaintStyle<'_>,
     preedit: (String, Option<(usize, usize)>),
 ) -> Vec<GlyphVertex> {
-    let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
+    let (Some(text), Some(_)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
         return Vec::new();
     };
-    let font_family = runtime.settings.font_family.clone();
     let cursor_paint_enabled = runtime.active_cursor_paint_enabled();
     let Some(mut tab) = runtime.tab_session_mut(tab_id) else {
         return Vec::new();
     };
-
     let preedit_active = !preedit.0.is_empty();
     synchronize_plugin_document(&mut tab, preedit);
     if preedit_active {
         tab.invalidate_cursor_visibility();
     }
+    let content = render_plugin_content(
+        &mut tab,
+        PluginContentTarget::EditorRect(editor_rect),
+        style,
+        Some(&mut text.shaper),
+        cursor_paint_enabled,
+    );
+    let tab = TabSession::new(tab.id, tab.document, tab.runtime);
+    let mut vertices = Vec::new();
+    paint_plugin_layers(
+        &tab,
+        content,
+        resources,
+        screen,
+        style.theme,
+        SearchHighlightStyle::TranslucentWhilePanelVisible,
+        &mut vertices,
+    );
+    vertices
+}
+
+fn render_plugin_content(
+    tab: &mut TabSessionMut<'_>,
+    source: PluginContentTarget<'_>,
+    style: &EditorPaintStyle<'_>,
+    shaper: Option<&mut shaping::Shaper>,
+    cursor_paint_enabled: bool,
+) -> ui::DrawList {
+    let EditorPaintStyle { theme, settings, metrics } = style;
+    let dpi = metrics.dpi;
     tab.send_message(PluginMessage::SetRenderSettings {
-        font_family,
-        font_size: metrics.font_size / metrics.dpi,
-        line_height: metrics.line_height / metrics.dpi,
-        toc_max_depth,
-        markdown_first_line_indent,
+        font_family: settings.font_family.clone(),
+        font_size: metrics.font_size / dpi,
+        line_height: metrics.line_height / dpi,
+        toc_max_depth: settings.toc_max_depth,
+        markdown_first_line_indent: settings.markdown_first_line_indent,
     });
-    tab.send_message(PluginMessage::SetTextSpacingMode(text_spacing_mode));
+    tab.send_message(PluginMessage::SetTextSpacingMode(settings.text_spacing_mode));
     let cursor_visible = cursor_paint_enabled
-        && (tab.cursor_blink_instant().elapsed().as_millis() / 500).is_multiple_of(2);
+        && super::cursor_blink_phase(tab.cursor_blink_instant(), Instant::now()).visible;
     tab.send_message(PluginMessage::SetCursorVisible(cursor_visible));
 
-    let bounds = plugin_bounds(editor_rect, metrics.dpi, tab.is_canvas());
-    let mut draw_list = if tab.is_canvas() {
-        tab.prepare_canvas_plugin(theme, &mut text.shaper, metrics.dpi)
-            .and_then(|canvas_metrics| {
-                tab.prepare_canvas_viewport(canvas_metrics, bounds, metrics.dpi)
-            })
-            .map_or_else(ui::DrawList::new, |snapshot| {
-                tab.render_canvas_plugin(&snapshot, theme, &mut text.shaper, metrics.dpi)
-            })
-    } else {
-        render_plugin_with_visible_cursor(&mut tab, bounds, theme, &mut text.shaper, metrics.dpi)
+    let Some(shaper) = shaper else {
+        return ui::DrawList::new();
     };
-    let tab_view = TabSession::new(tab.id, tab.document, tab.runtime);
-    if tab_view.has_selection() {
-        draw_list.cmds.extend(tab_view.selection_highlights(theme.editor.selection).cmds);
+    match source {
+        PluginContentTarget::Bounds(bounds) => tab.render_plugin(bounds, theme, shaper, dpi),
+        PluginContentTarget::EditorRect(editor_rect) => {
+            let is_canvas = tab.is_canvas();
+            let bounds = plugin_bounds(editor_rect, dpi, is_canvas);
+            if !is_canvas {
+                return render_plugin_with_visible_cursor(tab, bounds, theme, shaper, dpi);
+            }
+            tab.prepare_canvas_plugin(theme, shaper, dpi)
+                .and_then(|metrics| tab.prepare_canvas_viewport(metrics, bounds, dpi))
+                .map_or_else(ui::DrawList::new, |snapshot| {
+                    tab.render_canvas_plugin(&snapshot, theme, shaper, dpi)
+                })
+        }
+        PluginContentTarget::PreparedCanvas(snapshot) => {
+            tab.render_canvas_plugin(snapshot, theme, shaper, dpi)
+        }
     }
-    if tab_view.search_state().panel_visible && tab_view.search_state().is_active() {
-        let search = tab_view.search_state();
-        let (active_color, inactive_color) = search_overlay_colors(theme);
-        draw_list.cmds.extend(
-            tab_view
-                .search_highlights(
-                    search.query.clone(),
-                    search.options.match_case,
-                    search.options.use_regex,
-                    search.active_match_idx,
-                    active_color,
-                    inactive_color,
-                )
-                .cmds,
-        );
+}
+
+fn paint_plugin_layers(
+    tab: &TabSession<'_>,
+    content: ui::DrawList,
+    resources: &mut RenderResources,
+    screen: ui::Screen,
+    theme: &ui::Theme,
+    search_highlights: SearchHighlightStyle,
+    vertices: &mut Vec<GlyphVertex>,
+) {
+    let gpu = resources.gpu.as_ref();
+    if let (Some(text), Some(gpu)) = (resources.text.as_mut(), gpu) {
+        crate::paint_backend::drain_into(content, screen, Some(text), Some(gpu), vertices);
     }
-    crate::paint_backend::drain(draw_list, screen, Some(text), Some(gpu))
+    if tab.handles_own_rendering() && tab.has_selection() {
+        let selection = tab.selection_highlights(theme.editor.selection);
+        if !selection.cmds.is_empty() {
+            crate::paint_backend::drain_into(
+                selection,
+                screen,
+                resources.text.as_mut(),
+                gpu,
+                vertices,
+            );
+        }
+    }
+    if let Some(search) = plugin_search_layer(tab, theme, search_highlights)
+        && !search.cmds.is_empty()
+    {
+        crate::paint_backend::drain_into(search, screen, resources.text.as_mut(), gpu, vertices);
+    }
+}
+
+fn plugin_search_layer(
+    tab: &TabSession<'_>,
+    theme: &ui::Theme,
+    highlights: SearchHighlightStyle,
+) -> Option<ui::DrawList> {
+    let search = tab.search_state();
+    if !search.is_active() {
+        return None;
+    }
+    let (active_color, inactive_color) = match highlights {
+        SearchHighlightStyle::Theme => (theme.palette.highlight, theme.palette.inactive_highlight),
+        SearchHighlightStyle::TranslucentWhilePanelVisible if search.panel_visible => {
+            search_overlay_colors(theme)
+        }
+        SearchHighlightStyle::TranslucentWhilePanelVisible => return None,
+    };
+    Some(tab.search_highlights(
+        search.query.clone(),
+        search.options.match_case,
+        search.options.use_regex,
+        search.active_match_idx,
+        active_color,
+        inactive_color,
+    ))
 }
 
 fn render_plugin_with_visible_cursor(
@@ -231,7 +404,7 @@ fn render_plugin_with_visible_cursor(
     draw_list
 }
 
-fn plugin_cursor_visibility_scroll_delta(
+pub(super) fn plugin_cursor_visibility_scroll_delta(
     cursor_y: f32,
     cursor_height: f32,
     viewport_height: f32,
@@ -295,72 +468,35 @@ fn paint_text_editor(
         tab.resize_and_refresh_presentation(visible_rows, viewport_height, metrics.line_height);
     }
 
-    let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
-        return Vec::new();
-    };
-    text.shaper.set_font_family(Some(&settings.font_family));
-    text.shaper.set_font_size(metrics.font_size);
-    let preedit_advance_px =
-        measure_preedit_advance_px(&mut text.shaper, &preedit_text, metrics.font_size);
-    runtime.plain_text_preedit_advance_px = preedit_advance_px;
     let Some(mut tab) = runtime.tab_session_mut(tab_id) else {
         return Vec::new();
     };
-    let line_count = tab.document.line_count();
-    let gutter_width = settings.gutter_width(line_count) * metrics.dpi;
+    let gutter_width = settings.gutter_width(tab.document.line_count()) * metrics.dpi;
     let left_margin = editor_rect.x + metrics.content_left_margin.max(gutter_width);
-
-    let context = ui::gutter::RenderContext {
-        theme,
-        screen_w: screen.w,
-        screen_h: screen.h,
-        left_margin,
-        tab_bar_height: editor_rect.y,
-        is_active_tab: true,
-        gutter_width,
-        preedit_advance_px,
-        preedit_cursor_col: tab.document.cursor_column(),
+    let layout = TextSurfaceLayout { screen, left_margin, top: editor_rect.y, gutter_width };
+    let style = EditorPaintStyle { theme, settings, metrics };
+    let Some(ShapedTextSurface { mut vertices, tree_dirty, preedit_advance_px }) =
+        shape_text_surface(
+            &mut tab,
+            resources,
+            layout,
+            &style,
+            &preedit_text,
+            PreeditAdvanceMeasure::NonNegative,
+        )
+    else {
+        return Vec::new();
     };
-    let mut advance_cache = tab.take_advance_cache();
-    let mut presentation = tab.take_presentation();
-    let mut tree_dirty = false;
-    let mut vertices = crate::render_pipeline::shape_visible_lines(
-        metrics,
-        settings.text_spacing_mode,
-        settings.version,
-        &context,
-        tab.document,
-        &mut presentation,
-        text,
-        gpu,
-        &mut advance_cache,
-        &mut resources.frame_cache.cluster_pool,
-        &mut resources.frame_cache.first_line,
-        &mut resources.frame_cache.last_line,
-        &mut tree_dirty,
-        settings.word_wrap,
-    );
-    tab.restore_presentation(presentation);
-    tab.restore_advance_cache(advance_cache);
     if tree_dirty {
         tab.derive_scroll_top(metrics.line_height);
     }
     let tab_view = TabSession::new(tab.id, tab.document, tab.runtime);
-    vertices.extend(text_selection_vertices(
-        &tab_view,
-        metrics,
-        screen,
-        left_margin,
-        theme,
-        editor_rect.y,
-    ));
+    vertices.extend(text_selection_vertices(&tab_view, layout, &style));
     vertices.extend(text_search_vertices(
         &tab_view,
-        metrics,
-        screen,
-        left_margin,
-        theme,
-        editor_rect.y,
+        layout,
+        &style,
+        SearchHighlightStyle::TranslucentWhilePanelVisible,
     ));
     let preedit_origin = plain_text_preedit_origin(
         &preedit_text,
@@ -370,7 +506,9 @@ fn paint_text_editor(
         metrics.line_height,
         tab_view.sub_line_pixel_offset(metrics.line_height),
     );
-    if let Some((preedit_x, preedit_y)) = preedit_origin {
+    if let Some((preedit_x, preedit_y)) = preedit_origin
+        && let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref())
+    {
         vertices.extend(crate::render_pipeline::preedit_text_vertices(
             metrics,
             &preedit_text,
@@ -396,20 +534,71 @@ fn paint_text_editor(
         None,
     ));
     let cursor_scroll_changed = tab.ensure_cursor_visual_row_visible(metrics.line_height);
+    runtime.plain_text_preedit_advance_px = preedit_advance_px;
     if cursor_scroll_changed {
         runtime.request_redraw();
     }
     vertices
 }
 
+fn shape_text_surface(
+    tab: &mut TabSessionMut<'_>,
+    resources: &mut RenderResources,
+    layout: TextSurfaceLayout,
+    style: &EditorPaintStyle<'_>,
+    preedit_text: &str,
+    preedit_measure: PreeditAdvanceMeasure,
+) -> Option<ShapedTextSurface> {
+    let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
+        return None;
+    };
+    let EditorPaintStyle { theme, settings, metrics } = *style;
+    text.shaper.set_font_family(Some(&settings.font_family));
+    text.shaper.set_font_size(metrics.font_size);
+    let preedit_advance_px =
+        preedit_measure.measure(&mut text.shaper, preedit_text, metrics.font_size);
+    let context = ui::gutter::RenderContext {
+        theme,
+        screen_w: layout.screen.w,
+        screen_h: layout.screen.h,
+        left_margin: layout.left_margin,
+        tab_bar_height: layout.top,
+        is_active_tab: true,
+        gutter_width: layout.gutter_width,
+        preedit_advance_px,
+        preedit_cursor_col: tab.document.cursor_column(),
+    };
+    let mut advance_cache = tab.take_advance_cache();
+    let mut presentation = tab.take_presentation();
+    let mut tree_dirty = false;
+    let vertices = crate::render_pipeline::shape_visible_lines(
+        metrics,
+        settings.text_spacing_mode,
+        settings.version,
+        &context,
+        tab.document,
+        &mut presentation,
+        text,
+        gpu,
+        &mut advance_cache,
+        &mut resources.frame_cache.cluster_pool,
+        &mut resources.frame_cache.first_line,
+        &mut resources.frame_cache.last_line,
+        &mut tree_dirty,
+        settings.word_wrap,
+    );
+    tab.restore_presentation(presentation);
+    tab.restore_advance_cache(advance_cache);
+    Some(ShapedTextSurface { vertices, tree_dirty, preedit_advance_px })
+}
+
 fn text_selection_vertices(
     tab: &TabSession<'_>,
-    metrics: &ui::settings::UiMetrics,
-    screen: ui::Screen,
-    left_margin: f32,
-    theme: &ui::Theme,
-    editor_top: f32,
+    layout: TextSurfaceLayout,
+    style: &EditorPaintStyle<'_>,
 ) -> Vec<GlyphVertex> {
+    let TextSurfaceLayout { screen, left_margin, top, .. } = layout;
+    let EditorPaintStyle { theme, metrics, .. } = *style;
     let line_offsets = visible_line_byte_offsets(tab);
     ui::decorations::selection_vertices(
         tab.document.selection_range(),
@@ -419,7 +608,7 @@ fn text_selection_vertices(
         screen.h,
         left_margin,
         theme,
-        editor_top,
+        top,
         tab.sub_line_pixel_offset(metrics.line_height),
         &line_offsets,
     )
@@ -427,13 +616,32 @@ fn text_selection_vertices(
 
 fn text_search_vertices(
     tab: &TabSession<'_>,
-    metrics: &ui::settings::UiMetrics,
-    screen: ui::Screen,
-    left_margin: f32,
-    theme: &ui::Theme,
-    editor_top: f32,
+    layout: TextSurfaceLayout,
+    style: &EditorPaintStyle<'_>,
+    highlights: SearchHighlightStyle,
 ) -> Vec<GlyphVertex> {
+    let TextSurfaceLayout { screen, left_margin, top, .. } = layout;
+    let EditorPaintStyle { theme, metrics, .. } = *style;
     let search = tab.search_state();
+    if matches!(highlights, SearchHighlightStyle::Theme) {
+        if !search.is_active() {
+            return Vec::new();
+        }
+        return ui::decorations::search_match_vertices(
+            &search.matches.iter().map(|matched| (matched.start, matched.end)).collect::<Vec<_>>(),
+            search.active_match_idx,
+            true,
+            tab.advance_cache(),
+            metrics,
+            screen.w,
+            screen.h,
+            left_margin,
+            theme,
+            top,
+            tab.sub_line_pixel_offset(metrics.line_height),
+            &visible_line_byte_offsets(tab),
+        );
+    }
     if !search.panel_visible
         || search.matches.is_empty()
         || search.is_stale(tab.document.tb.gap_buffer().generation())
@@ -459,7 +667,7 @@ fn text_search_vertices(
                 tab.sub_line_pixel_offset(metrics.line_height),
                 left_margin,
                 color,
-                editor_top,
+                top,
             )
         })
         .collect()
@@ -501,13 +709,14 @@ pub(super) fn plugin_bounds(editor_rect: ui::Rect, dpi: f32, is_canvas: bool) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        editor_viewport_dimensions, plain_text_preedit_origin,
-        plugin_cursor_visibility_scroll_delta,
+        EditorPaintStyle, SearchHighlightStyle, TextSurfaceLayout, editor_viewport_dimensions,
+        plain_text_preedit_origin, plugin_cursor_visibility_scroll_delta,
     };
 
     #[test]
     fn plain_text_search_highlights_all_matches_and_closing_removes_them() {
-        let mut buffer = core::buffer::TextBuffer::new(false).expect("fixture creates buffer");
+        let mut buffer =
+            textora_core::buffer::TextBuffer::new(false).expect("fixture creates buffer");
         buffer.write_raw("中文 中文".as_bytes());
         let document = appkit_core::document::DocumentModel::new(buffer);
         let mut runtime = crate::tab_runtime::TabRuntime::new(Box::new(
@@ -528,17 +737,30 @@ mod tests {
         let mut ids = appkit_core::workspace::types::TabIdAllocator::new();
         let tab_id = ids.allocate();
         let theme = ui::Theme::resolve_builtin(ui::ThemeMode::Dark, winit::window::Theme::Dark);
-        let metrics = ui::UiMetrics::from_settings(&ui::Settings::new(), 1.0);
-        let screen = ui::Screen::new(300.0, 200.0);
+        let settings = ui::Settings::new();
+        let metrics = ui::UiMetrics::from_settings(&settings, 1.0);
+        let style = EditorPaintStyle { theme: &theme, settings: &settings, metrics: &metrics };
+        let layout = TextSurfaceLayout {
+            screen: ui::Screen::new(300.0, 200.0),
+            left_margin: 40.0,
+            top: 50.0,
+            gutter_width: 0.0,
+        };
+        let translucent_style = SearchHighlightStyle::TranslucentWhilePanelVisible;
         let tab = crate::tab_session::TabSession::new(tab_id, &document, &runtime);
-        let vertices = super::text_search_vertices(&tab, &metrics, screen, 40.0, &theme, 50.0);
+        let vertices = super::text_search_vertices(&tab, layout, &style, translucent_style);
         assert_eq!(vertices.len(), 12, "both source matches must produce highlight quads");
         assert_eq!(vertices[0].color[..3], theme.palette.highlight[..3]);
         assert_eq!(vertices[6].color[..3], theme.palette.inactive_highlight[..3]);
         assert!(vertices[0].color[3] < 1.0, "search overlay must leave matched glyphs readable");
         runtime.presentation.search_state.panel_visible = false;
         let tab = crate::tab_session::TabSession::new(tab_id, &document, &runtime);
-        assert!(super::text_search_vertices(&tab, &metrics, screen, 40.0, &theme, 50.0).is_empty());
+        assert!(super::text_search_vertices(&tab, layout, &style, translucent_style).is_empty());
+        let full_color =
+            super::text_search_vertices(&tab, layout, &style, SearchHighlightStyle::Theme);
+        assert_eq!(full_color.len(), 12, "an active query retains its theme-colored highlights");
+        assert_eq!(full_color[0].color, theme.palette.highlight);
+        assert_eq!(full_color[6].color, theme.palette.inactive_highlight);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use crate::document::DocumentModel;
-use core::buffer::EditHistoryKind;
-use core::types::ByteIndex;
+use textora_core::buffer::EditHistoryKind;
+use textora_core::types::ByteIndex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextEdit {
@@ -117,10 +117,11 @@ fn is_grapheme_boundary_in_text(text: &str, byte: usize) -> bool {
     }
 
     let document = text.as_bytes();
-    core::unicode::CursorNav::new(&document).goto_byte(ByteIndex(byte)).offset == ByteIndex(byte)
+    textora_core::unicode::CursorNav::new(&document).goto_byte(ByteIndex(byte)).offset
+        == ByteIndex(byte)
 }
 
-fn full_text(text_buffer: &core::buffer::TextBuffer) -> String {
+fn full_text(text_buffer: &textora_core::buffer::TextBuffer) -> String {
     let total = text_buffer.text_length();
     let mut bytes = Vec::with_capacity(total);
     let mut offset = 0;
@@ -141,8 +142,8 @@ fn full_text(text_buffer: &core::buffer::TextBuffer) -> String {
 mod tests {
     use super::{EditError, TextEdit, apply_text_edit};
     use crate::document::DocumentModel;
-    use core::buffer::EditHistoryKind;
-    use core::buffer::TextBuffer;
+    use textora_core::buffer::EditHistoryKind;
+    use textora_core::buffer::TextBuffer;
 
     fn model_from_text(text: &str) -> DocumentModel {
         let mut text_buffer = TextBuffer::new(false).expect("TextBuffer creation failed");

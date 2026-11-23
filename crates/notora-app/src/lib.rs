@@ -12,6 +12,8 @@ mod document_search;
 mod editor_adapter;
 pub mod editor_pane;
 pub mod effect_executor;
+mod encrypted_note_dialog;
+mod encrypted_note_unlock;
 pub mod events;
 pub mod external_files;
 mod index_worker;

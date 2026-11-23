@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use appkit_core::content_hash;
-use core::unicode::{
+use textora_core::unicode::{
     ucd_grapheme_cluster_joins, ucd_grapheme_cluster_joins_done, ucd_grapheme_cluster_lookup,
 };
 use ui::typography::{TextSpacingMode, TypographyCluster, TypographyInput};

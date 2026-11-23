@@ -73,7 +73,7 @@ fn prepare_document(
 
 fn assign_untitled_snapshot(document: &mut DocumentModel) {
     document.dirty_snapshot_id =
-        Some(crate::dirty_snapshot::snapshot_filename(&crate::dirty_snapshot::untitled_id()));
+        Some(appkit_core::snapshot::snapshot_filename(&appkit_core::snapshot::untitled_id()));
 }
 
 #[cfg(test)]

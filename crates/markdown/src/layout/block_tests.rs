@@ -19,7 +19,7 @@ fn inline_math_cluster_uses_rendered_image_width() {
             .flatten()
             .any(|span| matches!(span.style, InlineStyle::Math))
     );
-    let text_document = core::document::StringDocView::new(source);
+    let text_document = textora_core::document::StringDocView::new(source);
     let mut shaper = shaping::Shaper::new().expect("test environment has a font");
     let layout = layout_doc_with_shaper_for_rendering(
         &document.blocks,
@@ -61,7 +61,7 @@ fn tall_inline_math_expands_its_row_and_following_block_position() {
     let parsed = parse_markdown(source);
     let style = default_style();
     let document = MarkdownDoc::build(&parsed, &style);
-    let text_document = core::document::StringDocView::new(source);
+    let text_document = textora_core::document::StringDocView::new(source);
     let mut shaper = shaping::Shaper::new().expect("test font");
     let layout = layout_doc_with_shaper_for_rendering(
         &document.blocks,
@@ -98,7 +98,7 @@ fn display_math_and_mermaid_become_image_blocks() {
         let parsed = parse_markdown(source);
         let style = default_style();
         let document = MarkdownDoc::build(&parsed, &style);
-        let text_document = core::document::StringDocView::new(source);
+        let text_document = textora_core::document::StringDocView::new(source);
         let mut shaper = shaping::Shaper::new().expect("test font");
         let layout = layout_doc_with_shaper_for_rendering(
             &document.blocks,
@@ -130,7 +130,7 @@ fn invalid_inline_math_falls_back_to_readable_source() {
             .flatten()
             .any(|span| matches!(span.style, InlineStyle::Math))
     );
-    let text_document = core::document::StringDocView::new(source);
+    let text_document = textora_core::document::StringDocView::new(source);
     let mut shaper = shaping::Shaper::new().expect("test font");
     let layout = layout_doc_with_shaper_for_rendering(
         &document.blocks,
@@ -153,7 +153,7 @@ fn invalid_mermaid_shows_complete_fenced_source() {
     let parsed = parse_markdown(source);
     let style = default_style();
     let document = MarkdownDoc::build(&parsed, &style);
-    let text_document = core::document::StringDocView::new(source);
+    let text_document = textora_core::document::StringDocView::new(source);
     let mut shaper = shaping::Shaper::new().expect("test font");
     let layout = layout_doc_with_shaper_for_rendering(
         &document.blocks,
@@ -177,7 +177,7 @@ fn table_column_demand_includes_inline_math_image_width() {
     let style = default_style();
     let document = MarkdownDoc::build(&parse_markdown(source), &style);
     let table = &document.blocks[0];
-    let text_document = core::document::StringDocView::new(source);
+    let text_document = textora_core::document::StringDocView::new(source);
     let mut shaper = shaping::Shaper::new().expect("test font");
     let demand = measure_column_demand(
         table,
@@ -209,7 +209,7 @@ fn bare_layout_keeps_inline_math_source_readable_without_image_sidecar() {
     let source = "before $x^2$ after";
     let style = default_style();
     let document = MarkdownDoc::build(&parse_markdown(source), &style);
-    let text_document = core::document::StringDocView::new(source);
+    let text_document = textora_core::document::StringDocView::new(source);
     let layout = layout_doc(&document.blocks, &style, 400.0, &text_document);
     let LaidOutBlockKind::Text { lines, .. } = &layout.blocks[0].kind else {
         panic!("expected paragraph");
@@ -231,7 +231,7 @@ fn paragraph_first_line_indent_positions_estimated_and_precise_lines() {
     let mut style = default_style();
     style.paragraph_first_line_indent = style.body_font_size * 2.0;
     let (_, markdown) = make_doc(source);
-    let document = core::document::StringDocView::new(source);
+    let document = textora_core::document::StringDocView::new(source);
     let viewport_width = 100.0;
     for precise in [false, true] {
         let mut shaper = Shaper::new().expect("layout test requires a system font shaper");
@@ -279,7 +279,7 @@ fn paragraph_first_line_indent_preserves_manual_whitespace_and_structural_blocks
     ] {
         let mut style = default_style();
         let (_, markdown) = make_doc(source);
-        let document = core::document::StringDocView::new(source);
+        let document = textora_core::document::StringDocView::new(source);
         let baseline = layout_doc(&markdown.blocks, &style, 200.0, &document);
         style.paragraph_first_line_indent = style.body_font_size * 2.0;
         let indented = layout_doc(&markdown.blocks, &style, 200.0, &document);
@@ -294,7 +294,7 @@ fn paragraph_first_line_indent_preserves_manual_whitespace_and_structural_blocks
 #[test]
 fn novel_tab_line_preserves_verbatim_geometry() {
     let source = "中文A\t继续(说明)";
-    let document = core::document::StringDocView::new(source);
+    let document = textora_core::document::StringDocView::new(source);
     let structure = crate::builder::NovelStructure::scan(&document);
     let mut shaper = Shaper::new().expect("novel tab layout requires fonts");
     let mut widths = Vec::new();
@@ -322,7 +322,7 @@ fn novel_tab_line_preserves_verbatim_geometry() {
 #[test]
 fn final_markdown_line_geometry_reuses_natural_spacing_for_styles() {
     let source = "中文**Word**正文";
-    let document = core::document::StringDocView::new(source);
+    let document = textora_core::document::StringDocView::new(source);
     let parsed = parse_markdown(source);
     let mut natural_style = default_style();
     natural_style.text_spacing_mode = ui::typography::TextSpacingMode::Natural;
@@ -383,7 +383,7 @@ fn line_widths_for_mode(source: &str, mode: ui::typography::TextSpacingMode) -> 
     let mut style = default_style();
     style.text_spacing_mode = mode;
     let markdown = MarkdownDoc::build(&parse_markdown(source), &style);
-    let document = core::document::StringDocView::new(source);
+    let document = textora_core::document::StringDocView::new(source);
     let mut shaper = Shaper::new().expect("spacing fixture needs a text shaper");
     let layout = layout_doc_with_shaper_for_rendering(
         &markdown.blocks,
@@ -470,7 +470,7 @@ fn natural_spacing_covers_list_table_code_and_autolink_layouts() {
     let mut natural_style = default_style();
     natural_style.text_spacing_mode = ui::typography::TextSpacingMode::Natural;
     let natural_doc = MarkdownDoc::build(&parse_markdown(source), &natural_style);
-    let document = core::document::StringDocView::new(source);
+    let document = textora_core::document::StringDocView::new(source);
     let mut natural_shaper = Shaper::new().expect("protected fixture needs a text shaper");
     let natural = layout_doc_with_shaper_for_rendering(
         &natural_doc.blocks,
@@ -548,7 +548,7 @@ fn paragraph_first_line_indent_applies_once_across_soft_break_and_to_empty_parag
         style.paragraph_first_line_indent = style.body_font_size * 2.0;
         let parsed = parse_markdown(source);
         let markdown = MarkdownDoc::build_for_editing(&parsed, &style, source);
-        let document = core::document::StringDocView::new(source);
+        let document = textora_core::document::StringDocView::new(source);
         let layout = layout_doc(&markdown.blocks, &style, 400.0, &document);
         let LaidOutBlockKind::Text { lines } = &layout.blocks[0].kind else {
             panic!("fixture must produce editable paragraph");
@@ -564,7 +564,7 @@ fn paragraph_first_line_indent_leaves_room_for_a_character_in_narrow_viewports()
     let mut style = default_style();
     style.paragraph_first_line_indent = style.body_font_size * 2.0;
     let (_, markdown) = make_doc(source);
-    let document = core::document::StringDocView::new(source);
+    let document = textora_core::document::StringDocView::new(source);
     let mut shaper = Shaper::new().expect("layout test requires a system font shaper");
     let viewport_width = style.body_font_size * 2.0;
     let layout = layout_doc_with_shaper(
@@ -606,7 +606,7 @@ fn list_item_text_and_child_paragraph_have_paragraph_spacing() {
         block_range: 0..2,
         code_line_source_starts: None,
     };
-    let doc_view = core::document::StringDocView::new("a");
+    let doc_view = textora_core::document::StringDocView::new("a");
     let mut ctx = LayoutCtx::new(&doc_view, &style, 400.0, None, None, None, None);
 
     layout_block(&item, &mut ctx);
@@ -724,7 +724,7 @@ fn layout_with_cursor_and_width(
     let parsed = crate::parser::parse_markdown(source);
     let style = default_style();
     let doc = crate::builder::MarkdownDoc::build_for_editing(&parsed, &style, source);
-    let doc_view = core::document::StringDocView::new(source);
+    let doc_view = textora_core::document::StringDocView::new(source);
     let mut lazy = LazyLayout::from_doc(doc, &style, width, &doc_view);
     lazy.set_edit_source(Some(source.to_string()));
     lazy.set_edit_ctx(Some(crate::edit::EditContext {
@@ -754,7 +754,7 @@ fn layout_with_inline_code_preedit(source: &str, width: f32) -> LazyLayout<Markd
         &default_style(),
         &mut shaper,
         None,
-        &core::document::StringDocView::new(source),
+        &textora_core::document::StringDocView::new(source),
     );
     layout
 }
@@ -810,7 +810,7 @@ fn focused_inline_code_preedit_keeps_content_and_marker_styles_aligned() {
 fn wrapped_table_inline_code_preedit_stays_in_the_focused_cell() {
     let source = "| left | right |\n| --- | --- |\n| many words `ab` here | `other` |";
     let mut layout = layout_with_inline_code_preedit(source, 160.0);
-    layout.build_flat_lines(&core::document::StringDocView::new(source));
+    layout.build_flat_lines(&textora_core::document::StringDocView::new(source));
     let rows = layout
         .laid_out
         .iter()
@@ -854,7 +854,7 @@ fn table_width_and_plain_cell_wrap_stay_stable_when_focus_moves() {
     let second_cursor = source.find("ordinary words").expect("fixture contains plain text");
     let style = default_style();
     let mut layout = layout_with_cursor_and_width(source, first_cursor, 220.0);
-    let doc_view = core::document::StringDocView::new(source);
+    let doc_view = textora_core::document::StringDocView::new(source);
     let table_layout = |layout: &LazyLayout<MarkdownDoc>| {
         layout
             .laid_out
@@ -946,7 +946,7 @@ fn layout_with_selection_and_width(
     let parsed = crate::parser::parse_markdown(source);
     let style = default_style();
     let doc = crate::builder::MarkdownDoc::build(&parsed, &style);
-    let doc_view = core::document::StringDocView::new(source);
+    let doc_view = textora_core::document::StringDocView::new(source);
     let mut lazy = LazyLayout::from_doc(doc, &style, width, &doc_view);
     lazy.set_edit_source(Some(source.to_string()));
     lazy.set_edit_ctx(Some(crate::edit::EditContext {
@@ -965,7 +965,7 @@ fn layout_doc_with_width(source: &str, width: f32) -> LaidOutDoc {
     let parsed = crate::parser::parse_markdown(source);
     let style = default_style();
     let doc = crate::builder::MarkdownDoc::build(&parsed, &style);
-    let doc_view = core::document::StringDocView::new(source);
+    let doc_view = textora_core::document::StringDocView::new(source);
     let mut shaper = Shaper::new().expect("table projection test needs a shaper");
     layout_doc_with_shaper(&doc.blocks, &style, width, Some(&mut shaper), None, &doc_view)
 }
@@ -974,7 +974,7 @@ fn layout_doc_with_registry_and_width(source: &str, width: f32) -> MarkdownLayou
     let parsed = crate::parser::parse_markdown(source);
     let style = default_style();
     let doc = crate::builder::MarkdownDoc::build(&parsed, &style);
-    let doc_view = core::document::StringDocView::new(source);
+    let doc_view = textora_core::document::StringDocView::new(source);
     let mut shaper = Shaper::new().expect("ASCII diagram test needs a shaper");
     layout_doc_with_shaper_for_rendering(
         &doc.blocks,
@@ -1054,7 +1054,7 @@ fn selection_first_materialization_keeps_fence_lines_out_of_diagram_and_restores
     let parsed = crate::parser::parse_markdown(&source);
     let style = default_style();
     let doc = crate::builder::MarkdownDoc::build(&parsed, &style);
-    let doc_view = core::document::StringDocView::new(&source);
+    let doc_view = textora_core::document::StringDocView::new(&source);
     let mut layout = LazyLayout::new(doc, &style, 400.0, &doc_view);
     layout.set_edit_source(Some(source.clone()));
     layout.set_edit_ctx(Some(crate::edit::EditContext {
@@ -1181,8 +1181,12 @@ fn collect_laid_out_text(block: &LaidOutBlock, out: &mut String) {
 #[test]
 fn layout_paragraph_has_rect() {
     let (src, doc) = make_doc("hello world");
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     assert!(!laid_out.blocks.is_empty());
     assert!(laid_out.blocks[0].rect.w > 0.0);
     assert!(laid_out.blocks[0].rect.h > 0.0);
@@ -1199,7 +1203,7 @@ fn plain_shaped_text_keeps_projection_without_legacy_source_map() {
         400.0,
         Some(&mut shaper),
         None,
-        &core::document::StringDocView::new(source),
+        &textora_core::document::StringDocView::new(source),
     );
     let lines = match &laid_out.blocks[0].kind {
         LaidOutBlockKind::Text { lines } => lines,
@@ -1424,7 +1428,7 @@ fn metadata_projection_starts_at_content_event_range() {
         &doc.blocks,
         &default_style(),
         400.0,
-        &core::document::StringDocView::new(source),
+        &textora_core::document::StringDocView::new(source),
     );
     let metadata_lines = laid_out
         .blocks
@@ -1453,7 +1457,7 @@ fn metadata_projection_uses_each_physical_line_event_range() {
         &doc.blocks,
         &default_style(),
         400.0,
-        &core::document::StringDocView::new(source),
+        &textora_core::document::StringDocView::new(source),
     );
     let metadata_lines = laid_out
         .blocks
@@ -1482,10 +1486,14 @@ fn layout_heading_larger_than_paragraph() {
         &h1.blocks,
         &default_style(),
         400.0,
-        &core::document::StringDocView::new(h1_src),
+        &textora_core::document::StringDocView::new(h1_src),
     );
-    let p_layout =
-        layout_doc(&p.blocks, &default_style(), 400.0, &core::document::StringDocView::new(p_src));
+    let p_layout = layout_doc(
+        &p.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(p_src),
+    );
     assert!(h1_layout.blocks[0].rect.h > p_layout.blocks[0].rect.h);
 }
 
@@ -1499,7 +1507,8 @@ fn h1_ascii_text_wraps_at_correct_width() {
     assert!(h1_font_size > body_font_size * 1.5, "H1 must be significantly larger than body");
 
     let (src, doc) = make_doc(long_h1);
-    let laid_out = layout_doc(&doc.blocks, &style, 200.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 200.0, &textora_core::document::StringDocView::new(src));
     let block = &laid_out.blocks[0];
     if let LaidOutBlockKind::Text { lines } = &block.kind {
         assert!(
@@ -1515,8 +1524,12 @@ fn h1_ascii_text_wraps_at_correct_width() {
 #[test]
 fn layout_vertical_positions_increase() {
     let (src, doc) = make_doc("# A\n\n## B\n\nhello");
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     assert!(laid_out.blocks.len() >= 3);
     for i in 1..laid_out.blocks.len() {
         assert!(
@@ -1531,16 +1544,24 @@ fn layout_vertical_positions_increase() {
 #[test]
 fn layout_total_height() {
     let (src, doc) = make_doc("# Title\n\nparagraph text here\n\n## Another heading");
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     assert!(laid_out.total_height > 0.0);
 }
 
 #[test]
 fn style_segments_empty_for_plain_text() {
     let (src, doc) = make_doc("hello world");
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let block = &laid_out.blocks[0];
     if let LaidOutBlockKind::Text { lines } = &block.kind {
         // Plain paragraph has no styled spans
@@ -1558,7 +1579,7 @@ fn style_segments_computed_for_inline_code() {
         400.0,
         None,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
     let block = &laid_out.blocks[0];
     if let LaidOutBlockKind::Text { lines } = &block.kind {
@@ -1572,8 +1593,12 @@ fn layout_cjk_text_no_panic() {
     let (src, doc) = make_doc(
         "需保留 SidebarPersistent 机制（inject_persistent 在生产中使用，用于跨帧保持隐藏/显示状态）",
     );
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 200.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        200.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     assert!(!laid_out.blocks.is_empty());
     assert!(laid_out.total_height > 0.0);
 }
@@ -1582,8 +1607,12 @@ fn layout_cjk_text_no_panic() {
 fn layout_long_cjk_line_wraps() {
     let long = "这是一段很长的中文文本用来测试自动换行功能是否正常工作不会产生恐慌";
     let (src, doc) = make_doc(long);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 150.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        150.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     // Should wrap into multiple lines
     let text_block =
         laid_out.blocks.iter().find(|b| matches!(&b.kind, LaidOutBlockKind::Text { .. }));
@@ -1594,7 +1623,8 @@ fn layout_long_cjk_line_wraps() {
 fn heading_spacing_collapses_between_adjacent_headings() {
     let (src, doc) = make_doc("## First\n### Second");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(laid_out.blocks.len() >= 2, "should have 2 heading blocks");
     let h1_bottom = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h;
     let h2_top = laid_out.blocks[1].rect.y;
@@ -1615,7 +1645,8 @@ fn heading_spacing_collapses_between_adjacent_headings() {
 fn first_heading_top_spacing_halved() {
     let (src, doc) = make_doc("# Title");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(!laid_out.blocks.is_empty());
     let block = &laid_out.blocks[0];
     // First heading's y should be heading_spacing_top * 0.5
@@ -1632,7 +1663,8 @@ fn first_heading_top_spacing_halved() {
 fn non_first_heading_has_full_top_spacing() {
     let (src, doc) = make_doc("paragraph\n\n# Heading");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(laid_out.blocks.len() >= 2);
     let heading = &laid_out.blocks[1];
     let para_bottom = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h;
@@ -1650,7 +1682,8 @@ fn non_first_heading_has_full_top_spacing() {
 fn blockquote_text_color_is_faded() {
     let (src, doc) = make_doc("> quoted text");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(!laid_out.blocks.is_empty());
     // The blockquote block should contain child text blocks with faded color
     if let LaidOutBlockKind::BlockQuote { blocks } = &laid_out.blocks[0].kind {
@@ -1682,7 +1715,8 @@ fn blockquote_text_color_is_faded() {
 fn blockquote_nested_in_list_preserves_color_fade() {
     let (src, doc) = make_doc("- > quoted in list");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     // Find the blockquote inside the list item
     fn find_blockquote(blocks: &[LaidOutBlock]) -> Option<&LaidOutBlock> {
         for b in blocks {
@@ -1711,8 +1745,12 @@ fn blockquote_nested_in_list_preserves_color_fade() {
 #[test]
 fn nested_list_has_increasing_depth() {
     let (src, doc) = make_doc("- top\n  - nested\n    - deep");
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     // Find all ListItem blocks and check their depth
     fn find_depths(blocks: &[LaidOutBlock], depths: &mut Vec<usize>) {
         for b in blocks {
@@ -1734,8 +1772,12 @@ fn nested_list_has_increasing_depth() {
 fn layout_table_has_rows() {
     let md = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let table = laid_out.blocks.iter().find_map(|b| {
         if let LaidOutBlockKind::Table { rows, .. } = &b.kind { Some(rows.len()) } else { None }
     });
@@ -1746,8 +1788,12 @@ fn layout_table_has_rows() {
 fn layout_table_row_heights_match_row_count() {
     let md = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let table = laid_out.blocks.iter().find_map(|b| {
         if let LaidOutBlockKind::Table { rows, row_heights, .. } = &b.kind {
             Some((rows.len(), row_heights.len()))
@@ -1762,8 +1808,12 @@ fn layout_table_row_heights_match_row_count() {
 fn layout_table_header_height_nonzero() {
     let md = "| Name | Value |\n| --- | --- |\n| x | 1 |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let header_h = laid_out.blocks.iter().find_map(|b| {
         if let LaidOutBlockKind::Table { header_height, .. } = &b.kind {
             Some(*header_height)
@@ -1780,8 +1830,12 @@ fn layout_table_row_height_reflects_long_content() {
     let md = "| Long text |\n| --- |\n| this is a very long piece of text that should wrap to multiple lines in a narrow column |";
     let (src, doc) = make_doc(md);
     // Use a narrow viewport to force wrapping
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 200.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        200.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let row_h = laid_out.blocks.iter().find_map(|b| {
         if let LaidOutBlockKind::Table { row_heights, .. } = &b.kind {
             row_heights.first().copied()
@@ -1801,8 +1855,12 @@ fn layout_table_row_height_reflects_long_content() {
 fn layout_table_column_widths_sum_to_available() {
     let md = "| a | b | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let total_w: f32 = laid_out
         .blocks
         .iter()
@@ -1828,8 +1886,12 @@ fn layout_table_wide_column_gets_more_space() {
     // Column 0: short, Column 1: very long
     let md = "| id | description |\n| --- | --- |\n| 1 | this is a very long description that needs more horizontal room |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let widths: Vec<f32> = laid_out
         .blocks
         .iter()
@@ -1858,7 +1920,7 @@ fn table_short_cjk_cells_stay_on_one_line_beside_long_description() {
     const TABLE_WIDTH: f32 = 780.0;
     let source = "| 样式 | 笔画内部 | 笔画之间 | 用途 |\n| --- | --- | --- | --- |\n| 均匀墨迹 | 将每印记的有效覆盖率按最大值合并，限制同笔累积；整笔透明度在合成时应用一次 | 正常 source-over | 毛笔、硬笔，避免盖印结点发黑 |\n| 累积落墨 | 印记按流量累积，针对路径采样步长校正沉积量 | 正常 source-over | 铅笔、干墨颗粒 |";
     let (_, document) = make_doc(source);
-    let source_view = core::document::StringDocView::new(source);
+    let source_view = textora_core::document::StringDocView::new(source);
     let mut shaper = Shaper::new().expect("table layout test requires a system font shaper");
     let layout = layout_doc_with_shaper(
         &document.blocks,
@@ -1897,7 +1959,7 @@ fn table_column_demand_ignores_residual_shaper_font_state() {
         .iter()
         .find(|block| matches!(block.kind, BlockKind::TableWrapper { .. }))
         .expect("fixture contains a table");
-    let source_view = core::document::StringDocView::new(source);
+    let source_view = textora_core::document::StringDocView::new(source);
     let columns = match table.kind {
         BlockKind::TableWrapper { columns, .. } => columns,
         _ => unreachable!("selected block is a table"),
@@ -1938,8 +2000,12 @@ fn table_column_demand_ignores_residual_shaper_font_state() {
 fn layout_table_ascii_art_not_broken_arbitrarily() {
     let md = "| File tree |\n| --- |\n| ├── mod.rs        # Widget trait |\n| └── state.rs      # State management |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let max_demand: f32 = laid_out
         .blocks
         .iter()
@@ -1963,8 +2029,12 @@ fn layout_table_header_only_no_body() {
     let md = "| A | B |
 | --- | --- |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let table = laid_out.blocks.iter().find_map(|b| {
         if let LaidOutBlockKind::Table { rows, header_height, .. } = &b.kind {
             Some((rows.len(), *header_height))
@@ -1983,8 +2053,12 @@ fn layout_table_cjk_content() {
 | --- | --- |
 | 太郎 | これは長い日本語の説明文です。テーブル内で正しく折り返されるべきです。 |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let table = laid_out.blocks.iter().find_map(|b| {
         if let LaidOutBlockKind::Table { rows, row_heights, column_widths, .. } = &b.kind {
             Some((rows.len(), row_heights.len(), column_widths.len()))
@@ -2004,8 +2078,12 @@ fn layout_table_many_columns() {
 | --- | --- | --- | --- | --- |
 | 1 | 2 | 3 | 4 | 5 |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let widths = laid_out
         .blocks
         .iter()
@@ -2035,8 +2113,12 @@ fn layout_table_cell_inner_w_minimum() {
 | --- | --- |
 | x | y |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 30.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        30.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let has_table =
         laid_out.blocks.iter().any(|b| matches!(b.kind, LaidOutBlockKind::Table { .. }));
     assert!(has_table, "should produce a table even with narrow viewport");
@@ -2048,8 +2130,12 @@ fn layout_table_header_cell_demand_affects_width() {
 | --- |
 | hi |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let width = laid_out
         .blocks
         .iter()
@@ -2072,8 +2158,12 @@ fn layout_table_header_cell_demand_affects_width() {
 fn layout_table_two_columns_unequal_content() {
     let md = "| Name | Description \n| --- | --- \n| Alice | This is a fairly long description that should ideally get more horizontal space so it does not wrap excessively |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let widths = laid_out
         .blocks
         .iter()
@@ -2111,8 +2201,12 @@ fn layout_table_two_columns_equal_content() {
 | foo | bar
 | baz | qux |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let widths = laid_out
         .blocks
         .iter()
@@ -2142,8 +2236,12 @@ fn layout_table_two_columns_extreme_ratio() {
 | --- | ---
 | x | This is an extremely long piece of text that should dominate the available horizontal space in the table layout |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let widths = laid_out
         .blocks
         .iter()
@@ -2171,8 +2269,12 @@ fn layout_table_three_columns_gives_long_text_remaining_space() {
 | --- | --- | ---
 | short | short | This is a very long description that benefits from using the space left by short columns |";
     let (src, doc) = make_doc(md);
-    let laid_out =
-        layout_doc(&doc.blocks, &default_style(), 400.0, &core::document::StringDocView::new(src));
+    let laid_out = layout_doc(
+        &doc.blocks,
+        &default_style(),
+        400.0,
+        &textora_core::document::StringDocView::new(src),
+    );
     let widths = laid_out
         .blocks
         .iter()
@@ -2222,7 +2324,8 @@ fn layout_text_preserves_all_chars_after_viewport_resize() {
     let style = default_style();
     for &w in &[100.0, 188.0, 300.0, 500.0, 800.0] {
         let doc = crate::builder::MarkdownDoc::build(&crate::parser::parse_markdown(md), &style);
-        let laid = layout_doc(&doc.blocks, &style, w, &core::document::StringDocView::new(md));
+        let laid =
+            layout_doc(&doc.blocks, &style, w, &textora_core::document::StringDocView::new(md));
         let mut all_text = String::new();
         for block in &laid.blocks {
             collect_laid_out_text(block, &mut all_text);
@@ -2240,7 +2343,8 @@ fn list_spacing_not_added_across_paragraph() {
     let parsed = crate::parser::parse_markdown(md);
     let style = default_style();
     let doc = crate::builder::MarkdownDoc::build(&parsed, &style);
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(md));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(md));
     let second_item = laid_out.blocks.iter().find(|b| {
         if let LaidOutBlockKind::ListItem { lines, .. } = &b.kind {
             lines.iter().any(|l| l.text.contains("second"))
@@ -2274,7 +2378,8 @@ fn heading_followed_by_code_block_has_spacing() {
         "### 1.2 关键不变量\n\n```text\nΣ entry.visual_line_count = display_map.tree.total_rows()\n```",
     );
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 600.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 600.0, &textora_core::document::StringDocView::new(src));
     assert!(laid_out.blocks.len() >= 2, "should have heading and code block");
 
     let heading = &laid_out.blocks[0];
@@ -2296,7 +2401,8 @@ fn heading_followed_by_code_block_has_spacing() {
 fn heading_followed_by_list_spacing_not_too_large() {
     let (src, doc) = make_doc("## 标题\n\n- 列表项1\n- 列表项2");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 600.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 600.0, &textora_core::document::StringDocView::new(src));
     assert!(laid_out.blocks.len() >= 2, "should have heading + list items");
 
     let heading = &laid_out.blocks[0];
@@ -2328,7 +2434,8 @@ fn heading_followed_by_list_spacing_not_too_large() {
 fn blockquote_height_excludes_trailing_paragraph_spacing() {
     let (src, doc) = make_doc("> quoted text");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(!laid_out.blocks.is_empty(), "should have blockquote block");
     let bq = &laid_out.blocks[0];
     if let LaidOutBlockKind::BlockQuote { blocks } = &bq.kind {
@@ -2351,7 +2458,8 @@ fn blockquote_height_excludes_trailing_paragraph_spacing() {
 fn blockquote_has_spacing_to_next_block() {
     let (src, doc) = make_doc("> quoted text\n\nNext paragraph.");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(laid_out.blocks.len() >= 2, "need blockquote + paragraph");
     let bq = &laid_out.blocks[0];
     let next = &laid_out.blocks[1];
@@ -2371,7 +2479,8 @@ fn blockquote_has_spacing_to_next_block() {
 fn para_heading_margin_collapsing() {
     let (src, doc) = make_doc("paragraph\n\n# Heading");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(laid_out.blocks.len() >= 2);
     let para_bottom = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h;
     let heading_top = laid_out.blocks[1].rect.y;
@@ -2390,7 +2499,8 @@ fn para_heading_margin_collapsing() {
 fn code_heading_margin_collapsing() {
     let (src, doc) = make_doc("```\ncode\n```\n\n## Heading");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(laid_out.blocks.len() >= 2);
     let code_block = laid_out
         .blocks
@@ -2415,7 +2525,8 @@ fn code_heading_margin_collapsing() {
 fn code_to_list_not_double_spaced() {
     let (src, doc) = make_doc("```\ncode\n```\n\n- item");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     let code_block = laid_out
         .blocks
         .iter()
@@ -2442,7 +2553,8 @@ fn code_to_list_not_double_spaced() {
 fn bq_to_para_not_double_spaced() {
     let (src, doc) = make_doc("> quote\n\nnext paragraph");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(laid_out.blocks.len() >= 2);
     let bq_bottom = laid_out.blocks[0].rect.y + laid_out.blocks[0].rect.h;
     let next_top = laid_out.blocks[1].rect.y;
@@ -2461,7 +2573,8 @@ fn bq_to_para_not_double_spaced() {
 fn hr_to_list_not_double_spaced() {
     let (src, doc) = make_doc("---\n\n- item");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     let hr = laid_out
         .blocks
         .iter()
@@ -2486,7 +2599,8 @@ fn hr_to_list_not_double_spaced() {
 fn heading_hr_heading_no_stale_heading_flag() {
     let (src, doc) = make_doc("## First\n\n---\n\n## Second");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
     let hr = laid_out
         .blocks
         .iter()
@@ -2513,7 +2627,8 @@ fn heading_hr_heading_no_stale_heading_flag() {
 fn horizontal_rule_rect_contains_only_the_rule() {
     let (src, doc) = make_doc("---");
     let style = default_style();
-    let laid_out = layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(src));
+    let laid_out =
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(src));
 
     assert_eq!(laid_out.blocks.len(), 1);
     assert_eq!(laid_out.blocks[0].rect.h, style.rule_thickness);
@@ -2529,7 +2644,7 @@ fn paragraph_rule_paragraph_uses_symmetric_external_gaps() {
     style.paragraph_spacing = 30.0;
     style.rule_spacing = 12.0;
     let laid_out =
-        layout_doc(&doc.blocks, &style, 400.0, &core::document::StringDocView::new(source));
+        layout_doc(&doc.blocks, &style, 400.0, &textora_core::document::StringDocView::new(source));
     let before = &laid_out.blocks[0];
     let rule = &laid_out.blocks[1];
     let after = &laid_out.blocks[2];
@@ -2561,7 +2676,7 @@ fn list_item_content_to_nested_rule_uses_the_larger_internal_gap() {
         block_range: 0..4,
         code_line_source_starts: None,
     };
-    let document = core::document::StringDocView::new("item");
+    let document = textora_core::document::StringDocView::new("item");
     let mut ctx = LayoutCtx::new(&document, &style, 400.0, None, None, None, None);
 
     layout_block(&item, &mut ctx);
@@ -2587,7 +2702,7 @@ fn content_origin_container_places_first_actual_output_at_given_y() {
     container.kind = BlockKind::Container;
     container.children = doc.blocks;
     let style = default_style();
-    let document = core::document::StringDocView::new(source);
+    let document = textora_core::document::StringDocView::new(source);
     let mut ctx = LayoutCtx::new(&document, &style, 400.0, None, None, None, None);
     ctx.y = 100.0;
 

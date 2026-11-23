@@ -27,7 +27,7 @@ struct RenderedFixture {
 fn render_fixture(source: &str, style: &MarkdownStyle) -> RenderedFixture {
     let parsed = parse_markdown(source);
     let document = MarkdownDoc::build_for_editing(&parsed, style, source);
-    let source_view = core::document::StringDocView::new(source);
+    let source_view = textora_core::document::StringDocView::new(source);
     let mut shaper = shaping::Shaper::new().expect("spacing fixture requires a text shaper");
     let layout = layout_doc_with_shaper_for_rendering(
         &document.blocks,
@@ -370,7 +370,7 @@ fn lazy_materialization_precision_eviction_and_full_layout_share_geometry() {
     let parsed = parse_markdown(&source);
     let full_document = MarkdownDoc::build_for_editing(&parsed, &style, &source);
     let lazy_document = full_document.clone();
-    let source_view = core::document::StringDocView::new(&source);
+    let source_view = textora_core::document::StringDocView::new(&source);
     let mut full_shaper = shaping::Shaper::new().expect("full layout requires a text shaper");
     let full_layout = layout_doc_with_shaper_for_rendering(
         &full_document.blocks,

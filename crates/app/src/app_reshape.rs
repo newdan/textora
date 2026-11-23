@@ -2,29 +2,16 @@
 //! Methods on `impl App`, extracted from app.rs.
 
 use crate::app::App;
-use crate::reshape_worker::{ReshapeRequest, content_hash_for_layout};
 use appkit_shell::document_presentation::DocumentPresentation;
+#[cfg(test)]
+use appkit_shell::reshape_worker::content_hash_for_layout;
 use std::sync::Arc;
+#[cfg(test)]
 use ui::typography::TextSpacingMode;
 
 const MARKDOWN_LANGUAGE_ID: &str = "markdown";
 const MARKDOWN_FILE_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
 const SOURCE_SPACING_SEMANTIC_VERSION: u64 = 1;
-
-fn spacing_mode_for_line(
-    global_mode: TextSpacingMode,
-    source_uses_verbatim_spacing: bool,
-    line_bytes: &[u8],
-) -> TextSpacingMode {
-    if source_uses_verbatim_spacing
-        || global_mode == TextSpacingMode::Verbatim
-        || line_bytes.contains(&b'\t')
-    {
-        TextSpacingMode::Verbatim
-    } else {
-        TextSpacingMode::Natural
-    }
-}
 
 fn document_is_markdown_source(document: &appkit_core::document::DocumentModel) -> bool {
     document.language.is_some_and(|language| language.id.eq_ignore_ascii_case(MARKDOWN_LANGUAGE_ID))
@@ -37,12 +24,6 @@ fn document_is_markdown_source(document: &appkit_core::document::DocumentModel) 
                 })
             },
         )
-}
-
-fn document_uses_verbatim_source_spacing(document: &appkit_core::document::DocumentModel) -> bool {
-    document
-        .language
-        .is_some_and(|language| !language.id.eq_ignore_ascii_case(MARKDOWN_LANGUAGE_ID))
 }
 
 fn refresh_source_spacing_state(
@@ -90,22 +71,6 @@ fn markdown_protected_ranges(
         return Vec::new();
     }
     vec![0..source_length]
-}
-
-fn protected_ranges_for_line(
-    protected_ranges: &[std::ops::Range<usize>],
-    line_offset: usize,
-    line_length: usize,
-) -> Vec<std::ops::Range<usize>> {
-    let line_end = line_offset + line_length;
-    let first = protected_ranges.partition_point(|range| range.end <= line_offset);
-    let last = first + protected_ranges[first..].partition_point(|range| range.start < line_end);
-    protected_ranges[first..last]
-        .iter()
-        .map(|range| {
-            range.start.max(line_offset) - line_offset..range.end.min(line_end) - line_offset
-        })
-        .collect()
 }
 
 fn update_source_spacing_state(
@@ -167,278 +132,21 @@ impl App {
         crate::app_effect::AppEffect::RESHAPE.merge(crate::app_effect::AppEffect::PERSIST_SETTINGS)
     }
 
-    /// Drain reshape worker results and merge into active dv's DisplayLineMap
     pub(crate) fn drain_reshape_results(&mut self) {
-        if !self.editor_runtime.has_reshape_worker() {
-            return;
-        }
-        let _t0 = std::time::Instant::now();
-        let Some(active_index) = self.active_editor_index() else {
-            return;
-        };
-        let lh = self.ui_metrics().line_height;
-        let Some(tab_id) = self.active_tab_id() else {
-            return;
-        };
-        let results = self
-            .editor_runtime
-            .drain_reshape_results(32)
-            .into_iter()
-            .filter(|result| self.editor_runtime.accepts_reshape_result(result, active_index))
-            .collect::<Vec<_>>();
-        let result_count = results.len();
-        let mut cleared_lines = Vec::new();
-        let Some((tree_dirty, updated)) = self.tab_session_mut(tab_id).map(|mut tab| {
-            let mut tree_dirty = false;
-            let mut updated = false;
-            for r in results {
-                // Check if reshape result is materially identical to the current entry.
-                // content_hash covers the line identity (byte_offset + byte_length)
-                // and rendering params (viewport_width + font_size). If both hash and
-                // visual_line_count are unchanged, skip the update and cache invalidation
-                // to prevent unnecessary re-shaping and tree rebuilds that cause cursor drift.
-                let is_unchanged = tab
-                    .display_map_entry(r.doc_line)
-                    .map(|old| {
-                        old.content_hash == r.entry.content_hash
-                            && old.visual_line_count == r.entry.visual_line_count
-                    })
-                    .unwrap_or(false);
-
-                if is_unchanged {
-                    cleared_lines.push(r.doc_line);
-                    updated = true;
-                    continue;
-                }
-
-                let height_changed = tab
-                    .display_map_entry(r.doc_line)
-                    .map(|old| old.visual_line_count != r.entry.visual_line_count)
-                    .unwrap_or(true);
-
-                tab.update_display_map_entry(r.doc_line, r.entry);
-                cleared_lines.push(r.doc_line);
-                if height_changed {
-                    tree_dirty = true;
-                }
-                tab.invalidate_render_cache_line(r.doc_line);
-                updated = true;
-            }
-            if tree_dirty {
-                tab.rebuild_display_map();
-                // Clamp anchor then derive scroll_top from stable anchor.
-                // anchor is SOT — tree mapping changed but anchor.doc_line stays.
-                tab.clamp_scroll_anchor(lh);
-                tab.derive_scroll_top(lh);
-            }
-            (tree_dirty, updated)
-        }) else {
-            return;
-        };
-        for line in cleared_lines {
-            self.editor_runtime.clear_reshape_pending(line);
-        }
-        self.needs_redraw |= tree_dirty || updated;
-        let _elapsed = _t0.elapsed().as_micros();
-        if result_count > 0 || tree_dirty {
-            eprintln!(
-                "[perf:drain] results={} tree_dirty={} elapsed={}us",
-                result_count, tree_dirty, _elapsed
-            );
-        }
+        self.needs_redraw |= self.editor_runtime.apply_active_reshape_results();
     }
 
-    /// Submit reshape requests for lines just beyond the visible viewport.
     pub(crate) fn submit_reshape_ahead(&mut self) {
-        if self.editor_runtime.take_skip_next_reshape_submit() {
-            return;
+        if self.editor_runtime.has_reshape_worker() {
+            self.refresh_active_source_spacing_state();
         }
-        if !self.editor_runtime.has_reshape_worker() {
-            return;
-        }
-        let Some(tab_id) = self.active_tab_id() else {
-            return;
-        };
-        let Some(active_index) = self.active_editor_index() else {
-            return;
-        };
-        let _st0 = std::time::Instant::now();
-        let mut _submitted = 0usize;
-        let mut _skipped = 0usize;
-        let viewport_width = self
-            .active_tab_session()
-            .map(|tab| self.viewport_content_width(tab.document))
-            .unwrap_or(1.0);
-        let font_size = self.ui_metrics().font_size;
-        let font_family: std::sync::Arc<str> = self.settings.font_family.clone().into();
-        let (range, anchor_doc, document_line_count) = {
-            let Some(tab) = self.tab_session(tab_id) else {
-                return;
-            };
-            let document = tab.document;
-            let range = tab.visible_doc_range_from_anchor(self.ui_metrics().line_height);
-            // Always include anchor.doc_line so it gets accurate VL on first reshape,
-            // even when scroll_top is derived from placeholder estimates.
-            let anchor_doc =
-                tab.scroll_anchor_doc_line().min(document.line_count().saturating_sub(1));
-            (range, anchor_doc, document.line_count())
-        };
-
-        // Debounce: if anchor jumped more than the ahead buffer, the previously
-        // submitted range has no overlap with the new viewport. Skip to avoid
-        // flooding the reshape worker during rapid scrollbar drag.
-        if !self.editor_runtime.should_submit_reshape_anchor(anchor_doc, std::time::Instant::now())
-        {
-            return;
-        }
-        self.editor_runtime.mark_reshape_anchor_submitted(anchor_doc);
-
-        let start_doc = range
-            .start
-            .saturating_sub(appkit_shell::editor_runtime::RESHAPE_AHEAD_LINES)
-            .min(anchor_doc.saturating_sub(appkit_shell::editor_runtime::RESHAPE_AHEAD_LINES));
-        let ahead_end = (range.end + appkit_shell::editor_runtime::RESHAPE_AHEAD_LINES)
-            .max(anchor_doc + appkit_shell::editor_runtime::RESHAPE_AHEAD_LINES)
-            .min(document_line_count);
-        let generation = self.editor_runtime.reshape_generation();
-        let max_line_bytes = self.settings.max_line_bytes_for_shaping;
-        let configured_spacing_mode = self.settings.text_spacing_mode;
-        let pending_lines = (start_doc..ahead_end)
-            .filter(|line| self.editor_runtime.reshape_pending(*line))
-            .collect::<std::collections::HashSet<_>>();
-        let requests: Vec<(usize, ReshapeRequest)> = {
-            let Some(mut tab) = self.tab_session_mut(tab_id) else {
-                return;
-            };
-            let mut presentation = tab.take_presentation();
-            let document = &*tab.document;
-            refresh_source_spacing_state(document, &mut presentation);
-            let protected_ranges = presentation.source_spacing.protected_ranges.clone();
-            let semantic_version = presentation.source_spacing.semantic_version;
-            let source_uses_verbatim_spacing = document_uses_verbatim_source_spacing(document);
-            let requests = (start_doc..ahead_end)
-                .filter_map(|dl| {
-                    let line_bytes = document.doc_line_bytes(dl)?;
-                    let off = document.line_byte_offset(dl).unwrap_or(0);
-                    let local_protected_ranges: Arc<[std::ops::Range<usize>]> = Arc::from(
-                        protected_ranges_for_line(&protected_ranges, off, line_bytes.len()),
-                    );
-                    // Skip lines that are already shaped and up-to-date
-                    let is_up_to_date = if let Some(entry) = tab.display_map_entry(dl) {
-                        let spacing_mode = spacing_mode_for_line(
-                            configured_spacing_mode,
-                            source_uses_verbatim_spacing,
-                            line_bytes.as_ref(),
-                        );
-                        let current_hash = content_hash_for_layout(
-                            line_bytes.as_ref(),
-                            off,
-                            viewport_width,
-                            font_size,
-                            spacing_mode,
-                            &local_protected_ranges,
-                            semantic_version,
-                            &font_family,
-                        );
-                        entry.content_hash != 0 && entry.content_hash == current_hash
-                    } else {
-                        false
-                    };
-
-                    if is_up_to_date || pending_lines.contains(&dl) {
-                        _skipped += 1;
-                        return None;
-                    }
-
-                    let len = document.line_byte_length(dl).unwrap_or(0);
-                    let spacing_mode = spacing_mode_for_line(
-                        configured_spacing_mode,
-                        source_uses_verbatim_spacing,
-                        line_bytes.as_ref(),
-                    );
-                    Some((
-                        dl,
-                        ReshapeRequest {
-                            font_family: font_family.clone(),
-                            generation,
-                            doc_line: dl,
-                            byte_offset: off,
-                            byte_length: len as u32,
-                            line_bytes: std::sync::Arc::from(line_bytes.as_ref()),
-                            viewport_width,
-                            font_size,
-                            max_line_bytes,
-                            spacing_mode,
-                            protected_ranges: local_protected_ranges,
-                            semantic_version,
-                            dv_idx: active_index,
-                        },
-                    ))
-                })
-                .collect::<Vec<_>>();
-            tab.restore_presentation(presentation);
-            requests
-        };
-        for (doc_line, request) in requests {
-            if !self.editor_runtime.mark_reshape_pending(doc_line) {
-                _skipped += 1;
-                continue;
-            }
-            if self.editor_runtime.submit_reshape(request) {
-                _submitted += 1;
-            } else {
-                self.editor_runtime.clear_reshape_pending(doc_line);
-            }
-        }
-        let _selapsed = _st0.elapsed().as_micros();
-        if _selapsed > 500 || _submitted > 0 {
-            eprintln!(
-                "[perf:submit] submitted={} skipped={} elapsed={}us",
-                _submitted, _skipped, _selapsed
-            );
-        }
+        let width =
+            self.active_tab_session().map_or(1.0, |tab| self.viewport_content_width(tab.document));
+        self.editor_runtime.submit_active_reshape_ahead(width);
     }
 
     pub(crate) fn post_shape_update(&mut self) {
-        let lh = self.ui_metrics().line_height;
-        let Some(tab_id) = self.active_tab_id() else {
-            return;
-        };
-        let Some(mut tab) = self.tab_session_mut(tab_id) else {
-            return;
-        };
-        let mut needs_redraw = false;
-
-        // Autoscroll: ensure cursor is visible using visual-line precision.
-        {
-            let cursor_doc_line = tab.document.cursor_line_cached();
-            let cursor_offset_now = tab.document.cursor().offset;
-            let cursor_moved = cursor_offset_now != tab.last_cursor_offset();
-            tab.set_last_cursor_offset(cursor_offset_now);
-
-            if cursor_moved {
-                let visible_range = tab.visible_doc_range_from_anchor(lh);
-                let anchor = tab.scroll_anchor_doc_line();
-
-                if cursor_doc_line < anchor {
-                    // Cursor above viewport: scroll up
-                    tab.set_scroll_anchor(cursor_doc_line, 0.0);
-                    tab.clamp_scroll_anchor(lh);
-                    tab.derive_scroll_top(lh);
-                    needs_redraw = true;
-                } else if cursor_doc_line >= visible_range.end {
-                    // Cursor below viewport: scroll down
-                    let visible_count = visible_range.len().max(1);
-                    let new_anchor =
-                        cursor_doc_line.saturating_sub(visible_count.saturating_sub(1));
-                    tab.set_scroll_anchor(new_anchor, 0.0);
-                    tab.clamp_scroll_anchor(lh);
-                    tab.derive_scroll_top(lh);
-                    needs_redraw = true;
-                }
-            }
-        }
-        self.needs_redraw |= needs_redraw;
+        self.needs_redraw |= self.editor_runtime.reveal_active_caret_after_shape();
     }
 }
 
@@ -893,16 +601,6 @@ mod zoom_tests {
         let available_h2 = screen_h - status_h - top_h;
         let expected2 = (available_h2 / metrics.line_height).max(1.0) as f64;
         assert_eq!(app.visible_height_lines(screen_h), expected2);
-    }
-
-    #[test]
-    fn tab_lines_always_use_verbatim_spacing() {
-        let settings = ui::settings::Settings::new();
-
-        assert_eq!(
-            spacing_mode_for_line(settings.text_spacing_mode, false, "中文\tvalue".as_bytes()),
-            TextSpacingMode::Verbatim
-        );
     }
 
     #[test]

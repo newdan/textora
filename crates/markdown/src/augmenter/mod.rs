@@ -31,7 +31,7 @@ pub(in crate::augmenter) const MAX_LEADING_BLOCK_INDENT: usize = 3;
 /// CommonMark 代码围栏(``` 或 ~~~)的最少字符数。
 pub(in crate::augmenter) const MIN_FENCE_MARKER_LENGTH: usize = 3;
 /// CommonMark 空格形式硬换行所需的最少行尾空格数。
-pub(in crate::augmenter) const HARD_BREAK_MIN_SPACES: usize = 2;
+pub(crate) const HARD_BREAK_MIN_SPACES: usize = 2;
 pub(in crate::augmenter) const TASK_LIST_CONTENT_SEPARATOR: char = ' ';
 pub(in crate::augmenter) const MARKDOWN_TAB_STOP_WIDTH: usize = 4;
 
@@ -62,47 +62,84 @@ pub fn augment_edit(
     }
 }
 
-pub(in crate::augmenter) fn augment_line_break(
+enum LineBreakEncoding {
+    Literal { continuation_prefix: String },
+    PlainNewline,
+    InlineHtml,
+    BackslashHardBreak { continuation_prefix: String },
+}
+
+fn line_break_encoding_for_context(
     source: &str,
     current_byte: usize,
-) -> EditAugmentation {
-    let split_at = reversible_split_point(source, current_byte);
-    let context = classify_enter_context(source, current_byte);
-    let continuation_prefix = match &context {
-        EnterContext::ListItem { content_prefix, .. } => content_prefix.clone(),
-        EnterContext::BlockQuoteLine { continuation_prefix, .. }
-        | EnterContext::IndentedCodeBlock { continuation_prefix } => continuation_prefix.clone(),
-        EnterContext::LiteralBlockLine { continuation_prefix } => {
-            return emit_literal_source_newline(source, current_byte, continuation_prefix);
+    context: &EnterContext,
+) -> LineBreakEncoding {
+    match context {
+        EnterContext::IndentedCodeBlock { continuation_prefix }
+        | EnterContext::LiteralBlockLine { continuation_prefix } => {
+            LineBreakEncoding::Literal { continuation_prefix: continuation_prefix.clone() }
+        }
+        EnterContext::CodeBlock | EnterContext::CodeBlockFenceLine { .. } => {
+            LineBreakEncoding::Literal {
+                continuation_prefix: fenced_continuation_prefix(source, current_byte)
+                    .unwrap_or_default(),
+            }
         }
         EnterContext::Heading { .. }
         | EnterContext::SetextHeading { .. }
         | EnterContext::TableCell { .. } => {
             if cfg!(feature = "rich-markdown") {
-                return emit_inline_html_break(source, current_byte);
+                LineBreakEncoding::InlineHtml
+            } else {
+                LineBreakEncoding::PlainNewline
             }
-            return emit_source_newline(source, current_byte);
-        }
-        EnterContext::CodeBlock | EnterContext::CodeBlockFenceLine { .. } => {
-            return emit_fenced_source_newline(source, current_byte);
         }
         EnterContext::HorizontalRuleEnd
         | EnterContext::EmptyBlockSeparatorLine
-        | EnterContext::Other => {
-            return emit_source_newline(source, current_byte);
+        | EnterContext::Other => LineBreakEncoding::PlainNewline,
+        EnterContext::ListItem { content_prefix, .. } => {
+            LineBreakEncoding::BackslashHardBreak { continuation_prefix: content_prefix.clone() }
+        }
+        EnterContext::BlockQuoteLine { continuation_prefix, .. } => {
+            LineBreakEncoding::BackslashHardBreak {
+                continuation_prefix: continuation_prefix.clone(),
+            }
         }
         EnterContext::TopLevelParagraphEnd
         | EnterContext::ParagraphInterior
-        | EnterContext::ParagraphStart { .. } => String::new(),
-    };
-    let newline = preferred_newline_sequence(source, split_at);
-    let insertion = format!("\\{newline}{continuation_prefix}");
-    let augmentation = EditAugmentation {
-        cursor_byte_after: split_at + insertion.len(),
-        replace_range: Some(split_at..split_at),
-        insert_text: Some(insertion),
-    };
-    preserve_inline_elements_at_split(source, split_at, augmentation)
+        | EnterContext::ParagraphStart { .. } => {
+            LineBreakEncoding::BackslashHardBreak { continuation_prefix: String::new() }
+        }
+    }
+}
+
+pub(in crate::augmenter) fn augment_line_break(
+    source: &str,
+    current_byte: usize,
+) -> EditAugmentation {
+    let context = classify_enter_context(source, current_byte);
+    match line_break_encoding_for_context(source, current_byte, &context) {
+        LineBreakEncoding::Literal { continuation_prefix } => {
+            emit_literal_source_newline(source, current_byte, &continuation_prefix)
+        }
+        LineBreakEncoding::PlainNewline => emit_source_newline(source, current_byte),
+        LineBreakEncoding::InlineHtml => preserve_inline_code_at_split(
+            source,
+            current_byte,
+            emit_inline_html_break(source, current_byte),
+        ),
+        LineBreakEncoding::BackslashHardBreak { continuation_prefix } => {
+            let split_at = reversible_split_point(source, current_byte);
+            let newline = preferred_newline_sequence(source, split_at);
+            let insertion = format!("\\{newline}{continuation_prefix}");
+            let augmentation = EditAugmentation {
+                cursor_byte_after: split_at + insertion.len(),
+                replace_range: Some(split_at..split_at),
+                insert_text: Some(insertion),
+            };
+            preserve_inline_elements_at_split(source, split_at, augmentation)
+        }
+    }
 }
 
 pub(in crate::augmenter) fn emit_inline_html_break(

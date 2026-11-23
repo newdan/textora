@@ -5,7 +5,7 @@ use super::*;
 impl PreviewEngine<MarkdownDoc> {
     pub(super) fn prepare_current_source_layout(&mut self, source: &str) {
         let Some(style) = self.cached_query_style.clone() else { return };
-        let document_view = core::document::StringDocView::new(source);
+        let document_view = textora_core::document::StringDocView::new(source);
         let parsed = crate::parser::parse_markdown(source);
         let document = MarkdownDoc::build_for_editing(&parsed, &style, source);
         let mut layout = self.create_layout_with_view_state(
@@ -56,7 +56,7 @@ impl<S: BlockSource> PreviewEngine<S> {
         let Some(style) = self.cached_query_style.as_ref() else { return };
         let Some(source) = self.edit_source.as_deref() else { return };
         let Some(layout) = self.lazy.as_mut() else { return };
-        let document_view = core::document::StringDocView::new(source);
+        let document_view = textora_core::document::StringDocView::new(source);
         layout.set_edit_ctx(self.edit_ctx.clone());
         layout.invalidate_lines_for_source_bytes(
             previous.into_iter().chain(std::iter::once(current)),

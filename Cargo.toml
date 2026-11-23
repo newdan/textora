@@ -34,7 +34,7 @@ codegen-units = 16
 lto = "thin"
 
 [workspace.dependencies]
-core = { path = "./crates/core", package = "textora-core" }
+textora_core = { path = "./crates/core", package = "textora-core" }
 lsh = { path = "./crates/lsh" }
 render = { path = "./crates/render", package = "textora-render" }
 shaping = { path = "./crates/shaping", package = "textora-shaping" }

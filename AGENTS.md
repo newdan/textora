@@ -40,8 +40,12 @@ crates/appkit-core (产品无关文档与工作区内核)
 
 crates/appkit-shell (跨产品编辑器宿主与渲染壳层)
   ├── 依赖: appkit-core, ui, core, render, shaping, winit, wgpu
-  ├── 不依赖: textora-markdown, textora-sync, textora-app, notora-core, notora-app
+  ├── 不依赖: textora-markdown, textora-mindmap, textora-sync, textora-app, notora-core, notora-app
   └── 职责: EditorRuntime, TabRuntime/TabSession, GPU/文本排版管线与窗口宿主抽象
+
+crates/markdown / crates/mindmap (编辑器视图实现)
+  ├── 通过 ui 的 ViewPlugin 接入宿主，两个 crate 不互相依赖
+  └── 职责: Markdown 流式排版与编辑 / MMF 画布布局与交互
 
 crates/notora-core (Notora 笔记域内核)
   ├── 依赖: blake3, notify, rusqlite, textora-encryption, serde, toml 等
@@ -50,12 +54,12 @@ crates/notora-core (Notora 笔记域内核)
 
 crates/app (Textora 应用层)
   ├── 依赖: appkit-core, appkit-shell, ui, core, render, shaping,
-  │         textora-markdown, textora-sync, wgpu, winit
+  │         textora-markdown, textora-mindmap, textora-sync, wgpu, winit
   └── 职责: 从 DocumentModel / EditorRuntime 提取数据 → 构造 Widget 输入 → 调用 ui::render()
 
 crates/notora-app (Notora 应用层)
   ├── 依赖: appkit-core, appkit-shell, notora-core, ui, core, render, shaping,
-  │         textora-markdown, textora-encryption, wgpu, winit
+  │         textora-markdown, textora-mindmap, textora-encryption, wgpu, winit
   └── 职责: 将笔记域模型适配到 EditorRuntime 与 ui 组件（不依赖 textora-app 与 textora-sync）
 ```
 

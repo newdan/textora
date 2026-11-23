@@ -1,5 +1,5 @@
 use appkit_core::workspace::types::TabId;
-use core::types::UniCharOffset;
+use textora_core::types::UniCharOffset;
 use ui::canvas::{CanvasAxis, CanvasPoint};
 use winit::event::{ElementState, MouseScrollDelta};
 use winit::window::CursorIcon;

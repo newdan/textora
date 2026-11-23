@@ -2,11 +2,17 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::persistence_worker::{PersistenceWorker, PersistenceWorkerDisconnected};
+use crate::product::PersistenceCompletion;
 use crate::session::ProductSession;
 use crate::settings::ProductSettings;
 
 const SESSION_PERSIST_DEBOUNCE_DELAY: Duration = Duration::from_millis(300);
 const CATALOG_BACKUP_DEBOUNCE_DELAY: Duration = Duration::from_millis(300);
+
+pub(super) enum PersistenceCompletionOutcome {
+    SettingsUpdated,
+    SessionFailed { message: String },
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) enum SettingsPersistenceState {
@@ -168,6 +174,21 @@ impl PersistenceRuntime {
             Ok(()) => SettingsPersistenceState::Saved,
             Err(message) => SettingsPersistenceState::SaveFailed { message },
         };
+    }
+
+    pub(super) fn apply_completion(
+        &mut self,
+        completion: PersistenceCompletion,
+    ) -> PersistenceCompletionOutcome {
+        match completion {
+            PersistenceCompletion::SettingsPersistenceCompleted { result } => {
+                self.record_settings_result(result);
+                PersistenceCompletionOutcome::SettingsUpdated
+            }
+            PersistenceCompletion::SessionPersistenceFailed { message } => {
+                PersistenceCompletionOutcome::SessionFailed { message }
+            }
+        }
     }
 
     pub(super) fn shutdown(&mut self) {

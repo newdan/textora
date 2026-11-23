@@ -1,5 +1,11 @@
 # docs 索引
 
+## 唯一架构入口
+
+[新人接手指南](onboarding.md)是当前架构的唯一阅读入口：从双产品启动点、状态归属和编辑、保存、点击三条链路开始。依赖与分层约束以 [AGENTS.md](../AGENTS.md) 为准；下面的计划和归档用于查设计背景，不代表当前实现。
+
+根目录迁出的历史草稿：[补丁一](archive/patch.diff)、[补丁二](archive/patch2.diff)、[旧修复计划](archive/plans_bug_fix_2026_06_13.md)、[旧问题清单](archive/issues.md)、[旧写作计划](archive/new_writing_plans.md)。
+
 ## 文件命名约定
 
 - 新计划文件统一使用 `docs/plans-` 前缀，主题以小写连字符命名，`.md` 后缀。

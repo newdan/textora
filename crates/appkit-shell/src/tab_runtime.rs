@@ -99,7 +99,7 @@ mod tests {
     use crate::editor_plugin::EditorPlugin;
     use appkit_core::document::DocumentModel;
     use appkit_core::workspace::types::TabIdAllocator;
-    use core::buffer::TextBuffer;
+    use textora_core::buffer::TextBuffer;
 
     #[test]
     fn store_insert_get_and_remove_by_exact_tab_id() {

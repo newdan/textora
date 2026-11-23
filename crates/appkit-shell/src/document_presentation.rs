@@ -1,9 +1,9 @@
 use crate::cursor_motion::CursorRenderState;
 use crate::display_state::DisplayState;
 use appkit_core::document::SearchState;
-use core::highlight::HighlighterCache;
 use std::ops::Range;
 use std::sync::Arc;
+use textora_core::highlight::HighlighterCache;
 
 /// Cached source semantics used by plain editor shaping.
 #[derive(Clone, Debug, Default)]
@@ -40,8 +40,8 @@ impl DocumentPresentation {
 mod tests {
     use super::DocumentPresentation;
     use appkit_core::document::DocumentModel;
-    use core::buffer::TextBuffer;
-    use core::types::ByteIndex;
+    use textora_core::buffer::TextBuffer;
+    use textora_core::types::ByteIndex;
 
     #[test]
     fn presentation_can_be_rebuilt_without_changing_model_state() {

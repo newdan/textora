@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use appkit_shell::editor_runtime::{EditorSurfacePaint, RenderError, RenderResources};
-use appkit_shell::render_state::{GpuState, TextState};
+use appkit_shell::editor_runtime::{
+    EditorSurfacePaint, EmptyFrameTarget, RenderError, SurfaceFrameOptions, WindowCornerClip,
+};
 use ui::Widget;
 use ui::document_search_bar::{
     DocumentSearchBarEvent, DocumentSearchBarInput, DocumentSearchBarWidget,
@@ -440,11 +441,11 @@ impl FrameRuntime {
             model.editor_chrome = crate::editor_pane::EditorPaneInput::default();
         }
         refresh_source_spacing_state(document_runtime.editor_mut());
+        let mut frame = document_runtime.editor_mut().begin_frame()?;
         let mut render_resources = document_runtime.editor_mut().take_render_resources();
         if let Some(text) = render_resources.text.as_mut() {
             text.begin_frame();
         }
-        let mut frame = document_runtime.editor_mut().begin_frame()?;
         frame.with_layout_context(|context| {
             self.document_search_bar.set_rect(self.document_search_rect, context);
         });
@@ -494,14 +495,19 @@ impl FrameRuntime {
             &mut render_resources,
             &mut vertices,
         );
-        submit_shell_frame(
-            &mut render_resources,
+        let window_corner_radius = (frame_state == ui::window_frame::WindowFrameState::Restored)
+            .then_some(ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * input.layout.dpi);
+        if let Err(error) = render_resources.submit_surface_frame(
             &vertices,
-            self.theme.application_theme().editor_surface,
-            (frame_state == ui::window_frame::WindowFrameState::Restored).then_some(
-                ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * input.layout.dpi,
-            ),
-        );
+            SurfaceFrameOptions {
+                background: self.theme.application_theme().editor_surface,
+                empty_frame_target: EmptyFrameTarget::Surface,
+                window_corner_clip: WindowCornerClip::Synchronize(window_corner_radius),
+                gamma_override: None,
+            },
+        ) {
+            eprintln!("[window] 无法同步合成窗口圆角：{error}");
+        }
         let _ = frame.present()?;
         document_runtime.editor_mut().restore_render_resources(render_resources);
         document_runtime.editor_mut().mark_frame_presented();
@@ -594,11 +600,12 @@ impl FrameRuntime {
             {
                 let panel = tab.mindmap_style_panel();
                 if panel.is_visible() {
-                    model.mindmap_style_panel =
-                        Some(ui::mindmap_style_panel::MindmapStylePanelInput::from_selection(
+                    model.mindmap_style_panel = Some(
+                        appkit_shell::mindmap_style_panel::MindmapStylePanelInput::from_selection(
                             tab.mindmap_theme_selection(),
                             panel.presets_expanded(),
-                        ));
+                        ),
+                    );
                 }
             }
         }
@@ -613,114 +620,6 @@ fn startup_milestone_label(milestone: StartupMilestone) -> &'static str {
         StartupMilestone::SessionRestoreFinished => "session_restore_finished",
         StartupMilestone::RestoredDocumentRendered => "restored_document_rendered",
     }
-}
-
-fn submit_shell_frame(
-    render_resources: &mut RenderResources,
-    vertices: &[render::GlyphVertex],
-    background: [f32; 4],
-    window_corner_radius: Option<f32>,
-) {
-    let Some(gpu) = render_resources.gpu.as_mut() else {
-        return;
-    };
-    if let Err(error) = gpu.ctx.set_window_corner_radius(window_corner_radius) {
-        eprintln!("[window] 无法同步合成窗口圆角：{error}");
-        return;
-    }
-    let surface_texture = match gpu.ctx.surface.get_current_texture() {
-        wgpu::CurrentSurfaceTexture::Success(texture)
-        | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-        _ => return,
-    };
-    let surface_view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = gpu.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("notora shell render encoder"),
-    });
-    match render_resources.text.as_mut() {
-        Some(text) if !vertices.is_empty() => {
-            upload_shell_vertices(text, gpu, vertices);
-            render_shell_vertices(
-                &mut encoder,
-                text,
-                gpu,
-                &surface_view,
-                vertices.len(),
-                background,
-            );
-        }
-        _ => clear_shell_surface(&mut encoder, &surface_view, background),
-    }
-    gpu.ctx.queue.submit(std::iter::once(encoder.finish()));
-    surface_texture.present();
-}
-
-fn upload_shell_vertices(text: &mut TextState, gpu: &GpuState, vertices: &[render::GlyphVertex]) {
-    let vertex_count = vertices.len() as u32;
-    if vertex_count > text.vertex_capacity {
-        let capacity = vertex_count.next_power_of_two();
-        text.vertex_buffer = gpu.ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("notora shell vertex buffer"),
-            size: (capacity as usize * std::mem::size_of::<render::GlyphVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        text.vertex_capacity = capacity;
-    }
-    gpu.ctx.queue.write_buffer(&text.vertex_buffer, 0, bytemuck::cast_slice(vertices));
-}
-
-fn render_shell_vertices(
-    encoder: &mut wgpu::CommandEncoder,
-    text: &TextState,
-    gpu: &GpuState,
-    surface_view: &wgpu::TextureView,
-    vertex_count: usize,
-    background: [f32; 4],
-) {
-    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("notora shell text pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &gpu.ctx.msaa_view,
-            depth_slice: None,
-            resolve_target: Some(surface_view),
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(to_wgpu_color(background)),
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: None,
-        ..Default::default()
-    });
-    render_pass.set_pipeline(text.renderer.pipeline());
-    render_pass.set_bind_group(0, &text.bind_group, &[]);
-    render_pass.set_vertex_buffer(0, text.vertex_buffer.slice(..));
-    render_pass.draw(0..vertex_count as u32, 0..1);
-}
-
-fn clear_shell_surface(
-    encoder: &mut wgpu::CommandEncoder,
-    surface_view: &wgpu::TextureView,
-    background: [f32; 4],
-) {
-    let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("notora shell clear pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: surface_view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(to_wgpu_color(background)),
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: None,
-        ..Default::default()
-    });
-}
-
-fn to_wgpu_color(color: [f32; 4]) -> wgpu::Color {
-    wgpu::Color { r: color[0] as f64, g: color[1] as f64, b: color[2] as f64, a: color[3] as f64 }
 }
 
 fn editor_header_is_compact(layout: ShellLayout, property_row_visible: bool) -> bool {

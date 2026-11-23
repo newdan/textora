@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 use super::*;
-use core::types::ByteIndex;
+use textora_core::types::ByteIndex;
 
 use std::io::Write;
 

@@ -1,0 +1,154 @@
+# notora 界面主题（当前生产说明）
+
+本文记录 P0 已接线的生产主题与同步后的 token；整体测试验证仍在进行，尚未宣称 `./scripts/verify.sh` 通过。预览页面及组件文档另行同步。P1 只保留候选，不注册、不应用。方案与验收见 `theme-optimization.md`。
+
+notora 的界面主题是一套“纸、墨、火”的三栏笔记界面语言：暖色纸面承载内容，深墨承载文字，一点陶土橙只标记“当前”。本系统只覆盖应用外壳与控件；Markdown 正文的标题、链接、代码、目录配色是另一类主题，见文末边界。
+
+## 三栏与两层表面
+
+notora 的窗口从左到右是导航栏（220）、文件卡片中栏（340）、编辑器。界面主题不平均地涂三层，而是让内容成为对比的极点：
+
+- **外壳**（`surface-window`）：窗口边缘与导航栏，是最“环境”的一层。
+- **中栏**（`surface-navigation`）：卡片列表，从外壳向内容走一步。
+- **内容纸**（`surface-editor`）：编辑器画布，浅色最亮、深色最暗，是纸的正面。
+- **浮层**（`surface-overlay`）：对话框、菜单、设置面板。它是唯一“被照亮”的例外，深色下比外壳更亮。
+
+浅色从 #fcfaf8 走到 #ffffff，深色从 #332d29 走到 #191614。当前浅色相邻表面几乎不可分，纸感主要靠色温；不要用投影制造第三层纸。P1 候选的浅色 window/navigation/editor L* 约为 94.31/96.96/99.04，overlay 约 99.33；相邻差值并非 3–6。本轮保留现有纸面。
+
+## 颜色
+
+主文本用 `ink`，次要文本用 `ink-muted`，选中行与选中卡片用 `ink-row-selected` 铺在 `surface-row-selected` 上。`ink-inverse` 保留通用反色语义，强调填充上的分段文字、复选框勾号与开关滑块已改用 `on-accent`。品牌强调 `accent`（陶土橙）仍用于选中填充、光标与混色源；活动文字/图标使用 `accent-text`，焦点使用独立的 `focus-ring`。Rust 字段使用下划线，设计 token 使用连字符。
+
+| 角色 | 浅色 | 深色 | 用在哪 |
+|---|---|---|---|
+| `surface-window` | `#fcfaf8` | `#332d29` | 窗口边缘、导航栏 |
+| `surface-navigation` | `#fefdfc` | `#27221f` | 文件卡片中栏 |
+| `surface-overlay` | `#ffffff` | `#36302b` | 对话框、菜单、设置 |
+| `surface-editor` | `#ffffff` | `#191614` | 编辑器画布 |
+| `surface-row-hover` | `#f9f7f4` | `#433a33` | 树行、卡片悬停 |
+| `surface-row-selected` | `#f8e5d2` | `#493529` | 树行、卡片选中 |
+| `surface-selected` | `#f8e5d2` | `#f59a4a24` | 按钮/菜单选中 |
+| `ink` | `#202020` | `#f2ede8` | 主文本、主图标 |
+| `ink-muted` | `#62666c` | `#b8ada3` | 摘要、元数据、占位符 |
+| `ink-row-selected` | `#9a4815` | `#f2a659` | 选中行/卡片标题 |
+| `ink-inverse` | `#ffffff` | `#211e1c` | 通用反色文字，不用于 accent 填充上的前景 |
+| `divider` | `#efeae3` | `#463c35` | 弱分隔线、纸面折线 |
+| `line-strong` | `#ded8d1` | `#77695d` | 侧栏分隔等结构线 |
+| `control-bg` | `#ffffff` | `#211d1a` | 输入、搜索框底 |
+| `control-border` | `#9f8d76` | `#77695d` | 输入、搜索框普通态边界 |
+| `button-bg` | `#fbfbfb` | `#2f2c2a` | 普通按钮底 |
+| `button-border` | `#d2ccc5` | `#8d8279` | 普通按钮边 |
+| `button-hover` | `#f7f7f7` | `#3d3b3a` | 按钮、幽灵操作悬停 |
+| `button-pressed` | `#f1f1f1` | `#454341` | 按钮按下 |
+| `accent` | `#e97924` | `#f59a4a` | 选中填充、光标、混色源 |
+| `on-accent` | `#2a1808` | `#2a1504` | 分段文字、复选框勾号、开关已选滑块 |
+| `accent-text` | `#9a4815` | `#f2a659` | 活动文字/图标、菜单/ghost 选中前景 |
+| `focus-ring` | `#c2410c` | `#f59a4a` | 独立焦点轮廓 |
+| `danger-text` | `#b3261e` | `#f08a7f` | 一般错误正文 |
+| `warning-text` | `#8a5a00` | `#e5ca9a` | 警告正文 |
+| `editor-line-number` | `#75695c` | `#a99b8e` | 编辑器行号 |
+| `danger` | `#e45649` | `#e45649` | 危险图标、指示条、危险按钮混色 |
+| `warning` | `#c18401` | `#dfc184` | 警告指示条、思维导图状态 |
+| `danger-label` | `#983d35` | `#edc2bc` | 危险按钮的派生前景，须与按钮状态底色成对检查 |
+| `scrim` | `#00000073` | `#00000073` | 模态遮罩 |
+
+正文对比度：`ink` 在四层纸面上浅色 15.6–16.3:1、深色 11.2–15.5:1；`ink-muted` 浅色 5.6–5.8:1、深色 5.9–7.2:1；选中行文字 5.2:1 / 5.7:1。浅色下 `accent` 对纸面只有 2.8–2.9:1，`danger` 3.7:1、`warning` 3.2:1，都不用于一般正文；P0 已接线独立前景角色，原 accent/danger/warning 源值保持不变，详见 `theme-optimization.md`。
+
+## 选中与兼容规则
+
+- 行/卡片用实心 `surface-row-selected` + 专用 `ink-row-selected`。
+- 菜单/ghost 使用 `accent-text` 前景，目标材质是水洗；当前浅色 `surface-selected #f8e5d2` 是实心，P1 候选 `#f6e3cc` 也仍是实心，不能把它写作 18% 水洗，后续须重算源 alpha 与合成底面。
+- 分段用实心 `accent` + `on-accent`，不归入菜单水洗。
+
+`highlight` / `inactive_highlight` 有搜索高亮消费者（`crates/ui/src/decorations.rs:183`、`crates/app/src/app_renderer.rs:1092`），保留。`hover_surface` 与 `button_hover_surface` 同源不构成删除依据。
+
+## 字体
+
+界面只用系统字体：macOS 落 SF Pro 与 PingFang SC，Windows 落 Segoe UI 与微软雅黑。不引入自定义界面字体，避免中文回退不一致。字重只用 400 与 600；没有斜体。
+
+| 样式 | 字号/行高 | 字重 | 用在哪 |
+|---|---|---|---|
+| `page-title` | 22/30 | 600 | 编辑器标题，一个视图一次 |
+| `section-title` | 16/22 | 600 | 中栏标题、对话框标题 |
+| `card-title` | 15/20 | 600 | 文件卡片标题，最多两行 |
+| `body` | 14/20 | 400 | 按钮、输入、菜单、默认文本 |
+| `label` | 13/18 | 400 | 树行、标签、辅助操作；选中行改用 600 |
+| `meta` | 12/16 | 400 | 卡片元数据、路径、计数 |
+| `caption` | 11/16 | 400 | 保存状态、快捷键提示 |
+
+界面不放大字号来表达层级：先换颜色与字重，再换尺寸。标题与正文之间最多跨两级。
+
+## 间距、圆角与尺寸
+
+间距以 4 为网格：2、4、8、10、12、16、24。`space-4`（10）只用于卡片垂直内边距，是 2px 网格上的光学例外；不要把它带到别处。
+
+圆角只有三档：4 给紧凑控件与徽标，8 给按钮/输入/卡片/对话框，16 只给三栏外壳的最外圆角。卡片内不要嵌套第二个 16。
+
+关键尺寸：控件高 32，工具栏/搜索栏/模态头部高 28，窗口标题栏与侧栏头部高 36，侧栏行高 32，文件树行高 28，默认导航栏 220、中栏 340，默认图标 16。
+
+## 组件
+
+- **Button**：高 32（工具栏 28），左右内边距 8，圆角 8，14px 文本。默认、悬停、按下、禁用四态；危险按钮只用于不可逆操作。界面里没有“强调色主按钮”，默认动作就是纸面按钮；强调色留给选中。
+- **NavigationItem**：树行高 28，左缩进每级 16，图标 16、图标与文字 6，左右留白 8。悬停用 `surface-row-hover`，选中用 `surface-row-selected` + `ink-row-selected`；选中行不加边框、不加左侧色条。
+- **NoteCard**：卡片圆角 8，水平内边距 8、垂直 10，卡片间距 4；标题 15/20 最多两行，摘要 13/18 最多两行，元数据 12/16。选中的卡片与选中树行共用同一套 token，不另造一种“选中”。
+- **SearchField**：高 28，圆角 8，前置 16 图标，文本 14；底用 `control-bg`、边用 `control-border`，占位符用 `ink-muted`。焦点边使用独立 `focus-ring`，维持原 1.5px 宽度。
+- **SegmentedControl**：高 32，三等分（每项 72），选中块圆角 8，文本 14。选中底保持实心 `accent`，文字使用 `on-accent`。分段不使用菜单水洗。
+- **Checkbox / Switch**：选中填充保留原 `accent`；复选框勾号、开关已选滑块及图形使用 `on-accent`，焦点轮廓使用 `focus-ring`。
+- **Dialog**：圆角 8，头部高 28 铺 `surface-overlay`，正文 `ink`，遮罩 `scrim`，底部按钮高 32。对话框不用投影，用遮罩与表面色差浮起来。
+
+组件的输入由 app 层从文档/工作区状态映射成纯数据 struct，`ui` 只接收纯数据；视觉卡是规格参考，不是可复用的前端组件。
+
+## 图标
+
+图标来自 Lucide，24 的 viewBox、2px 描边、圆头圆角。界面里只用线性图标，尺寸 14（卡片/树）、16（默认）、18（工具栏），颜色跟随文字：普通态 `ink-muted` 或 `ink`，行卡选中态 `ink-row-selected`，活动图标 `accent-text`；危险操作的指示语义仍为 `danger`，错误正文为 `danger-text`。不要用 emoji 当图标，不要把图标填成实心。
+
+## 动效
+
+界面没有动效 token：悬停、按下、选中都是即时切换，没有过渡、缩放或弹跳。唯一会动的是文本光标闪烁。需要“更柔和”时调颜色与间距，不加动画。
+
+## 主题文件与扩展
+
+内置主题是 `default-light` / `default-dark`。共享的 `ui` 层还支持主题目录里的 `*.toml`：通过 `extends = "default-light"` 或 `"default-dark"` 继承，只写要覆盖的字段，可覆盖 `palette`（27 个底层色，P0 前为 22 个）、`editor`、`markdown`、`mindmap` 与 `scopes`；内置 id 保留。但 notora 目前只调用 `Theme::resolve_builtin`，设置里也只有“跟随系统 / 浅色 / 深色”，没有主题 id 选择器；用户 TOML 主题在 notora 里还没有入口。主题选择入口属于后续工作，本轮不扩展主题列表或 schema/meta。后续若接入，须统一 runtime.rs、runtime/frame_runtime.rs 与 render.rs 三处解析路径。
+
+底层色板与应用语义之间有一层派生：`ApplicationTheme` 把 `bg_base`、`bg_surface`、`bg_elevated`、`sidebar_*` 等映射成 `surface-*`、`ink-*`、`divider`、`control-*` 等角色；`button-*` 与 `danger-*` 则是 `ButtonStyle` 按固定比例混合出的组件派生值，本文件把它们一并写成 token，数值与运行时一致。改色板时要同时检查派生结果，尤其是深色下 `surface-selected` 与 `surface-row-selected` 不是同一个值。P0 的五个新角色已加入 ColorPalette，经 ThemeDefinition.palette → ApplicationTheme → SettingsTheme 传给控件；TOML palette 可选覆盖，旧主题缺失字段继承基主题，不因低对比自动拒绝。
+
+## 历史审计与 P0 修正
+
+下表的比值为 P0 前的源值审计近似数，不是修正后 token 的测量结果。P0 已完成角色接线与 token 同步，完整状态与实际承载面的回归验证仍在进行。
+
+| 原组合 | 原浅色 | 原深色 | P0 状态 |
+|---|---:|---:|---|
+| `accent` / 纸面 | 2.8–2.9:1 | 6.2–8.2:1 | 保留填充；前景已改 `accent-text`、焦点已改 `focus-ring` |
+| `ink-inverse` / `accent` | 2.9:1 | 7.6:1 | 分段文字、复选框勾号、开关已选滑块已改 `on-accent` |
+| `danger` / 纸面 | 3.7:1 | 4.9:1 | 一般错误正文已改 `danger-text`；危险按钮仍用成对派生 |
+| `warning` / 纸面 | 3.2:1 | 10.4:1 | 新增 `warning-text` 正文角色，原警告指示与 mindmap 色不变 |
+| `control-border` / 纸面 | 1.4:1 | 3.2:1 | 浅色已改 `#9f8d76`；深色不变，按实际邻接背景验证 |
+| `button-border` / 按钮底 | 1.5:1 | 3.7:1 | 生产派生不变；边界增强留 P1 候选 |
+| 编辑器行号 / 画布 | 2.8:1 | 6.7:1 | 浅色已改 `#75695c`；深色不变 |
+
+不使用四舍五入后的数字判断达标。源 sRGB 精确审计与运行时 powf(2.2) 线性派生须区分；实际状态先合成 alpha，再按真实承载面比较。内置/仓库维护主题采用严格 CI 验收；用户主题未来只 warning 不拒绝，warning 本轮不实现。边框 ≥3 是必要控件边界的产品政策，不强加于所有装饰分隔线或任意用户主题。验收命令与执行结果见实施计划，不能把 token 同步等同于全量验证通过。
+
+## 资产
+
+`assets/Logos/` 里是应用图标与单色 N 标志。应用图标的蓝绿与深绿属于图标/品牌物料，不进入界面色板：按钮、选中、图表不要取用图标里的蓝绿。界面本身没有插画、纹理图或位图阴影；纸张感由色温与表面层级承担，不靠贴图。
+
+## 与 Markdown 主题的边界
+
+界面主题管外壳、导航、卡片、控件、对话框与编辑器纸面；Markdown 主题管正文里的标题、链接、行内代码、代码块、目录与引用。两者共享纸面与墨色，但不共享强调色：正文链接不要直接用界面的陶土橙，代码高亮也不要为了“统一”而改成暖色。思维导图有自己的一套节点与分支配色，同样不在本系统内。本轮不修改语法色；P1 若更换编辑器纸面，仍必须回归标题、链接、代码、目录、引用及 scopes 的实际对比度。下一步若要统一，先定“文档墨色”再定语法色，不要反过来。
+
+## 组件清单
+
+| 组件 | 源码 | 视觉卡 |
+|---|---|---|
+| Button / SplitButton | `widgets/button`、`widgets/split_button.rs` | Button |
+| TextBox | `widgets/text_box.rs` | SearchField（输入态） |
+| SearchBar / DocumentSearchBar | `widgets/search_bar`、`document_search_bar.rs` | SearchField |
+| TreeList / Sidebar | `widgets/tree_list`、`widgets/sidebar` | NavigationItem |
+| VirtualCardList | `widgets/virtual_card_list` | NoteCard |
+| ModalFrame | `widgets/modal_frame.rs` | Dialog |
+| SettingsView | `widgets/settings_view` | 未出卡 |
+| TabBar | `widgets/tab_bar` | 未出卡 |
+| PopupMenu | `widgets/popup_menu` | 未出卡 |
+| StatusBar | `widgets/status_bar.rs` | 未出卡 |
+| EditorHeader / EditorToolbar | `widgets/editor_header.rs`、`widgets/editor_toolbar.rs` | 未出卡 |
+| Scrollbar / Splitter | `widgets/scrollbar.rs`、`widgets/splitter.rs` | 未出卡 |

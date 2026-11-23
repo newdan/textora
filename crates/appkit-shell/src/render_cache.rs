@@ -65,7 +65,7 @@ const MAX_CACHED_LINES: usize = 1000; // viewport ~40 + 2*500 overscan
 
 /// Convert a stored highlight kind (u8) to an RGBA color using the current theme.
 fn highlight_kind_to_color(kind: u8, theme: &ui::theme::Theme) -> [f32; 4] {
-    use core::highlight::{HighlightKind, highlight_kind_scope};
+    use textora_core::highlight::{HighlightKind, highlight_kind_scope};
     if let Ok(hk) = HighlightKind::try_from(kind as u32) {
         theme.scope_color(highlight_kind_scope(hk))
     } else {

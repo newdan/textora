@@ -37,6 +37,22 @@ pub trait DocumentClipboard {
     fn read_snapshot(&mut self) -> Option<ClipboardSnapshot>;
 }
 
+/// Normalizes paste text by stripping a leading UTF-8 BOM and converting CRLF and CR to LF.
+pub fn normalize_paste_text(input: &[u8]) -> Vec<u8> {
+    let (_, input) = textora_core::file::strip_bom(input);
+    let mut normalized = Vec::with_capacity(input.len());
+    let mut bytes = input.iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte == b'\r' {
+            normalized.push(b'\n');
+            bytes.next_if_eq(&b'\n');
+        } else {
+            normalized.push(byte);
+        }
+    }
+    normalized
+}
+
 pub struct SystemClipboard;
 
 impl DocumentClipboard for SystemClipboard {
@@ -383,6 +399,9 @@ fn extract_cf_html_source_url(html: &str) -> Option<String> {
         .filter(|url| !url.is_empty())
         .map(str::to_owned)
 }
+
+#[cfg(test)]
+mod normalize_tests;
 
 #[cfg(test)]
 mod tests {

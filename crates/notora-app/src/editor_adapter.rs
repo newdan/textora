@@ -84,7 +84,7 @@ pub(crate) fn prepare_loaded_document_with_access(
     loaded: LoadedDocument,
     editing_access: DocumentEditingAccess,
 ) -> Result<PreparedTab, DocumentPreparationError> {
-    let mut text_buffer = core::buffer::TextBuffer::new(false)
+    let mut text_buffer = textora_core::buffer::TextBuffer::new(false)
         .map_err(|error| DocumentPreparationError::Buffer { message: error.to_string() })?;
     text_buffer.write_raw(loaded.contents.as_bytes());
     let mut document = appkit_core::document::DocumentModel::new(text_buffer);
@@ -101,7 +101,7 @@ pub(crate) fn prepare_untitled_document(
     runtime: &EditorRuntime,
     kind: DocumentKind,
 ) -> Result<(PreparedTab, String), DocumentPreparationError> {
-    let text_buffer = core::buffer::TextBuffer::new(false)
+    let text_buffer = textora_core::buffer::TextBuffer::new(false)
         .map_err(|error| DocumentPreparationError::Buffer { message: error.to_string() })?;
     let mut document = appkit_core::document::DocumentModel::new(text_buffer);
     let suggested_file_name = match kind {
@@ -120,7 +120,7 @@ pub(crate) fn build_editor_plugins()
 -> Result<(ui::plugin::PluginRegistry, ViewRouteTable), ViewRouteError> {
     let mut plugin_registry = ui::plugin::PluginRegistry::new();
     plugin_registry.register(Box::new(EditorPluginFactory));
-    plugin_registry.register(Box::new(textora_markdown::mindmap_view::MindmapPluginFactory));
+    plugin_registry.register(Box::new(textora_mindmap::mindmap_view::MindmapPluginFactory));
     plugin_registry.register(Box::new(textora_markdown::view::NotoraMarkdownEditorViewFactory));
     let registered_plugin_ids =
         HashSet::from([PLUGIN_EDITOR, PLUGIN_MINDMAP, PLUGIN_MARKDOWN_EDITOR]);

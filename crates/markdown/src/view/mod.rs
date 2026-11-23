@@ -13,8 +13,6 @@ use crate::projection::{
 use crate::search::SearchHighlightCache;
 use crate::selection::{self, SelectionState, ViewPos};
 use crate::style::MarkdownStyle;
-use core::document::DocView;
-use core::highlight::{Highlighter, find_language, highlight_kind_scope};
 use render::GlyphVertex;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -22,6 +20,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use stdext::arena::scratch_arena;
+use textora_core::document::DocView;
+use textora_core::highlight::{Highlighter, find_language, highlight_kind_scope};
 use ui::Theme;
 use ui::core::paint::DrawList;
 use ui::plugin::{
@@ -54,7 +54,7 @@ struct ByteSliceDoc<'a> {
     data: &'a [u8],
 }
 
-impl<'a> core::document::ReadableDocument for ByteSliceDoc<'a> {
+impl<'a> textora_core::document::ReadableDocument for ByteSliceDoc<'a> {
     fn read_forward(&self, off: usize) -> &[u8] {
         if off >= self.data.len() { &[] } else { &self.data[off..] }
     }

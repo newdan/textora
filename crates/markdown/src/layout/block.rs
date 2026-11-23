@@ -22,7 +22,7 @@ pub fn layout_doc(
     blocks: &[BlockNode],
     style: &MarkdownStyle,
     viewport_w: f32,
-    text_doc: &dyn core::document::DocView,
+    text_doc: &dyn textora_core::document::DocView,
 ) -> LaidOutDoc {
     layout_doc_with_shaper(blocks, style, viewport_w, None, None, text_doc)
 }
@@ -39,7 +39,7 @@ pub fn layout_doc_with_shaper(
     viewport_w: f32,
     shaper: Option<&mut Shaper>,
     highlighter: Option<&dyn crate::builder::CodeHighlighter>,
-    text_doc: &dyn core::document::DocView,
+    text_doc: &dyn textora_core::document::DocView,
 ) -> LaidOutDoc {
     layout_doc_with_options(blocks, style, viewport_w, shaper, highlighter, text_doc, false).doc
 }
@@ -75,7 +75,7 @@ pub fn layout_doc_for_rendering(
     blocks: &[BlockNode],
     style: &MarkdownStyle,
     viewport_w: f32,
-    text_doc: &dyn core::document::DocView,
+    text_doc: &dyn textora_core::document::DocView,
 ) -> MarkdownLayout {
     layout_doc_with_shaper_for_rendering(blocks, style, viewport_w, None, None, text_doc)
 }
@@ -87,7 +87,7 @@ pub fn layout_doc_with_shaper_for_rendering(
     viewport_w: f32,
     shaper: Option<&mut Shaper>,
     highlighter: Option<&dyn crate::builder::CodeHighlighter>,
-    text_doc: &dyn core::document::DocView,
+    text_doc: &dyn textora_core::document::DocView,
 ) -> MarkdownLayout {
     layout_doc_with_options(blocks, style, viewport_w, shaper, highlighter, text_doc, true)
 }
@@ -98,7 +98,7 @@ pub(in crate::layout::block) fn layout_doc_with_options(
     viewport_w: f32,
     shaper: Option<&mut Shaper>,
     highlighter: Option<&dyn crate::builder::CodeHighlighter>,
-    text_doc: &dyn core::document::DocView,
+    text_doc: &dyn textora_core::document::DocView,
     allow_embedded: bool,
 ) -> MarkdownLayout {
     let mut ctx = LayoutCtx::new(text_doc, style, viewport_w, shaper, highlighter, None, None);
@@ -125,7 +125,7 @@ pub(crate) fn layout_doc_for_estimation(
     blocks: &[BlockNode],
     style: &MarkdownStyle,
     viewport_w: f32,
-    text_doc: &dyn core::document::DocView,
+    text_doc: &dyn textora_core::document::DocView,
 ) -> LaidOutDoc {
     let mut ctx = LayoutCtx::new(text_doc, style, viewport_w, None, None, None, None);
     ctx.allow_embedded = false;
@@ -830,7 +830,7 @@ pub(in crate::layout::block) fn code_block_cursor_is_inside(
 
 pub(in crate::layout::block) fn is_fenced_code_block(
     block: &BlockNode,
-    doc: &dyn core::document::DocView,
+    doc: &dyn textora_core::document::DocView,
 ) -> bool {
     let block_text = doc.doc_text_in_range(block.block_range.clone());
     let mut first_line = block_text.lines().next().unwrap_or_default();
@@ -853,7 +853,7 @@ pub(in crate::layout::block) fn is_fenced_code_block(
 
 pub(in crate::layout::block) fn empty_fenced_code_content_start(
     block: &BlockNode,
-    doc: &dyn core::document::DocView,
+    doc: &dyn textora_core::document::DocView,
 ) -> Option<usize> {
     if !block.text_lines.is_empty()
         || block.code_line_source_starts.is_some()

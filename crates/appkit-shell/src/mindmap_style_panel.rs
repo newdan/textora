@@ -1,3 +1,9 @@
+mod widget;
+
+pub use widget::{
+    MindmapStylePanelAction, MindmapStylePanelInput, MindmapStylePanelWidget, PANEL_WIDTH_LOGICAL,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MindmapStylePanelSession {
     Closed,

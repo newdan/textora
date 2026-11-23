@@ -1,0 +1,52 @@
+<!-- @dsCard height=288 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Notora 界面主题 — 封面</title>
+<style>
+  html, body { margin:0; height:100%; }
+  body { background:var(--surface-window); color:var(--ink); font-family:var(--font-sans); overflow:hidden; -webkit-font-smoothing:antialiased; }
+  .cover { position:relative; width:960px; height:288px; overflow:hidden; }
+  .art { position:absolute; top:0; left:480px; width:480px; height:288px; }
+  .art svg { display:block; width:480px; height:288px; }
+  .back { fill:var(--surface-navigation); stroke:var(--line-strong); stroke-width:1; }
+  .paper { fill:var(--surface-row-selected); }
+  .accent { fill:var(--accent); }
+  .ink { fill:var(--ink); }
+  .rules line { stroke:var(--divider); stroke-width:1; }
+  .words { position:absolute; left:40px; bottom:28px; max-width:440px; }
+  .name { margin:0; font-size:96px; line-height:.92; font-weight:600; letter-spacing:-.03em; color:var(--ink); }
+  .tag { margin:8px 0 0 2px; font-size:14px; line-height:20px; color:var(--ink-muted); }
+</style>
+</head>
+<body>
+<div class="cover">
+  <div class="art" aria-hidden="true">
+    <svg viewBox="0 0 480 288" width="480" height="288">
+      <!--
+        blocks      surface-row-selected 200×240（纸）· accent 200×336 出血右缘（火）· ink 64×120 出血下缘（墨）· line-strong 只勾一张后纸的边
+        arrangement 纸叠：后纸偏 12、前纸在 40/24；强调色整条出血右侧；墨块压在前纸右下方，三者底部错落
+        pattern     横线纸：5 条 divider 细线，间距 28（tree-row-height），不铺满、不交叉
+        scales      left 40 = space-7 + space-6；paper 240 = 288 - 2×24；gap 8 = space-3；rules pitch 28 = tree-row-height
+      -->
+      <rect class="back" x="28" y="12" width="200" height="240" rx="8"/>
+      <rect class="paper" x="40" y="24" width="200" height="240" rx="8"/>
+      <g class="rules">
+        <line x1="64" y1="76" x2="216" y2="76"/>
+        <line x1="64" y1="104" x2="216" y2="104"/>
+        <line x1="64" y1="132" x2="216" y2="132"/>
+        <line x1="64" y1="160" x2="216" y2="160"/>
+        <line x1="64" y1="188" x2="216" y2="188"/>
+      </g>
+      <rect class="accent" x="320" y="-24" width="200" height="336" rx="8"/>
+      <rect class="ink" x="248" y="184" width="64" height="120" rx="8"/>
+    </svg>
+  </div>
+  <div class="words">
+    <h1 class="name">Notora<br>界面主题</h1>
+    <p class="tag">纸为底，墨为字，一点火色给选中。</p>
+  </div>
+</div>
+</body>
+</html>

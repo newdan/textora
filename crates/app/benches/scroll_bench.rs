@@ -1,33 +1,62 @@
+use appkit_core::document::DocumentModel;
+use appkit_shell::display_line_map::DisplayLineMap;
+use appkit_shell::editor_plugin::EditorPlugin;
+use appkit_shell::prepared_tab::PreparedTab;
+use appkit_shell::tab_runtime::TabRuntime;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::io::Write;
+use std::path::Path;
 use std::time::{Duration, Instant};
-use textora_app::dev_support::DocumentView;
+use ui::viewport::{ScrollAnchor, Viewport};
 
 const BENCH_LINE_HEIGHT: f32 = 24.27;
+const SCROLL_FILE_LINES: usize = 100_000;
+const SCROLL_VISIBLE_ROWS: usize = 50;
 
-fn scroll_one_doc_line(dv: &mut DocumentView) {
-    dv.scroll_doc_lines_for_viewport(1, BENCH_LINE_HEIGHT);
+fn load_scroll_fixture(path: &Path) -> (DocumentModel, DisplayLineMap, Viewport) {
+    let document = DocumentModel::from_file(path).expect("load scroll benchmark fixture");
+    let runtime = TabRuntime::new(Box::new(EditorPlugin::new()));
+    let PreparedTab { document, runtime } = PreparedTab::new(document, runtime);
+    let display_map = runtime.presentation.display.display_map;
+    (document, display_map, Viewport::new(SCROLL_VISIBLE_ROWS))
+}
+
+fn scroll_one_doc_line(
+    document: &DocumentModel,
+    display_map: &DisplayLineMap,
+    viewport: &mut Viewport,
+) -> Vec<String> {
+    viewport.scroll_doc_lines(1, display_map);
+    viewport.derive_scroll_top(display_map, BENCH_LINE_HEIGHT);
+    viewport
+        .visible_doc_range_from_anchor(display_map, BENCH_LINE_HEIGHT)
+        .filter_map(|line| document.document_line_bytes(line))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .collect()
+}
+
+fn reset_scroll_at_end(viewport: &mut Viewport) {
+    if viewport.scroll_anchor.doc_line > SCROLL_FILE_LINES - SCROLL_VISIBLE_ROWS {
+        viewport.scroll_anchor = ScrollAnchor::top();
+    }
 }
 
 fn bench_scroll_single_frame(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scroll_frame.txt");
     let mut file = std::fs::File::create(&path).unwrap();
-    for i in 0..100_000 {
+    for i in 0..SCROLL_FILE_LINES {
         writeln!(file, "Line {i}: The quick brown fox jumps over the lazy dog.").unwrap();
     }
     file.flush().unwrap();
 
-    let mut dv = DocumentView::from_file(&path, 50, 10.0).expect("load failed");
+    let (document, display_map, mut viewport) = load_scroll_fixture(&path);
 
     c.bench_function("scroll_single_frame", |b| {
         b.iter(|| {
-            scroll_one_doc_line(&mut dv);
-            let vis = dv.visible_lines_with_line_height(BENCH_LINE_HEIGHT);
-            std::hint::black_box(&vis);
-            if dv.viewport_anchor_doc_line() > 99_950 {
-                dv.scroll_to_doc_line_for_viewport(0, BENCH_LINE_HEIGHT);
-            }
+            let visible_lines = scroll_one_doc_line(&document, &display_map, &mut viewport);
+            std::hint::black_box(&visible_lines);
+            reset_scroll_at_end(&mut viewport);
         });
     });
 }
@@ -38,7 +67,7 @@ fn bench_scroll_60s_60fps(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scroll_60s.txt");
     let mut file = std::fs::File::create(&path).unwrap();
-    for i in 0..100_000 {
+    for i in 0..SCROLL_FILE_LINES {
         writeln!(file, "Line {i}: The quick brown fox jumps over the lazy dog. Extra padding to simulate realistic line length around 80 chars.").unwrap();
     }
     file.flush().unwrap();
@@ -50,7 +79,7 @@ fn bench_scroll_60s_60fps(c: &mut Criterion) {
 
     group.bench_function("scroll_3600_frames", |b| {
         b.iter_custom(|_iters| {
-            let mut dv = DocumentView::from_file(&path, 50, 10.0).expect("load failed");
+            let (document, display_map, mut viewport) = load_scroll_fixture(&path);
 
             let total_frames = 3600u64; // 60s × 60fps
             let frame_budget = Duration::from_nanos(16_666_666); // ~16.67ms
@@ -60,9 +89,8 @@ fn bench_scroll_60s_60fps(c: &mut Criterion) {
             for _ in 0..total_frames {
                 let frame_start = Instant::now();
 
-                scroll_one_doc_line(&mut dv);
-                let vis = dv.visible_lines_with_line_height(BENCH_LINE_HEIGHT);
-                std::hint::black_box(&vis);
+                let visible_lines = scroll_one_doc_line(&document, &display_map, &mut viewport);
+                std::hint::black_box(&visible_lines);
 
                 let frame_time = frame_start.elapsed();
                 total_time += frame_time;
@@ -70,9 +98,7 @@ fn bench_scroll_60s_60fps(c: &mut Criterion) {
                     dropped += 1;
                 }
 
-                if dv.viewport_anchor_doc_line() > 99_950 {
-                    dv.scroll_to_doc_line_for_viewport(0, BENCH_LINE_HEIGHT);
-                }
+                reset_scroll_at_end(&mut viewport);
             }
 
             let drop_pct = dropped as f64 / total_frames as f64 * 100.0;
@@ -103,12 +129,11 @@ fn bench_typing_throughput(c: &mut Criterion) {
             let path = dir.path().join("typing.txt");
             std::fs::write(&path, "").unwrap();
 
-            let mut dv = DocumentView::from_file(&path, 50, 10.0).expect("load failed");
-            let char_data = "a".as_bytes();
+            let mut document = DocumentModel::from_file(&path).expect("load typing fixture");
 
             let start = Instant::now();
             for _ in 0..10_000 {
-                dv.insert_at_cursor(char_data);
+                document.insert_at_cursor(b"a");
             }
             let elapsed = start.elapsed();
 
@@ -143,16 +168,14 @@ fn bench_typing_throughput_large_file(c: &mut Criterion) {
             }
             file.flush().unwrap();
 
-            let mut dv = DocumentView::from_file(&path, 50, 10.0)
-                .expect("load failed");
+            let mut document = DocumentModel::from_file(&path).expect("load large typing fixture");
             // Move cursor to middle of file (direct offset, not repeated move_down)
-            let mid = dv.buffer_len() / 2;
-            dv.cursor_move_to_offset(mid);
-            let char_data = "x".as_bytes();
+            let middle = document.buffer_len() / 2;
+            document.cursor_move_to_offset(middle);
 
             let start = Instant::now();
             for _ in 0..1_000 {
-                dv.insert_at_cursor(char_data);
+                document.insert_at_cursor(b"x");
             }
             let elapsed = start.elapsed();
 
@@ -187,11 +210,11 @@ fn bench_single_char_insert_recompute(c: &mut Criterion) {
             }
             file.flush().unwrap();
 
-            let mut dv = DocumentView::from_file(&path, 50, 10.0).expect("load failed");
+            let mut document = DocumentModel::from_file(&path).expect("load recompute fixture");
 
             b.iter(|| {
-                dv.insert_at_cursor(b"a");
-                std::hint::black_box(dv.cursor_offset());
+                document.insert_at_cursor(b"a");
+                std::hint::black_box(document.cursor_offset());
             });
         });
     }
@@ -207,21 +230,18 @@ fn bench_select_1mb_redraw(c: &mut Criterion) {
 
     group.bench_function("select_and_extract_1mb", |b| {
         // Pre-create a 1MB document (setup, not measured)
-        let mut dv = DocumentView::new(vec!["".to_string()], 50, 10.0);
-        let chunk = b"abcdefghijklmnopqrstuvwxyz0123456789 ";
-        let target = 1024 * 1024;
-        while dv.buffer_len() < target {
-            let remaining = target - dv.buffer_len();
-            let to_write = &chunk[..chunk.len().min(remaining)];
-            dv.insert_at_cursor(to_write);
-        }
+        const SELECTION_BYTES: usize = 1024 * 1024;
+        let chunk = "abcdefghijklmnopqrstuvwxyz0123456789 ";
+        let mut source = chunk.repeat(SELECTION_BYTES.div_ceil(chunk.len()));
+        source.truncate(SELECTION_BYTES);
+        let mut document = DocumentModel::from_lines(&[source]);
 
         b.iter(|| {
-            dv.select_all();
-            let text = dv.extract_selected_text();
+            document.select_all();
+            let text = document.extract_selected_text();
             std::hint::black_box(&text);
             // Clear selection for next iteration
-            dv.clear_selection();
+            document.clear_selection();
         });
     });
 

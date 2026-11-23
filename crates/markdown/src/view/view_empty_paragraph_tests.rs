@@ -47,7 +47,13 @@ fn render_at(
     let theme = Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
     let bounds = ui::core::geom::Rect::new(0.0, 0.0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
     let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
-    view.render(&core::document::StringDocView::new(source), bounds, &theme, &mut shaper, dpi);
+    view.render(
+        &textora_core::document::StringDocView::new(source),
+        bounds,
+        &theme,
+        &mut shaper,
+        dpi,
+    );
     let (x, y, _, height) =
         view.engine.cursor_screen_pos().expect("editable empty paragraph must have a caret");
     (x, y + view.engine.scroll_y, height)
@@ -164,7 +170,7 @@ fn empty_paragraph_ime_and_hit_testing_share_the_layout_row() {
         let theme = Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
         let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
         let drawing = view.render(
-            &core::document::StringDocView::new(source),
+            &textora_core::document::StringDocView::new(source),
             ui::core::geom::Rect::new(0.0, 0.0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT),
             &theme,
             &mut shaper,

@@ -1,6 +1,6 @@
 #[cfg(test)]
 use appkit_shell::ClipboardSnapshot;
-use appkit_shell::{DocumentClipboard, SystemClipboard};
+use appkit_shell::{DocumentClipboard, SystemClipboard, normalize_paste_text};
 use ui::core::Clipboard;
 use ui::plugin::PastePreference;
 
@@ -35,7 +35,7 @@ pub(crate) fn prepare_document_paste(
 }
 
 fn normalize_document_paste(text: String) -> Option<String> {
-    let normalized = crate::document_view::normalize_paste_text(text.as_bytes());
+    let normalized = normalize_paste_text(text.as_bytes());
     if normalized.is_empty() {
         return None;
     }

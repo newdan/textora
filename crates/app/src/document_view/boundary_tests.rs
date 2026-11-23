@@ -1,7 +1,7 @@
 use super::*;
 use crate::commands::execute_edit_command;
-use crate::input::EditCommand;
-use core::types::ByteIndex;
+use appkit_shell::input_mapper::EditCommand;
+use textora_core::types::ByteIndex;
 
 const TEST_LINE_HEIGHT: f32 = 24.27;
 

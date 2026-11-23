@@ -571,6 +571,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pointer_click_tracker_uses_exact_time_and_discards_history_on_reset() {
+        let start = Instant::now();
+        let mut tracker = PointerClickTracker::default();
+        let position = (10.0, 20.0);
+        let exact_limit = start + Duration::from_millis(500);
+        let after_limit = exact_limit + Duration::from_micros(500_001);
+
+        assert_eq!(tracker.record_press_at(start, position), PointerClickKind::Single);
+        assert_eq!(tracker.record_press_at(exact_limit, position), PointerClickKind::Double);
+        assert_eq!(tracker.record_press_at(after_limit, position), PointerClickKind::Single);
+        tracker.reset();
+        assert_eq!(tracker.record_press_at(after_limit, position), PointerClickKind::Single);
+    }
+
     struct OwnershipTrackingClipboard {
         text: Option<String>,
         returned_allocation: Option<usize>,

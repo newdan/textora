@@ -11,7 +11,7 @@ fn public_layout_and_render_combination_preserves_ascii_diagram_grid_geometry() 
     let style = MarkdownStyle::from_theme(&ui::theme::test_theme(), 15.0, 24.0);
     let parsed = parse_markdown(source);
     let document = MarkdownDoc::build(&parsed, &style);
-    let source_view = core::document::StringDocView::new(source);
+    let source_view = textora_core::document::StringDocView::new(source);
     let layout = layout_doc_for_rendering(&document.blocks, &style, 400.0, &source_view);
     let mut shaper = shaping::Shaper::new().expect("grid rendering test requires a shaper");
     let mut draw_list = ui::core::paint::DrawList::new();

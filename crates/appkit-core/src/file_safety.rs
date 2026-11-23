@@ -7,7 +7,7 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use core::disk_revision::DiskRevision;
+pub use textora_core::disk_revision::DiskRevision;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileSafetyNotice {
@@ -504,10 +504,10 @@ fn send_file_safety_result(
 }
 
 pub fn capture_revision(path: &Path) -> Result<DiskRevision, FileSafetyError> {
-    let revision = core::disk_revision::read_disk_revision(path).map_err(|error| {
+    let revision = textora_core::disk_revision::read_disk_revision(path).map_err(|error| {
         let source = match error {
-            core::file::FileError::Io(source) => source,
-            core::file::FileError::Binary => {
+            textora_core::file::FileError::Io(source) => source,
+            textora_core::file::FileError::Binary => {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "binary file detected")
             }
         };
@@ -542,23 +542,23 @@ pub fn save_serialized_if_unchanged(
     expected_revision: Option<&DiskRevision>,
     bytes: &[u8],
 ) -> Result<DiskRevision, FileSafetyError> {
-    core::file::save_file_if_unchanged(path, bytes, expected_revision).map_err(
-        |error| match error {
-            core::file::SaveError::ConcurrentModification { .. } => {
+    textora_core::file::save_file_if_unchanged(path, bytes, expected_revision).map_err(|error| {
+        match error {
+            textora_core::file::SaveError::ConcurrentModification { .. } => {
                 FileSafetyError::ConcurrentModification
             }
-            core::file::SaveError::Io { source, .. } => {
+            textora_core::file::SaveError::Io { source, .. } => {
                 FileSafetyError::Io { operation: "atomically save file", source }
             }
-            core::file::SaveError::ReadOnly => FileSafetyError::Io {
+            textora_core::file::SaveError::ReadOnly => FileSafetyError::Io {
                 operation: "atomically save file",
                 source: std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "file is read-only",
                 ),
             },
-        },
-    )
+        }
+    })
 }
 
 pub fn choose_rename_candidate(

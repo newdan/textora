@@ -7,8 +7,8 @@ use crate::document_presentation::DocumentPresentation;
 use crate::render_cache::{CachedLine, GlyphInstance};
 use crate::render_state::{GpuState, TextState};
 use appkit_core::document::DocumentModel;
-use core::highlight::HighlightKind;
 use render::GlyphVertex;
+use textora_core::highlight::HighlightKind;
 use ui::decorations::*;
 use ui::gutter::ATLAS_SIZE;
 use ui::gutter::*;
@@ -99,9 +99,9 @@ fn highlights_for_line<'a>(
     document: &DocumentModel,
     presentation: &'a mut DocumentPresentation,
     line_index: usize,
-) -> &'a [core::highlight::Highlight<HighlightKind>] {
-    use core::highlight::Highlighter as CoreHighlighter;
+) -> &'a [textora_core::highlight::Highlight<HighlightKind>] {
     use stdext::arena::scratch_arena;
+    use textora_core::highlight::Highlighter as CoreHighlighter;
 
     let Some(language) = document.language else {
         return &[];
@@ -112,7 +112,7 @@ fn highlights_for_line<'a>(
     presentation.highlighter_cache.parse_line(
         &arena,
         &mut highlighter,
-        line_index as core::helpers::CoordType,
+        line_index as textora_core::helpers::CoordType,
         |line| document.line_index.offsets.get(line as usize).copied().unwrap_or(0),
     )
 }
@@ -171,7 +171,13 @@ fn perf_logging_enabled() -> bool {
     })
 }
 
-fn spacing_mode_for_line(
+pub(crate) fn document_uses_verbatim_source_spacing(document: &DocumentModel) -> bool {
+    document
+        .language
+        .is_some_and(|language| !language.id.eq_ignore_ascii_case(MARKDOWN_LANGUAGE_ID))
+}
+
+pub(crate) fn spacing_mode_for_line(
     global_mode: TextSpacingMode,
     source_uses_verbatim_spacing: bool,
     line_bytes: &[u8],
@@ -198,7 +204,7 @@ fn precise_cluster_advance(
     }
 }
 
-fn protected_ranges_for_line(
+pub(crate) fn protected_ranges_for_line(
     protected_ranges: &[std::ops::Range<usize>],
     line_offset: usize,
     line_length: usize,
@@ -426,8 +432,7 @@ pub fn shape_visible_lines(
     // placeholder VL estimates) so that the loop never starves before the
     // viewport is full.
     let bound = total_lines.saturating_sub(start_doc);
-    let source_uses_verbatim_spacing =
-        dv.language.is_some_and(|language| !language.id.eq_ignore_ascii_case(MARKDOWN_LANGUAGE_ID));
+    let source_uses_verbatim_spacing = document_uses_verbatim_source_spacing(dv);
     let source_semantic_version = presentation.source_spacing.semantic_version;
     for i in 0..bound {
         let doc_idx = start_doc + i;

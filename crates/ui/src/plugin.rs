@@ -5,10 +5,10 @@
 
 use std::path::Path;
 
-use core::buffer::EditHistoryKind;
-use core::document::{DocView, DocViewMut};
-pub use core::types::CursorAffinity;
 use shaping::Shaper;
+use textora_core::buffer::EditHistoryKind;
+use textora_core::document::{DocView, DocViewMut};
+pub use textora_core::types::CursorAffinity;
 
 use crate::canvas::{CanvasPoint, CanvasViewportSnapshot};
 use crate::core::geom::Rect;

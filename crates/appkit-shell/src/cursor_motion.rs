@@ -1,4 +1,4 @@
-//! Cursor movement helpers for visual-line-aware up/down navigation.
+//! Cursor movement and hit-testing helpers for visual lines.
 //!
 //! Extracts the complex `move_cursor_visual` logic from App,
 //! using a `CursorContext` struct to bundle all required state.
@@ -7,8 +7,8 @@ use appkit_core::document::DocumentModel;
 use ui::render_geom::AdvanceCacheEntry;
 use ui::viewport::DisplayRow;
 
-use core::types::{ByteIndex, UniCharOffset};
 use std::time::Instant;
+use textora_core::types::{ByteIndex, UniCharOffset};
 
 /// Contains transient cursor rendering and caching state that is updated during layout and drawing.
 pub struct CursorRenderState {
@@ -37,6 +37,11 @@ impl CursorRenderState {
             click_hint: None,
         }
     }
+
+    pub fn reset_after_edit(&mut self) {
+        self.sticky_x_dirty = true;
+        self.cursor_blink_instant = Instant::now();
+    }
 }
 
 impl Default for CursorRenderState {
@@ -46,6 +51,12 @@ impl Default for CursorRenderState {
 }
 
 pub use crate::frame_cache::LineCache;
+
+#[derive(Clone, Copy)]
+pub enum PageDirection {
+    Up,
+    Down,
+}
 
 /// Bundles all state needed by `move_cursor_visual`.
 pub struct CursorContext<'a> {
@@ -67,6 +78,60 @@ pub(crate) enum CursorMoveResult {
     Moved(ByteIndex),
     /// Cursor could not be moved (already at boundary).
     NotMoved,
+}
+
+/// Find the cache-relative visual row at a window-space physical Y coordinate.
+pub fn hit_test_visual_row(
+    window_y: f32,
+    content_top: f32,
+    sub_line_offset: f32,
+    line_height: f32,
+    advance_cache: &[AdvanceCacheEntry],
+) -> Option<(usize, &AdvanceCacheEntry)> {
+    let adjusted_y = window_y - content_top - sub_line_offset;
+    if adjusted_y < 0.0 {
+        return None;
+    }
+    let row_index = (adjusted_y / line_height) as usize;
+    advance_cache.get(row_index).map(|entry| (row_index, entry))
+}
+
+/// Snap a window-space X coordinate to a byte offset relative to the document line.
+pub(crate) fn hit_test_row_byte(window_x: f32, row_left: f32, entry: &AdvanceCacheEntry) -> usize {
+    let cluster = hit_test_cluster_end(window_x, row_left, entry, |start_x, end_x| {
+        window_x >= start_x + (end_x - start_x) * 0.5
+    });
+    entry.vl_byte_start + cluster.map_or(0, |(end_byte, _, _)| end_byte)
+}
+
+/// Snap a window-space X coordinate to a grapheme offset relative to the document line.
+/// A cluster with no positive advance snaps to the preceding boundary.
+pub fn hit_test_row_grapheme(window_x: f32, row_left: f32, entry: &AdvanceCacheEntry) -> usize {
+    let cluster = hit_test_cluster_end(window_x, row_left, entry, |start_x, end_x| {
+        let width = end_x - start_x;
+        width > 0.0 && ((window_x - start_x) / width).clamp(0.0, 1.0) >= 0.5
+    });
+    entry.vl_grapheme_start
+        + cluster.map_or(0, |(_, _, grapheme_index)| grapheme_index as usize + 1)
+}
+
+fn hit_test_cluster_end(
+    window_x: f32,
+    row_left: f32,
+    entry: &AdvanceCacheEntry,
+    snap_to_end: impl FnOnce(f32, f32) -> bool,
+) -> Option<(usize, f32, u32)> {
+    let mut previous_end = None;
+    let mut start_x = row_left;
+    for &cluster in &entry.clusters {
+        let (_, end_x, _) = cluster;
+        if window_x <= end_x {
+            return if snap_to_end(start_x, end_x) { Some(cluster) } else { previous_end };
+        }
+        start_x = end_x;
+        previous_end = Some(cluster);
+    }
+    previous_end
 }
 
 /// Find byte offset on a visual line closest to sticky_x.
@@ -313,8 +378,101 @@ mod tests {
     use super::*;
     use crate::display_line_map::DisplayLineMap;
     use appkit_core::document::DocumentModel;
-    use core::buffer::TextBuffer;
+    use textora_core::buffer::TextBuffer;
     use ui::render_geom::AdvanceCacheEntry;
+
+    #[test]
+    fn horizontal_hit_uses_document_line_offsets_and_snaps_only_to_cluster_boundaries() {
+        let entry = AdvanceCacheEntry {
+            doc_line: 2,
+            vl_byte_start: 8,
+            vl_grapheme_start: 5,
+            clusters: vec![(3, 110.0, 0), (9, 130.0, 2)],
+        };
+        let left = 100.0;
+        for (window_x, expected_byte, expected_grapheme) in [
+            (90.0, 8, 5),
+            (104.75, 8, 5),
+            (105.0, 11, 6),
+            (110.0, 11, 6),
+            (119.75, 11, 6),
+            (120.0, 17, 8),
+            (150.0, 17, 8),
+        ] {
+            assert_eq!(hit_test_row_byte(window_x, left, &entry), expected_byte);
+            assert_eq!(hit_test_row_grapheme(window_x, left, &entry), expected_grapheme);
+        }
+        let empty_entry = AdvanceCacheEntry { clusters: Vec::new(), ..entry };
+        assert_eq!(hit_test_row_byte(130.0, left, &empty_entry), 8);
+        assert_eq!(hit_test_row_grapheme(130.0, left, &empty_entry), 5);
+    }
+
+    #[test]
+    fn horizontal_hit_preserves_byte_and_grapheme_zero_width_rules() {
+        let left = 100.0;
+        let entry = AdvanceCacheEntry {
+            doc_line: 0,
+            vl_byte_start: 0,
+            vl_grapheme_start: 0,
+            clusters: vec![(3, left, 0), (4, 110.0, 1)],
+        };
+        assert_eq!(hit_test_row_byte(left - 0.25, left, &entry), 0);
+        assert_eq!(hit_test_row_byte(left, left, &entry), 3);
+        assert_eq!(hit_test_row_grapheme(left, left, &entry), 0);
+        assert_eq!(hit_test_row_grapheme(left + 0.25, left, &entry), 1);
+    }
+
+    #[test]
+    fn horizontal_hit_preserves_each_midpoint_calculation_when_f32_rounds() {
+        let left = (1_u32 << f32::MANTISSA_DIGITS) as f32;
+        let entry = AdvanceCacheEntry {
+            doc_line: 0,
+            vl_byte_start: 0,
+            vl_grapheme_start: 0,
+            clusters: vec![(1, left + 2.0, 0)],
+        };
+        assert_eq!(hit_test_row_byte(left, left, &entry), 1);
+        assert_eq!(hit_test_row_grapheme(left, left, &entry), 0);
+    }
+
+    #[test]
+    fn visual_row_hit_respects_fractional_scroll_and_cache_boundaries() {
+        let cache = [
+            AdvanceCacheEntry {
+                doc_line: 5,
+                vl_byte_start: 6,
+                vl_grapheme_start: 2,
+                clusters: Vec::new(),
+            },
+            AdvanceCacheEntry {
+                doc_line: 5,
+                vl_byte_start: 9,
+                vl_grapheme_start: 3,
+                clusters: Vec::new(),
+            },
+        ];
+        let content_top = 40.0;
+        let line_height = 12.0;
+        let sub_line_offset = -3.0;
+        let first_row_top = content_top + sub_line_offset;
+        let second_row_top = first_row_top + line_height;
+        let cache_end = second_row_top + line_height;
+        let hit = |window_y| {
+            hit_test_visual_row(window_y, content_top, sub_line_offset, line_height, &cache)
+                .map(|(row_index, entry)| (row_index, entry.vl_byte_start))
+        };
+
+        assert_eq!(hit(first_row_top - 0.25), None);
+        assert_eq!(hit(first_row_top), Some((0, 6)));
+        assert_eq!(hit(second_row_top - 0.25), Some((0, 6)));
+        assert_eq!(hit(second_row_top), Some((1, 9)));
+        assert_eq!(hit(cache_end - 0.25), Some((1, 9)));
+        assert_eq!(hit(cache_end), None);
+        assert!(
+            hit_test_visual_row(first_row_top, content_top, sub_line_offset, line_height, &[])
+                .is_none()
+        );
+    }
 
     fn make_model(content: &str) -> DocumentModel {
         let mut text_buffer = TextBuffer::new(false)

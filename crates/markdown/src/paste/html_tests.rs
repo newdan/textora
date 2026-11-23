@@ -578,12 +578,13 @@ fn raw_text_block_boundaries_stop_paragraph_formatting_leaks() {
     assert_eq!(markdown, "one**two**\n\nraw\\</plaintext>\\<p>three");
 
     let reparsed = crate::parser::parse_markdown(&markdown);
-    assert!(
-        reparsed
-            .events
-            .iter()
-            .all(|event| !matches!(event, crate::parser::MarkdownEvent::InlineHtml(_)))
-    );
+    assert!(reparsed.events.iter().all(|event| {
+        !matches!(
+            event,
+            crate::parser::MarkdownEvent::InlineHtml(_)
+                | crate::parser::MarkdownEvent::HtmlBlock(_)
+        )
+    }));
     let visible_text: String = reparsed
         .events
         .into_iter()

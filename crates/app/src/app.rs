@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
-use appkit_shell::editor_runtime::EditorRuntime;
+use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext, EditorRuntime};
 use appkit_shell::{EventPump, ProductHost, ProductWakeHandle};
 
 use crate::file_history::FileHistory;
@@ -33,14 +33,6 @@ pub(crate) fn compute_cursor_phase(cursor_blink_instant: Instant) -> (bool, Inst
     (currently_visible, next_deadline)
 }
 
-/// Only reset cursor state after an edit; reshape is handled by AppEffect::RESHAPE.
-pub(crate) fn reset_cursor_after_edit(
-    cursor_render_state: &mut crate::cursor_motion::CursorRenderState,
-) {
-    cursor_render_state.sticky_x_dirty = true;
-    cursor_render_state.cursor_blink_instant = Instant::now();
-}
-
 /// The main application state.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +54,7 @@ pub struct App {
     pub(crate) editor_runtime: EditorRuntime,
     pub(crate) accessibility_adapter: Option<PlatformAccessibilityAdapter>,
     pub(crate) popup_tab_id_snapshot: Vec<appkit_core::workspace::types::TabId>,
-    pub(crate) workspace_store: crate::workspace_store::WorkspaceStore,
+    pub(crate) workspace_store: appkit_core::workspace::store::WorkspaceStore,
     pub(crate) ui_shell: UiShell,
     pub(crate) file_history: FileHistory,
     pub(crate) library_file_monitor: Option<crate::library_file_monitor::LibraryFileMonitor>,
@@ -92,6 +84,16 @@ pub struct App {
 }
 
 impl App {
+    pub(crate) fn editor_input_context(&self) -> EditorInputContext {
+        let editor_is_focused = self.ui_shell.keyboard_focus()
+            == crate::ui_shell::KeyboardFocusTarget::Editor
+            && self.editor_runtime.window_focused();
+        EditorInputContext {
+            focus: if editor_is_focused { EditorFocus::Active } else { EditorFocus::Inactive },
+            modal_blocked: self.ui_shell.active_overlay_is_modal(),
+        }
+    }
+
     pub fn open_document_sender(&self) -> crate::OpenDocumentSender {
         self.product.open_document_sender()
     }
@@ -526,7 +528,6 @@ mod settings_boundary_tests;
 
 #[cfg(test)]
 mod edit_reset_tests {
-    use super::reset_cursor_after_edit;
     use crate::cursor_motion::CursorRenderState;
 
     #[test]
@@ -535,7 +536,7 @@ mod edit_reset_tests {
         state.sticky_x_dirty = false;
         let before = state.cursor_blink_instant;
 
-        reset_cursor_after_edit(&mut state);
+        state.reset_after_edit();
 
         assert!(state.sticky_x_dirty);
         assert!(state.cursor_blink_instant >= before);

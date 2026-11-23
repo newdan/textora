@@ -251,8 +251,8 @@ impl RenderSession {
         self.frame_cache.cluster_pool.clear();
     }
 
-    pub(crate) fn frame_cache_snapshot(&self) -> FrameCache {
-        self.frame_cache.clone()
+    pub(crate) fn frame_cache(&self) -> &FrameCache {
+        &self.frame_cache
     }
 
     pub(crate) fn note_render_started(&mut self, started_at: Instant) -> u128 {

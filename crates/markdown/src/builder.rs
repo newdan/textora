@@ -55,7 +55,7 @@ impl BlockNode {
 
     pub fn lines<'a>(
         &'a self,
-        doc: &'a dyn core::document::DocView,
+        doc: &'a dyn textora_core::document::DocView,
     ) -> Vec<std::borrow::Cow<'a, str>> {
         // Markdown path: style offsets are relative to parsed text (no markup).
         if !self.text_lines.is_empty() {
@@ -249,7 +249,7 @@ pub struct NovelStructure {
 impl NovelStructure {
     /// 扫描小说文档，产生 NovelStructure。
     /// 分类逻辑与 build_from_novel_doc 完全一致。
-    pub fn scan(doc: &dyn core::document::DocView) -> Self {
+    pub fn scan(doc: &dyn textora_core::document::DocView) -> Self {
         let mut blocks = Vec::new();
         let mut headings = Vec::new();
         let total_lines = doc.line_count();
@@ -445,6 +445,7 @@ struct PendingLine {
     projection: TextProjectionBuilder,
     last_source_end: usize,
     last_style_span_owner: Option<u64>,
+    empty_break_anchor: Option<usize>,
 }
 
 // ===== ListStackEntry =====
@@ -746,6 +747,11 @@ impl MarkdownBuilder {
     }
 
     fn push_soft_break(&mut self, source: &str, mut source_range: Range<usize>) {
+        if self.pending_line.text.is_empty() && self.pending_line.empty_break_anchor.is_some() {
+            self.record_pending_source_end(source_range.end);
+            self.pending_line.empty_break_anchor = Some(source_range.end);
+            return;
+        }
         let min_start = self.pending_line.last_source_end;
         while source_range.start > min_start
             && matches!(source.as_bytes().get(source_range.start - 1), Some(b' ' | b'\t'))
@@ -757,10 +763,31 @@ impl MarkdownBuilder {
         self.pending_line.projection.push_soft_break(source_range);
     }
 
+    fn push_hard_break(&mut self) {
+        let break_range = self.current_event_range.clone();
+        self.flush_line_into_current_block_with_empty_anchor(Some(break_range.start));
+        self.pending_line.empty_break_anchor = Some(break_range.end);
+        self.pending_line.last_source_end = break_range.end;
+    }
+
     /// Flush pending line, returning text, styles, and source projection.
     fn flush_line_to_vec(&mut self) -> (Vec<String>, Vec<Vec<StyleSpan>>, Vec<ProjectedText>) {
+        self.flush_line_to_vec_with_empty_anchor(None)
+    }
+
+    fn flush_line_to_vec_with_empty_anchor(
+        &mut self,
+        empty_anchor: Option<usize>,
+    ) -> (Vec<String>, Vec<Vec<StyleSpan>>, Vec<ProjectedText>) {
         let line = std::mem::take(&mut self.pending_line);
         if line.text.is_empty() {
+            if let Some(anchor) = empty_anchor.or(line.empty_break_anchor) {
+                return (
+                    vec![String::new()],
+                    vec![Vec::new()],
+                    vec![ProjectedText::direct("", anchor)],
+                );
+            }
             return (vec![], vec![], vec![]);
         }
         let merged = merge_style_spans(line.styles);
@@ -775,7 +802,10 @@ impl MarkdownBuilder {
                 BlockKind::Container | BlockKind::BlockQuote | BlockKind::ListItem { .. }
             )
         });
-        if in_container && !self.pending_line.text.is_empty() {
+        if in_container
+            && (!self.pending_line.text.is_empty()
+                || self.pending_line.empty_break_anchor.is_some())
+        {
             let (text_lines, text_styles, projected_lines) = self.flush_line_to_vec();
             let block_range = projected_lines
                 .first()
@@ -799,7 +829,12 @@ impl MarkdownBuilder {
     }
 
     fn flush_line_into_current_block(&mut self) {
-        let (text_lines, text_styles, projected_lines) = self.flush_line_to_vec();
+        self.flush_line_into_current_block_with_empty_anchor(None);
+    }
+
+    fn flush_line_into_current_block_with_empty_anchor(&mut self, empty_anchor: Option<usize>) {
+        let (text_lines, text_styles, projected_lines) =
+            self.flush_line_to_vec_with_empty_anchor(empty_anchor);
         if text_lines.is_empty() {
             return;
         }
@@ -1135,19 +1170,12 @@ impl MarkdownDoc {
                         builder.pop_block();
                     }
                 }
+                MarkdownEvent::HtmlBlock(html) => {
+                    builder.push_html_block_lines(html);
+                }
                 MarkdownEvent::InlineHtml(html) => {
-                    let in_container = builder.block_stack.last().is_some_and(|block| {
-                        matches!(
-                            block.kind,
-                            BlockKind::Container
-                                | BlockKind::BlockQuote
-                                | BlockKind::ListItem { .. }
-                        )
-                    });
-                    if in_container {
-                        builder.push_html_block_lines(html);
-                    } else if inline_html_is_break(html) {
-                        builder.flush_line_into_current_block();
+                    if crate::parser::is_inline_html_break(html) {
+                        builder.push_hard_break();
                     } else {
                         // Other inline HTML remains literal text until the renderer has a
                         // dedicated, sanitized HTML representation.
@@ -1158,7 +1186,7 @@ impl MarkdownDoc {
                     builder.push_soft_break(&parsed.source, builder.current_event_range.clone());
                 }
                 MarkdownEvent::HardBreak => {
-                    builder.flush_line_into_current_block();
+                    builder.push_hard_break();
                 }
                 MarkdownEvent::Rule => {
                     builder.push_block(BlockKind::HorizontalRule);
@@ -1184,7 +1212,7 @@ impl MarkdownDoc {
 
     /// Build a MarkdownDoc directly from a DocView, optimized for Novel Mode.
     /// This avoids creating a giant intermediate String and minimizes regex overhead.
-    pub fn build_from_novel_doc(doc: &dyn core::document::DocView) -> Self {
+    pub fn build_from_novel_doc(doc: &dyn textora_core::document::DocView) -> Self {
         let mut blocks = Vec::new();
         let total_lines = doc.line_count();
         let mut para_lines = Vec::new();
@@ -1292,11 +1320,6 @@ impl MarkdownDoc {
 
         Self { blocks }
     }
-}
-
-fn inline_html_is_break(html: &str) -> bool {
-    cfg!(feature = "rich-markdown")
-        && matches!(html.trim().to_ascii_lowercase().as_str(), "<br>" | "<br/>" | "<br />")
 }
 
 /// Convert TextStyleMod to InlineStyle (if applicable for rendering).

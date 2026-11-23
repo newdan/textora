@@ -19,7 +19,7 @@ fn build_editing_layout(
     let style = default_style();
     let document =
         MarkdownDoc::build_for_editing(&parse_markdown(source), &default_style(), source);
-    let document_view = core::document::StringDocView::new(source);
+    let document_view = textora_core::document::StringDocView::new(source);
     let mut layout = LazyLayout::new(document, &style, 400.0, &document_view);
     layout.set_source_generation(source_generation);
     layout.set_edit_source(Some(source.to_owned()));
@@ -156,7 +156,7 @@ fn reconcile_editing_layout(
     let style = default_style();
     let document =
         MarkdownDoc::build_for_editing(&parse_markdown(source), &default_style(), source);
-    let document_view = core::document::StringDocView::new(source);
+    let document_view = textora_core::document::StringDocView::new(source);
     let mut layout = LazyLayout::new(document, &style, 400.0, &document_view);
     layout.set_source_generation(source_generation);
     layout.set_edit_source(Some(source.to_owned()));
@@ -208,7 +208,7 @@ fn reconciled_layout_reuses_prefix_and_shifted_suffix_equivalently() {
     let style = default_style();
     let new_document =
         MarkdownDoc::build_for_editing(&parse_markdown(new_source), &default_style(), new_source);
-    let document_view = core::document::StringDocView::new(new_source);
+    let document_view = textora_core::document::StringDocView::new(new_source);
     let mut reconciled = LazyLayout::new(new_document, &style, 400.0, &document_view);
     reconciled.set_source_generation(2);
     reconciled.set_edit_source(Some(new_source.to_owned()));
@@ -354,7 +354,8 @@ fn apply_deltas_very_small_delta() {
 fn lazy_layout_estimation_has_all_blocks() {
     let (src, doc) = make_doc("# Title\n\nparagraph\n\n## Section\n\n- item\n\n```\ncode\n```");
     let style = default_style();
-    let lazy = LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+    let lazy =
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(!lazy.laid_out.is_empty());
     assert_eq!(lazy.precise.len(), lazy.laid_out.len());
     assert_eq!(lazy.y_delta.len(), lazy.laid_out.len());
@@ -368,7 +369,7 @@ fn trailing_empty_source_lines_are_included_in_total_height() {
     let source = "paragraph\n\n\n";
     let style = default_style();
     let document = MarkdownDoc::build_for_editing(&parse_markdown(source), &style, source);
-    let document_view = core::document::StringDocView::new(source);
+    let document_view = textora_core::document::StringDocView::new(source);
     let mut layout = LazyLayout::new(document, &style, 400.0, &document_view);
     layout.set_edit_source(Some(source.to_string()));
     layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
@@ -530,7 +531,7 @@ fn viewport_eviction_discards_ascii_diagram_sidecars_without_mismatching_same_fi
     let style = default_style();
     let parsed = parse_markdown(&source);
     let document = MarkdownDoc::build(&parsed, &style);
-    let source_view = core::document::StringDocView::new(&source);
+    let source_view = textora_core::document::StringDocView::new(&source);
     let mut layout = LazyLayout::new(document, &style, 400.0, &source_view);
     let mut shaper = shaping::Shaper::new().expect("sidecar eviction test needs a shaper");
 
@@ -579,7 +580,7 @@ fn invalidation_discards_ascii_diagram_sidecars_before_relayout() {
     let style = default_style();
     let parsed = parse_markdown(source);
     let document = MarkdownDoc::build(&parsed, &style);
-    let source_view = core::document::StringDocView::new(source);
+    let source_view = textora_core::document::StringDocView::new(source);
     let mut layout = LazyLayout::new(document, &style, 400.0, &source_view);
     let mut shaper = shaping::Shaper::new().expect("sidecar invalidation test needs a shaper");
     layout.ensure_visible(0.0, 600.0, &style, 400.0, &mut shaper, None, &source_view);
@@ -600,7 +601,7 @@ fn precision_pass_marks_block_precise() {
     let (src, doc) = make_doc("# Title\n\nparagraph text here\n\n## Another heading");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
 
     let mut shaper = shaping::Shaper::new().unwrap();
     let _deltas = lazy.ensure_precise_range(
@@ -609,7 +610,7 @@ fn precision_pass_marks_block_precise() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
 
     // First block (and possibly more) should be precise now
@@ -623,7 +624,7 @@ fn precision_pass_respects_scroll_offset() {
     let (src, doc) = make_doc("# Block 1\n\n## Block 2\n\n### Block 3\n\nparagraph");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(lazy.laid_out.len() >= 3);
 
     let second_block_y = lazy.laid_out[1].as_ref().unwrap().rect.y;
@@ -635,7 +636,7 @@ fn precision_pass_respects_scroll_offset() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
 
     // Block 0 is above range_start, should NOT be precise
@@ -651,7 +652,7 @@ fn lazy_layout_e2e_renders_all_text() {
     let style = default_style();
     let (src, doc) = make_doc(md);
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     let mut shaper = shaping::Shaper::new().unwrap();
 
     // Precision-pass visible area
@@ -661,7 +662,7 @@ fn lazy_layout_e2e_renders_all_text() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
 
     // Render
@@ -705,7 +706,7 @@ fn lazy_layout_scroll_culling_still_works() {
     let style = default_style();
     let (src, doc) = make_doc(md);
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     let mut shaper = shaping::Shaper::new().unwrap();
 
     // Only make "Middle" and "Bottom" precise
@@ -716,7 +717,7 @@ fn lazy_layout_scroll_culling_still_works() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
 
     // Scroll past Top
@@ -761,7 +762,8 @@ fn lazy_layout_y_delta_propagates_correctly() {
     let md = "# A\n\n## B\n\n### C";
     let style = default_style();
     let (src, doc) = make_doc(md);
-    let lazy = LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+    let lazy =
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
 
     // Before precision: all y_delta = 0
     assert_eq!(lazy.y_delta[0], 0.0);
@@ -824,7 +826,7 @@ fn ensure_all_blocks_distributes_multi_output_doc_blocks() {
     let style = default_style();
     let md = "alpha\n\nomega";
     let source = multi_output_source(crate::builder::BlockKind::Container, md);
-    let doc_view = core::document::StringDocView::new(md);
+    let doc_view = textora_core::document::StringDocView::new(md);
     let mut layout = LazyLayout::new(source, &style, 400.0, &doc_view);
     layout.ensure_all_blocks(&style, 400.0, None, None, &doc_view);
 
@@ -838,7 +840,7 @@ fn precise_block_at_distributes_multi_output_doc_blocks() {
     let style = default_style();
     let md = "alpha\n\nomega";
     let source = multi_output_source(crate::builder::BlockKind::Container, md);
-    let doc_view = core::document::StringDocView::new(md);
+    let doc_view = textora_core::document::StringDocView::new(md);
     let mut layout = LazyLayout::new(source, &style, 400.0, &doc_view);
     let mut shaper = shaping::Shaper::new().expect("multi-output test needs a shaper");
 
@@ -856,7 +858,7 @@ fn precise_multi_output_group_propagates_each_height_delta_once() {
     let style = default_style();
     let md = format!("{}\n\nomega", "wide ".repeat(40));
     let source = multi_output_source(crate::builder::BlockKind::Container, &md);
-    let document_view = core::document::StringDocView::new(&md);
+    let document_view = textora_core::document::StringDocView::new(&md);
     let mut layout = LazyLayout::new(source, &style, VIEWPORT_WIDTH, &document_view);
     let estimated_first_height = layout.estimated_heights[0];
     let mut shaper = shaping::Shaper::new().expect("multi-output test needs a shaper");
@@ -912,7 +914,7 @@ fn top_level_table_row_expands_without_layout_mismatch() {
     let style = default_style();
     let md = "alpha\n\nomega";
     let source = multi_output_source(crate::builder::BlockKind::TableRow_, md);
-    let doc_view = core::document::StringDocView::new(md);
+    let doc_view = textora_core::document::StringDocView::new(md);
     let mut layout = LazyLayout::new(source, &style, 400.0, &doc_view);
     layout.ensure_all_blocks(&style, 400.0, None, None, &doc_view);
 
@@ -937,7 +939,7 @@ fn incremental_relayout_matches_one_shot_block_positions() {
     for md in fixtures {
         let style = default_style();
         let (src, doc) = make_doc(md);
-        let doc_view = core::document::StringDocView::new(src);
+        let doc_view = textora_core::document::StringDocView::new(src);
         let oneshot = crate::layout::block::layout_doc(doc.blocks(), &style, 400.0, &doc_view);
 
         let (_, lazy_doc) = make_doc(md);
@@ -968,7 +970,7 @@ fn precise_block_at_returns_height_delta() {
     let (src, doc) = make_doc("# Title\n\nparagraph text");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     let mut shaper = shaping::Shaper::new().unwrap();
 
     assert!(!lazy.precise[0]);
@@ -977,7 +979,7 @@ fn precise_block_at_returns_height_delta() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
     assert!(lazy.precise[0], "block should be marked precise");
     // delta may be 0.0 if estimation was exact, but precise_block_at should not panic
@@ -989,7 +991,7 @@ fn precise_block_at_returns_height_delta() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
     assert!(lazy.precise[0]);
 }
@@ -999,7 +1001,7 @@ fn precise_block_at_out_of_bounds_returns_zero() {
     let (src, doc) = make_doc("hello");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     let mut shaper = shaping::Shaper::new().unwrap();
 
     let delta = lazy.precise_block_at(
@@ -1007,7 +1009,7 @@ fn precise_block_at_out_of_bounds_returns_zero() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
     assert_eq!(delta, 0.0, "out-of-bounds idx should return 0.0");
 }
@@ -1016,7 +1018,8 @@ fn precise_block_at_out_of_bounds_returns_zero() {
 fn lazy_layout_empty_document() {
     let (src, doc) = make_doc("");
     let style = default_style();
-    let lazy = LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+    let lazy =
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     assert!(lazy.laid_out.is_empty());
     assert!(lazy.precise.is_empty());
     assert!(lazy.y_delta.is_empty());
@@ -1028,7 +1031,7 @@ fn ensure_precise_range_twice_no_double_count() {
     let (src, doc) = make_doc("# A\n\n## B\n\n### C");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     let mut shaper = shaping::Shaper::new().unwrap();
 
     let _deltas1 = lazy.ensure_precise_range(
@@ -1037,7 +1040,7 @@ fn ensure_precise_range_twice_no_double_count() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
     let height_after_first = lazy.total_height;
     let y_delta_after_first = lazy.y_delta.clone();
@@ -1049,7 +1052,7 @@ fn ensure_precise_range_twice_no_double_count() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
     assert!(deltas2.is_empty(), "second call should produce no deltas");
     assert_eq!(lazy.total_height, height_after_first, "total_height should not change");
@@ -1066,7 +1069,7 @@ fn first_visible_block_idx_with_y_delta() {
         &doc.blocks,
         &style,
         400.0,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
     assert!(laid_out.blocks.len() >= 3);
 
@@ -1105,7 +1108,7 @@ fn heading_followed_by_code_block_spacing_after_precision() {
     let parsed = parse_markdown(md);
     let doc = MarkdownDoc::build(&parsed, &style);
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 600.0, &core::document::StringDocView::new(md));
+        LazyLayout::from_doc(doc, &style, 600.0, &textora_core::document::StringDocView::new(md));
 
     let deltas = lazy.ensure_precise_range(
         0.0,
@@ -1113,7 +1116,7 @@ fn heading_followed_by_code_block_spacing_after_precision() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(md),
+        &textora_core::document::StringDocView::new(md),
     );
 
     assert!(lazy.laid_out.len() >= 2, "expected at least 2 blocks, got {}", lazy.laid_out.len());
@@ -1152,7 +1155,7 @@ fn large_code_block_then_heading_then_code_block_spacing() {
     let parsed = parse_markdown(&md);
     let doc = MarkdownDoc::build(&parsed, &style);
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 600.0, &core::document::StringDocView::new(&md));
+        LazyLayout::from_doc(doc, &style, 600.0, &textora_core::document::StringDocView::new(&md));
 
     let _deltas = lazy.ensure_precise_range(
         0.0,
@@ -1160,7 +1163,7 @@ fn large_code_block_then_heading_then_code_block_spacing() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(&md),
+        &textora_core::document::StringDocView::new(&md),
     );
 
     assert!(
@@ -1203,7 +1206,7 @@ fn precision_block_rect_y_equals_estimation_rect_y() {
     let parsed = parse_markdown(md);
     let doc = MarkdownDoc::build(&parsed, &style);
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(md));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(md));
 
     // Snapshot estimation rect.y values
     let est_y0 = lazy.laid_out[0].as_ref().unwrap().rect.y;
@@ -1216,7 +1219,7 @@ fn precision_block_rect_y_equals_estimation_rect_y() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(md),
+        &textora_core::document::StringDocView::new(md),
     );
 
     // rect.y must still equal the estimation position (not include y_delta).
@@ -1248,7 +1251,7 @@ fn no_overlap_heading_code_block_lines() {
     let parsed = parse_markdown(md);
     let doc = MarkdownDoc::build(&parsed, &style);
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 600.0, &core::document::StringDocView::new(md));
+        LazyLayout::from_doc(doc, &style, 600.0, &textora_core::document::StringDocView::new(md));
 
     let _deltas = lazy.ensure_precise_range(
         0.0,
@@ -1256,7 +1259,7 @@ fn no_overlap_heading_code_block_lines() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(md),
+        &textora_core::document::StringDocView::new(md),
     );
 
     assert!(lazy.laid_out.len() >= 2, "expected at least 2 blocks, got {}", lazy.laid_out.len());
@@ -1303,15 +1306,15 @@ fn flat_lines_update_after_y_delta() {
     let (src, doc) = make_doc("Line 1\nLine 2");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
-    lazy.build_flat_lines(&core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(src));
 
     let initial_y = lazy.flat_lines[0].rect.y;
 
     // Simulate y_delta change
     if !lazy.y_delta.is_empty() {
         lazy.y_delta[0] = 10.0;
-        lazy.build_flat_lines(&core::document::StringDocView::new(src));
+        lazy.build_flat_lines(&textora_core::document::StringDocView::new(src));
 
         // Y position should have changed
         assert_ne!(lazy.flat_lines[0].rect.y, initial_y);
@@ -1325,8 +1328,8 @@ fn build_flat_lines_text_block() {
     let (src, doc) = make_doc("Hello world\nSecond line");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
-    lazy.build_flat_lines(&core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(src));
 
     assert!(!lazy.flat_lines.is_empty());
     // Text may be wrapped, so just check content contains expected text
@@ -1345,8 +1348,8 @@ fn build_flat_lines_blockquote() {
     let (src, doc) = make_doc("> quoted text\n> second line");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
-    lazy.build_flat_lines(&core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(src));
 
     // BlockQuote should be flattened into the lines
     assert!(!lazy.flat_lines.is_empty());
@@ -1358,8 +1361,8 @@ fn build_flat_lines_table() {
     let (src, doc) = make_doc("| A | B |\n|---|---|\n| 1 | 2 |");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
-    lazy.build_flat_lines(&core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(src));
 
     // Table cells should be flattened
     assert!(!lazy.flat_lines.is_empty());
@@ -1374,8 +1377,8 @@ fn build_flat_lines_horizontal_rule() {
     let (src, doc) = make_doc("---");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
-    lazy.build_flat_lines(&core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(src));
 
     assert_eq!(lazy.flat_lines.len(), 1);
     assert_eq!(lazy.flat_lines[0].text, "");
@@ -1394,8 +1397,8 @@ fn build_flat_lines_sorted_by_rect_y() {
     let (src, doc) = make_doc("First\n\nSecond\n\nThird");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
-    lazy.build_flat_lines(&core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(src));
 
     // Verify invariant: flat_lines sorted by rect.y ascending
     for i in 1..lazy.flat_lines.len() {
@@ -1415,8 +1418,8 @@ fn build_flat_lines_empty_doc() {
     let (src, doc) = make_doc("");
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
-    lazy.build_flat_lines(&core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(src));
 
     // Empty doc might still have one empty line
     // Just verify it doesn't panic
@@ -1431,7 +1434,8 @@ fn flat_lines_y_within_content_height() {
         "# Title\n\nFirst paragraph.\n\nSecond paragraph.\n\n> Blockquote text\n\n- List item",
     );
     let style = default_style();
-    let lazy = LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+    let lazy =
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     let total_h = lazy.total_height;
 
     for (i, fl) in lazy.flat_lines.iter().enumerate() {
@@ -1452,7 +1456,8 @@ fn flat_lines_y_within_content_height() {
 fn flat_line_y_matches_block_y() {
     let (src, doc) = make_doc("Hello world");
     let style = default_style();
-    let lazy = LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+    let lazy =
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
 
     assert!(!lazy.flat_lines.is_empty());
     assert!(!lazy.laid_out.is_empty());
@@ -1476,7 +1481,7 @@ fn flat_line_y_matches_block_y() {
 #[test]
 fn novel_paragraph_spacing_not_doubled() {
     let src = "第一段内容文字。\n\n第二段内容文字。\n";
-    let doc_view = core::document::StringDocView::new(src);
+    let doc_view = textora_core::document::StringDocView::new(src);
     let novel = crate::builder::NovelStructure::scan(&doc_view);
     let style = default_style();
     let expected_gap = style.paragraph_spacing;
@@ -1564,7 +1569,7 @@ fn layout_with_cursor(md: &str, cursor_byte: usize) -> LazyLayout<crate::builder
     let doc = crate::builder::MarkdownDoc::build(&parsed, &default_style());
     let style = default_style();
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     lazy.set_edit_source(Some(src.to_string()));
     lazy.set_edit_ctx(Some(crate::edit::EditContext {
         cursor_byte,
@@ -1579,9 +1584,9 @@ fn layout_with_cursor(md: &str, cursor_byte: usize) -> LazyLayout<crate::builder
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
-    lazy.build_flat_lines(&core::document::StringDocView::new(src));
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(src));
     lazy
 }
 
@@ -1593,7 +1598,7 @@ fn layout_with_cursor_and_width(
     let parsed = crate::parser::parse_markdown(source);
     let style = default_style();
     let doc = crate::builder::MarkdownDoc::build(&parsed, &style);
-    let doc_view = core::document::StringDocView::new(source);
+    let doc_view = textora_core::document::StringDocView::new(source);
     let mut lazy = LazyLayout::from_doc(doc, &style, width, &doc_view);
     lazy.set_edit_source(Some(source.to_string()));
     lazy.set_edit_ctx(Some(crate::edit::EditContext {
@@ -1631,7 +1636,7 @@ fn estimated_soft_wrap_preserves_editable_projections() {
     let style = default_style();
     let parsed = crate::parser::parse_markdown(source);
     let doc = crate::builder::MarkdownDoc::build(&parsed, &style);
-    let doc_view = core::document::StringDocView::new(source);
+    let doc_view = textora_core::document::StringDocView::new(source);
     let estimated = layout_doc_with_shaper(doc.blocks(), &style, 40.0, None, None, &doc_view);
     let mut lazy = LazyLayout::new(doc, &style, 40.0, &doc_view);
     lazy.laid_out = estimated.blocks.into_iter().map(Some).collect();
@@ -1665,7 +1670,7 @@ fn local_viewport_rebuild_retains_stable_projection_identity_and_geometry() {
         .collect::<Vec<_>>();
     lazy.evict_outside(&(1..2));
     lazy.viewport_range = 1..2;
-    lazy.build_flat_lines(&core::document::StringDocView::new(source));
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(source));
     assert_eq!(
         lazy.source_projection_index
             .as_ref()
@@ -1794,7 +1799,7 @@ fn heading_no_marker_when_cursor_outside_block() {
     let style = default_style();
     let src = "# Title\n\nparagraph";
     let mut lazy =
-        LazyLayout::from_doc(doc, &style, 400.0, &core::document::StringDocView::new(src));
+        LazyLayout::from_doc(doc, &style, 400.0, &textora_core::document::StringDocView::new(src));
     lazy.set_edit_source(Some(src.to_string()));
     // Cursor in paragraph (byte 10), NOT in heading
     lazy.set_edit_ctx(Some(crate::edit::EditContext {
@@ -1809,9 +1814,9 @@ fn heading_no_marker_when_cursor_outside_block() {
         &style,
         &mut shaper,
         None,
-        &core::document::StringDocView::new(src),
+        &textora_core::document::StringDocView::new(src),
     );
-    lazy.build_flat_lines(&core::document::StringDocView::new(src));
+    lazy.build_flat_lines(&textora_core::document::StringDocView::new(src));
 
     let first_text = &lazy.flat_lines[0].text;
     assert!(
@@ -1982,7 +1987,7 @@ fn moving_cursor_into_ordered_list_invalidates_only_the_current_item() {
     let style = default_style();
     let parsed = crate::parser::parse_markdown(source);
     let document = crate::builder::MarkdownDoc::build(&parsed, &style);
-    let document_view = core::document::StringDocView::new(source);
+    let document_view = textora_core::document::StringDocView::new(source);
     let mut layout = LazyLayout::from_doc(document, &style, 400.0, &document_view);
     layout.set_edit_source(Some(source.to_owned()));
     layout.set_edit_ctx(Some(crate::edit::EditContext {
@@ -2010,7 +2015,7 @@ fn changing_selection_invalidates_embedded_block_on_enter_and_exit() {
     layout.set_selection_range(Some(diagram_start..diagram_start + 5));
     assert!(layout.laid_out.iter().any(Option::is_none));
     let style = default_style();
-    let document_view = core::document::StringDocView::new(source);
+    let document_view = textora_core::document::StringDocView::new(source);
     layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
     assert!(layout.laid_out.iter().all(Option::is_some));
     layout.set_selection_range(None);

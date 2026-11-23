@@ -14,7 +14,7 @@ use appkit_shell::editor_runtime::{
 use appkit_shell::prepared_tab::PreparedTab;
 use appkit_shell::tab_runtime::TabRuntime;
 use appkit_shell::view_route::ViewRouteTable;
-use core::buffer::TextBuffer;
+use textora_core::buffer::TextBuffer;
 use ui::plugin::PluginFactory;
 
 struct FakeProductDirectory(PathBuf);

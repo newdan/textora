@@ -622,7 +622,7 @@ impl Navigator for Workspace {
 mod tests {
     use super::*;
     use appkit_core::workspace::types::TabIdAllocator;
-    use core::buffer::TextBuffer;
+    use textora_core::buffer::TextBuffer;
 
     use crate::editor_plugin::EditorPluginFactory;
     use crate::prepared_tab::PreparedTab;

@@ -4,11 +4,11 @@ use crate::app_event::AppEvent;
 
 use crate::app::compute_cursor_phase;
 
+use appkit_core::document::DocumentModel;
 use appkit_shell::ProductHost;
 use appkit_shell::accessibility_adapter::{
     PlatformAccessibilityEvent, PlatformAccessibilityWindowEvent,
 };
-use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 pub(crate) use appkit_shell::window_input::winit_key_to_keycode;
 use appkit_shell::window_input::{scroll_delta_pixels, ui_modifiers};
 use std::path::{Path, PathBuf};
@@ -21,9 +21,9 @@ use winit::window::WindowId;
 
 use crate::actions::AppAction;
 use crate::file_history::compute_workspace_root;
-use crate::input::{EditCommand, key_to_command};
 use crate::native_menu::{MenuAction, NativeMenu};
 use crate::textora_product::ProductEventSender;
+use appkit_shell::input_mapper::key_to_command;
 use ui::core::overlay::OverlayAction;
 use ui::core::widget::{KeyCode, Modifiers, WidgetAction};
 #[allow(unused_imports)]
@@ -32,16 +32,6 @@ use ui::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
 // Font size and line height are now in Settings
 const FALLBACK_LOCAL_DEVICE_SHORT_ID: &str = "local";
 const ACCESSIBILITY_WINDOW_NAME: &str = "textora";
-
-fn editor_input_context(app: &App) -> EditorInputContext {
-    let editor_focus =
-        matches!(app.ui_shell.keyboard_focus(), crate::ui_shell::KeyboardFocusTarget::Editor)
-            && app.editor_runtime.window_focused();
-    EditorInputContext {
-        focus: if editor_focus { EditorFocus::Active } else { EditorFocus::Inactive },
-        modal_blocked: app.ui_shell.active_overlay_is_modal(),
-    }
-}
 
 /// 计算光标当前是否可见，以及下一次切换的时间点。
 
@@ -533,7 +523,7 @@ impl App {
                         dpi,
                     );
                     let _ = self.editor_runtime.update_preedit(
-                        editor_input_context(self),
+                        self.editor_input_context(),
                         String::new(),
                         None,
                     );
@@ -541,7 +531,7 @@ impl App {
                     let panel_event = ui::core::Event::ImePreedit { text: text.clone(), cursor };
                     if mindmap_style_panel_consumes_ime(&self.ui_shell, &panel_event) {
                         let _ = self.editor_runtime.update_preedit(
-                            editor_input_context(self),
+                            self.editor_input_context(),
                             String::new(),
                             None,
                         );
@@ -551,13 +541,13 @@ impl App {
                     let action = self.ui_shell.forward_ime(panel_event, &self.current_theme, dpi);
                     if action.is_none() {
                         let _ = self.editor_runtime.update_preedit(
-                            editor_input_context(self),
+                            self.editor_input_context(),
                             text,
                             cursor,
                         );
                     } else {
                         let _ = self.editor_runtime.update_preedit(
-                            editor_input_context(self),
+                            self.editor_input_context(),
                             String::new(),
                             None,
                         );
@@ -571,7 +561,7 @@ impl App {
                     self.ui_shell.forward_ime(ui::core::Event::ImeEnable, &self.current_theme, dpi);
                 if action.is_none() {
                     let _ = self.editor_runtime.update_preedit(
-                        editor_input_context(self),
+                        self.editor_input_context(),
                         String::new(),
                         None,
                     );
@@ -587,7 +577,7 @@ impl App {
                 );
                 if action.is_none() {
                     let _ = self.editor_runtime.update_preedit(
-                        editor_input_context(self),
+                        self.editor_input_context(),
                         String::new(),
                         None,
                     );
@@ -624,18 +614,8 @@ impl App {
                             self.needs_redraw = true;
                         }
                     } else {
-                        let effect =
-                            self.dispatch_edit_command(EditCommand::InsertText(text), event_loop);
+                        let effect = self.dispatch_ime_commit(text);
                         self.apply_effect(effect);
-                        // Clear IME composition state
-                        let _ = self.editor_runtime.update_preedit(
-                            editor_input_context(self),
-                            String::new(),
-                            None,
-                        );
-                        // Reset WYSIWYG preferred x so the next vertical move
-                        // doesn't anchor to a stale position
-                        self.editor_runtime.set_preferred_x(None);
                     }
                 }
             }
@@ -1025,17 +1005,12 @@ impl App {
                 }
                 let cursor_offset = tab.document.cursor_offset().to_usize();
                 let selection_anchor = tab.document.cursor().selection_anchor;
-                let scroll_anchor = tab.scroll_anchor_state();
-                let mut document = crate::document_view::DocumentView::from_external_content(
-                    &path,
-                    &content,
-                    self.visible_rows(self.screen_height()),
-                    self.visible_height_lines(self.screen_height()),
-                );
-                document.dirty = false;
-                document.restore_edit_position(cursor_offset, selection_anchor, scroll_anchor);
-                let (model, _) = document.into_parts();
-                self.replace_editor_document(tab_id, model);
+                let mut document = DocumentModel::from_external_content(&path, &content);
+                let buffer_length = document.buffer_len();
+                document.set_cursor_offset_synced(cursor_offset.min(buffer_length));
+                document.cursor_mut().selection_anchor =
+                    selection_anchor.map(|offset| offset.min(buffer_length));
+                self.replace_editor_document(tab_id, document);
                 if self.active_tab_id() == Some(tab_id)
                     && let Some(active_index) = self.active_editor_index()
                 {
@@ -1266,6 +1241,63 @@ mod file_safety_race_tests {
 
     use std::fs;
     use std::time::Instant;
+
+    #[test]
+    fn external_reload_uses_the_shared_document_model() {
+        let lifecycle = include_str!("app_lifecycle.rs");
+        let (production, _) = lifecycle
+            .split_once("#[cfg(test)]\nmod file_safety_race_tests")
+            .expect("the lifecycle source includes the file safety tests");
+        assert!(!production.contains("DocumentView"));
+    }
+
+    #[test]
+    fn clean_external_reload_preserves_tab_state_and_updates_disk_revision() {
+        let directory = tempfile::tempdir().expect("reload fixture directory");
+        let path = directory.path().join("notes.md");
+        fs::write(&path, "old\nlonger line\nlast").expect("write reload baseline");
+        let mut document = DocumentView::from_file(&path, 10, 100.0).expect("load reload fixture");
+        let old_revision = document.disk_revision.clone();
+        let content_revision = document.content_revision();
+        document.set_cursor_offset_synced(2);
+        document.cursor_mut().selection_anchor = Some(document.buffer_len());
+        let mut app = App::new(None);
+        let tab_id = app.push_entry_for_test(document, Box::new(EditorPlugin::new()));
+        app.new_untitled_doc();
+        let scroll_anchor = ui::viewport::ScrollAnchor::new(1, 3.0);
+        app.tab_session_mut(tab_id)
+            .expect("reload fixture tab")
+            .set_scroll_anchor_state(scroll_anchor);
+
+        let content = "now\nnew";
+        fs::write(&path, content).expect("write the external revision");
+        let revision = capture_revision(&path).expect("capture the external revision");
+        app.apply_file_safety_outcome(
+            tab_id,
+            path.clone(),
+            false,
+            content_revision,
+            Ok(FileSafetyOutcome::Reload {
+                content: content.to_owned(),
+                revision: revision.clone(),
+            }),
+        );
+
+        let tab = app.tab_session(tab_id).expect("reload must keep the same tab");
+        assert_eq!(tab.document.full_text(), content);
+        assert_eq!(tab.document.cursor_offset().to_usize(), 2);
+        assert_eq!(tab.document.cursor().selection_anchor, Some(content.len()));
+        assert_eq!(tab.scroll_anchor_doc_line(), scroll_anchor.doc_line);
+        assert_eq!(tab.scroll_anchor_pixel_offset(), scroll_anchor.pixel_offset);
+        assert_eq!(tab.document.file_path.as_deref(), Some(path.as_path()));
+        assert_eq!(tab.document.disk_revision.as_ref(), Some(&revision));
+        assert_ne!(tab.document.disk_revision, old_revision);
+        assert!(!tab.document.dirty);
+        assert!(app.file_safety_notices.iter().any(|notice| matches!(
+            notice,
+            crate::file_safety::FileSafetyNotice::CleanDocumentReloaded { path: reloaded } if reloaded == &path
+        )));
+    }
 
     #[test]
     fn stale_external_reload_is_discarded_and_rescheduled() {
@@ -1895,7 +1927,7 @@ mod tests {
         let mut app = App::new(None);
         app.ui_shell.mark_layout_initialized_for_test();
         app.ui_shell.set_mindmap_style_panel_input(
-            Some(ui::mindmap_style_panel::MindmapStylePanelInput::from_selection(
+            Some(appkit_shell::mindmap_style_panel::MindmapStylePanelInput::from_selection(
                 ui::theme::MindmapThemeSelection::Default,
                 true,
             )),
@@ -2619,7 +2651,7 @@ mod tests {
             crate::app_init::build_product_workspace(),
             crate::tab_runtime::TabRuntimeStore::default(),
         );
-        let context = editor_input_context(&app);
+        let context = app.editor_input_context();
         assert!(app.editor_runtime.begin_text_selection(context));
         assert!(app.editor_runtime.update_preedit(context, "未完成".to_owned(), Some((0, 6)),));
         app.mouse.is_down = true;

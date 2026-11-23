@@ -1,4 +1,4 @@
-use core::types::ByteIndex;
+use textora_core::types::ByteIndex;
 
 /// Pure cursor and selection state that belongs to the headless document
 /// model.
@@ -29,7 +29,7 @@ impl CursorState {
 #[cfg(test)]
 mod tests {
     use super::CursorState;
-    use core::types::ByteIndex;
+    use textora_core::types::ByteIndex;
 
     #[test]
     fn default_cursor_state_starts_at_zero_without_selection() {

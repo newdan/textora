@@ -11,7 +11,7 @@ name = "appkit_core"
 path = "src/lib.rs"
 
 [dependencies]
-core.workspace = true
+textora_core.workspace = true
 serde.workspace = true
 toml.workspace = true
 similar = "2"

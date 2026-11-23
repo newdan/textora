@@ -19,10 +19,7 @@
 //! holds the correct position). Direct field assignment is forbidden outside of
 //! these methods to guarantee `tb.cursor_offset()` stays in sync.
 
-#![allow(
-    dead_code,
-    reason = "legacy compatibility shim retained for tests and benches until full retirement"
-)]
+#![allow(dead_code, reason = "legacy document view retained for regression tests")]
 
 use crate::line_index::{LineIndex, count_graphemes_before, grapheme_to_byte};
 use std::borrow::Cow;
@@ -32,13 +29,12 @@ use appkit_core::document::{CursorState, DocumentModel};
 pub(crate) mod edit;
 pub(crate) mod selection;
 pub(crate) mod visible;
-use core::buffer::text_buffer::{CursorMovement, TextBuffer};
-use core::document::ReadableDocument;
-use core::document::{DocView, DocViewMut};
-use core::file;
-use core::highlight::{FILE_ASSOCIATIONS, Highlight, HighlightKind};
-use core::types::{ByteIndex, UniCharOffset};
 use std::path::Path;
+use textora_core::buffer::text_buffer::{CursorMovement, TextBuffer};
+use textora_core::document::ReadableDocument;
+use textora_core::document::{DocView, DocViewMut};
+use textora_core::highlight::{FILE_ASSOCIATIONS, Highlight, HighlightKind};
+use textora_core::types::{ByteIndex, UniCharOffset};
 
 pub use appkit_core::document::DocumentSaveError;
 
@@ -354,8 +350,10 @@ impl DocumentView {
     ) {
         let line_start = self.line_index.unichar_of_line(hint_line);
         let local = offset.to_usize().saturating_sub(line_start.to_usize());
-        self.tb
-            .cursor_move_to_logical(core::types::LogicalPoint { line: hint_line, unichar: local });
+        self.tb.cursor_move_to_logical(textora_core::types::LogicalPoint {
+            line: hint_line,
+            unichar: local,
+        });
         self.sync_cursor();
     }
 
@@ -379,8 +377,10 @@ impl DocumentView {
     ) {
         let line_start = self.line_index.unichar_of_line(hint_line);
         let local = offset.to_usize().saturating_sub(line_start.to_usize());
-        self.tb
-            .cursor_move_to_logical(core::types::LogicalPoint { line: hint_line, unichar: local });
+        self.tb.cursor_move_to_logical(textora_core::types::LogicalPoint {
+            line: hint_line,
+            unichar: local,
+        });
         self.cursor.offset = self.tb.cursor_offset();
         self.cursor.cached_line = None;
     }
@@ -488,7 +488,7 @@ impl DocumentView {
         let pos = self.tb.cursor_logical_pos();
         if pos.line > 0 {
             // TODO: 后续引入 LineMap 后，应改为基于 VisualPoint 移动，以修复折行时的上下漂移问题
-            self.tb.cursor_move_to_logical(core::types::LogicalPoint {
+            self.tb.cursor_move_to_logical(textora_core::types::LogicalPoint {
                 unichar: pos.unichar,
                 line: pos.line - 1,
             });
@@ -500,7 +500,7 @@ impl DocumentView {
     pub fn cursor_move_down(&mut self) {
         let pos = self.tb.cursor_logical_pos();
         // TODO: 后续引入 LineMap 后，应改为基于 VisualPoint 移动，以修复折行时的上下漂移问题
-        self.tb.cursor_move_to_logical(core::types::LogicalPoint {
+        self.tb.cursor_move_to_logical(textora_core::types::LogicalPoint {
             unichar: pos.unichar,
             line: pos.line + 1,
         });
@@ -701,9 +701,9 @@ impl DocumentView {
         let query_bytes = query.as_bytes();
         let search_fn: fn(&[u8], &[u8]) -> Vec<std::ops::Range<usize>> =
             if self.presentation.search_state.options.match_case {
-                core::buffer::simd_search::find_all
+                textora_core::buffer::simd_search::find_all
             } else {
-                core::buffer::simd_search::find_all_case_insensitive_ascii
+                textora_core::buffer::simd_search::find_all_case_insensitive_ascii
             };
 
         let mut matches = Vec::new();
@@ -752,8 +752,8 @@ impl DocumentView {
 
     /// Returns the cached highlight spans for the given logical line.
     pub fn highlights_for_line(&mut self, line_index: usize) -> &[Highlight<HighlightKind>] {
-        use core::highlight::Highlighter as CoreHighlighter;
         use stdext::arena::scratch_arena;
+        use textora_core::highlight::Highlighter as CoreHighlighter;
 
         let language = match self.language {
             Some(lang) => lang,
@@ -766,7 +766,7 @@ impl DocumentView {
         self.presentation.highlighter_cache.parse_line(
             &arena,
             &mut highlighter,
-            line_index as core::helpers::CoordType,
+            line_index as textora_core::helpers::CoordType,
             |line| model.line_index.offsets.get(line as usize).copied().unwrap_or(0),
         )
     }
@@ -910,41 +910,12 @@ pub(crate) fn replace_null_bytes(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Normalize external clipboard text for insertion into the editor.
-/// - Converts CRLF and CR line endings to LF
-/// - Strips UTF-8 BOM if present
-pub fn normalize_paste_text(input: &[u8]) -> Vec<u8> {
-    let (_, stripped) = file::strip_bom(input);
-    let mut out = Vec::with_capacity(stripped.len());
-    let mut i = 0;
-    let len = stripped.len();
-
-    while i < len {
-        match stripped[i] {
-            b'\r' => {
-                out.push(b'\n');
-                i += 1;
-                if i < len && stripped[i] == b'\n' {
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod basic_tests;
 #[cfg(test)]
 mod boundary_tests;
 #[cfg(test)]
 mod cursor_visual_tests;
-#[cfg(test)]
-mod normalize_tests;
 #[cfg(test)]
 mod perf_tests;
 #[cfg(test)]

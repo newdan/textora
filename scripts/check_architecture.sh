@@ -15,16 +15,19 @@ check_forbidden_dependency() {
 }
 
 check_forbidden_dependency textora-appkit-core \
-  textora-ui winit wgpu textora-render textora-shaping textora-markdown textora-sync notora-core notora-app
-check_forbidden_dependency textora-appkit-shell \
-  textora-markdown textora-sync textora-app notora-core notora-app
-check_forbidden_dependency textora-ui \
+  textora-ui winit wgpu textora-render textora-shaping textora-markdown textora-mindmap textora-sync \
   notora-core notora-app
+check_forbidden_dependency textora-appkit-shell \
+  textora-markdown textora-mindmap textora-sync textora-app notora-core notora-app
+check_forbidden_dependency textora-ui \
+  textora-mindmap notora-core notora-app
 check_forbidden_dependency notora-core \
   textora-ui winit wgpu textora-render textora-shaping textora-appkit-core textora-appkit-shell \
-  textora-markdown textora-sync textora-app
+  textora-markdown textora-mindmap textora-sync textora-app
 check_forbidden_dependency notora-app \
   textora-app textora-sync
+check_forbidden_dependency textora-markdown textora-mindmap
+check_forbidden_dependency textora-mindmap textora-markdown
 
 check_forbidden_source_tokens() {
   local source_dir="$1"
@@ -50,6 +53,8 @@ local_navigation_scope="Navigation""Scope"
 local_edit_snapshot=".edit""+"
 local_notora_snapshot=".notora"
 check_forbidden_source_tokens crates/appkit-shell \
+  UiShell \
+  EditorHostWidget \
   "$local_product_markdown" \
   "$local_product_sync" \
   "$local_textora_product" \

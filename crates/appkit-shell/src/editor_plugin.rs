@@ -1,7 +1,7 @@
 //! EditorPlugin — 标准代码编辑器插件（Phase 1 stub 实现）。
 
-use core::document::DocView;
 use shaping::Shaper;
+use textora_core::document::DocView;
 use ui::core::geom::Rect;
 use ui::core::paint::DrawList;
 use ui::plugin::{PluginFactory, ViewPlugin};
@@ -69,7 +69,7 @@ impl ViewPlugin for EditorPlugin {
     fn handle_message(
         &mut self,
         msg: ui::plugin::PluginMessage,
-        _doc: &mut dyn core::document::DocViewMut,
+        _doc: &mut dyn textora_core::document::DocViewMut,
     ) -> bool {
         if let ui::plugin::PluginMessage::SetRenderSettings { line_height, .. } = msg {
             self.line_height = line_height;

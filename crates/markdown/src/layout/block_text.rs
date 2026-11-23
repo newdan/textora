@@ -35,7 +35,7 @@ pub(in crate::layout::block) fn cursor_in_nested_list_item(
 
 pub(in crate::layout::block) fn source_line_context_for_layout(
     block: &BlockNode,
-    doc: &dyn core::document::DocView,
+    doc: &dyn textora_core::document::DocView,
     line_idx: usize,
     line_text: &str,
 ) -> Option<SourceLineContext> {
@@ -91,7 +91,7 @@ pub(in crate::layout::block) fn source_line_len(
 
 pub(in crate::layout::block) fn list_item_projected_lines(
     block: &BlockNode,
-    doc: &dyn core::document::DocView,
+    doc: &dyn textora_core::document::DocView,
 ) -> Vec<LayoutTextLine> {
     let projected_lines = if block.text_lines.len() == 1 && block.text_lines[0].is_empty() {
         // Empty items have no text event; the parser's block end can include CRLF.

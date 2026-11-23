@@ -267,8 +267,8 @@ mod tests {
     }
 
     fn install_dirty_saved_bom_crlf_tab(runtime: &mut EditorRuntime, path: &std::path::Path) {
-        let mut text_buffer =
-            core::buffer::TextBuffer::new(false).expect("test text buffer should be writable");
+        let mut text_buffer = textora_core::buffer::TextBuffer::new(false)
+            .expect("test text buffer should be writable");
         text_buffer.write_raw("clean\n段落".as_bytes());
         let mut document = appkit_core::document::DocumentModel::new(text_buffer);
         document.file_path = Some(path.to_path_buf());
@@ -339,7 +339,8 @@ mod tests {
 
     fn install_dirty_save_race_tab(runtime: &mut EditorRuntime, path: &std::path::Path) -> TabId {
         fs::write(path, "old").expect("write save-race baseline");
-        let mut buffer = core::buffer::TextBuffer::new(false).expect("writable save-race buffer");
+        let mut buffer =
+            textora_core::buffer::TextBuffer::new(false).expect("writable save-race buffer");
         buffer.write_raw(b"old");
         buffer.mark_as_clean();
         let mut document = appkit_core::document::DocumentModel::new(buffer);
@@ -639,8 +640,8 @@ mod tests {
         let path = directory.path().join("notes.md");
         fs::write(&path, "old").expect("runtime save baseline should be written");
         let baseline = capture_revision(&path).expect("runtime save baseline should capture");
-        let mut text_buffer =
-            core::buffer::TextBuffer::new(false).expect("runtime save buffer should construct");
+        let mut text_buffer = textora_core::buffer::TextBuffer::new(false)
+            .expect("runtime save buffer should construct");
         text_buffer.write_raw(b"new");
         text_buffer.mark_as_clean();
         let mut document = appkit_core::document::DocumentModel::new(text_buffer);
@@ -681,8 +682,8 @@ mod tests {
         let path = directory.path().join("notes.md");
         fs::write(&path, "old").expect("late save baseline should be written");
         let baseline = capture_revision(&path).expect("late save baseline should capture");
-        let mut text_buffer =
-            core::buffer::TextBuffer::new(false).expect("late save buffer should construct");
+        let mut text_buffer = textora_core::buffer::TextBuffer::new(false)
+            .expect("late save buffer should construct");
         text_buffer.write_raw(b"new");
         text_buffer.mark_as_clean();
         let mut document = appkit_core::document::DocumentModel::new(text_buffer);

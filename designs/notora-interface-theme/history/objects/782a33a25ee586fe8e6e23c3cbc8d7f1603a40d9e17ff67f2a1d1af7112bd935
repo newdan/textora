@@ -1,0 +1,432 @@
+{
+  "name": "notora 界面主题",
+  "version": 1,
+  "color": {
+    "themes": [
+      {
+        "id": "light",
+        "name": "白天 · 纸"
+      },
+      {
+        "id": "dark",
+        "name": "夜晚 · 灯"
+      }
+    ],
+    "tokens": [
+      {
+        "name": "surface-window",
+        "value": {
+          "light": "#fcfaf8",
+          "dark": "#332d29"
+        },
+        "usage": "最外层环境面：窗口边缘与左侧导航栏。浅色是暖白纸边，深色是暖褐。不要用它铺正文。"
+      },
+      {
+        "name": "surface-navigation",
+        "value": {
+          "light": "#fefdfc",
+          "dark": "#27221f"
+        },
+        "usage": "中栏（文件卡片列表）表面。从外壳向内容走一步：浅色更亮，深色更暗；与外壳保持可感知但安静的差。"
+      },
+      {
+        "name": "surface-overlay",
+        "value": {
+          "light": "#ffffff",
+          "dark": "#36302b"
+        },
+        "usage": "浮层表面：对话框、菜单、设置面板。深色下浮层比外壳亮，是全系统唯一“被照亮”的例外。"
+      },
+      {
+        "name": "surface-editor",
+        "value": {
+          "light": "#ffffff",
+          "dark": "#191614"
+        },
+        "usage": "内容纸：编辑器与正文画布。浅色为纯白，深色为最深的褐黑；这是对比的极点，不再叠加装饰。"
+      },
+      {
+        "name": "surface-hover",
+        "value": {
+          "light": "{button-hover}",
+          "dark": "{button-hover}"
+        },
+        "usage": "普通悬停面。与 button-hover 同源：由 button-bg 叠一层 bg-hover 得到，菜单和幽灵按钮共用。"
+      },
+      {
+        "name": "surface-selected",
+        "value": {
+          "light": "#f8e5d2",
+          "dark": "#f59a4a24"
+        },
+        "usage": "按钮/菜单的选中底。浅色是实心蜜桃纸，深色是 14% 强调色水洗；不要用它做整行选中。"
+      },
+      {
+        "name": "surface-row-hover",
+        "value": {
+          "light": "#f9f7f4",
+          "dark": "#433a33"
+        },
+        "usage": "导航树行与文件卡片的悬停底。比普通悬停更暖、更轻，不能与选中态同时出现。"
+      },
+      {
+        "name": "surface-row-selected",
+        "value": {
+          "light": "#f8e5d2",
+          "dark": "#493529"
+        },
+        "usage": "导航树行与文件卡片的选中底；标题同时用 ink-row-selected。浅色与 surface-selected 同值，深色故意更深，避免与强调水洗混淆。"
+      },
+      {
+        "name": "ink",
+        "value": {
+          "light": "#202020",
+          "dark": "#f2ede8"
+        },
+        "usage": "主文本与主图标。浅色在 window/navigation/overlay/editor 上 15.6–16.3:1，深色 11.2–15.5:1。"
+      },
+      {
+        "name": "ink-muted",
+        "value": {
+          "light": "#62666c",
+          "dark": "#b8ada3"
+        },
+        "usage": "次要文本：摘要、元数据、占位符、未选中图标。浅色 5.6–5.8:1，深色 5.9–7.2:1。浅色带一点冷灰，是当前系统的已知偏差。"
+      },
+      {
+        "name": "ink-inverse",
+        "value": {
+          "light": "#ffffff",
+          "dark": "#211e1c"
+        },
+        "usage": "反色文本，只用于深色填充之上。浅色 #ffffff 在 accent 上仅 2.9:1，段选控件因此不达标；深色 #211e1c 在 accent 上 7.6:1。"
+      },
+      {
+        "name": "ink-row-selected",
+        "value": {
+          "light": "#9a4815",
+          "dark": "#f2a659"
+        },
+        "usage": "选中行/卡片标题，铺在 surface-row-selected 上：5.2:1 / 5.7:1。它与 accent 分开，保证选中文字可读。"
+      },
+      {
+        "name": "divider",
+        "value": {
+          "light": "#efeae3",
+          "dark": "#463c35"
+        },
+        "usage": "弱分隔线、设置区块边框、纸面折线。装饰性，不承担控件识别；不要用它画输入框边界。"
+      },
+      {
+        "name": "line-strong",
+        "value": {
+          "light": "#ded8d1",
+          "dark": "#77695d"
+        },
+        "usage": "强边框：侧栏分隔、需要一点结构感的位置。浅色对纸面仅 1.4:1，只作装饰线使用。"
+      },
+      {
+        "name": "control-bg",
+        "value": {
+          "light": "#ffffff",
+          "dark": "#211d1a"
+        },
+        "usage": "输入框、搜索框的底。深色比浮层更暗，让输入区微微凹进纸面。"
+      },
+      {
+        "name": "control-border",
+        "value": {
+          "light": "#ded8d1",
+          "dark": "#77695d"
+        },
+        "usage": "输入/搜索框边界。浅色 1.4:1，未达 3:1 的控件边界要求；焦点时改用 accent，见优化 P0。"
+      },
+      {
+        "name": "button-bg",
+        "value": {
+          "light": "#fbfbfb",
+          "dark": "#2f2c2a"
+        },
+        "usage": "普通按钮底：button 由 bg-elevated 混 3.5% 主文本（浅色）或 input-bg 混 1.5%（深色）得到。"
+      },
+      {
+        "name": "button-border",
+        "value": {
+          "light": "#d2ccc5",
+          "dark": "#8d8279"
+        },
+        "usage": "普通按钮边框，由 border-strong 混 12% 主文本得到。浅色对按钮底 1.5:1，属于“纸边”而不是强轮廓。"
+      },
+      {
+        "name": "button-hover",
+        "value": {
+          "light": "#f7f7f7",
+          "dark": "#3d3b3a"
+        },
+        "usage": "按钮/幽灵操作悬停底。由 button-bg 叠 2–3% 中性遮罩得到；这是全系统唯一的冷灰面，优化 P1 建议改为暖遮罩。"
+      },
+      {
+        "name": "button-pressed",
+        "value": {
+          "light": "#f1f1f1",
+          "dark": "#454341"
+        },
+        "usage": "按钮按下底。比 hover 再深一档，不承担选中语义。"
+      },
+      {
+        "name": "danger-bg",
+        "value": {
+          "light": "#f9f3f2",
+          "dark": "#53312d"
+        },
+        "usage": "危险按钮默认底：button-bg 混 8% danger（线性空间）。只用于不可逆操作。"
+      },
+      {
+        "name": "danger-hover",
+        "value": {
+          "light": "#f7eae9",
+          "dark": "#6a3631"
+        },
+        "usage": "危险按钮悬停底：button-bg 混 16% danger。"
+      },
+      {
+        "name": "danger-pressed",
+        "value": {
+          "light": "#f6e1e0",
+          "dark": "#7c3a34"
+        },
+        "usage": "危险按钮按下底：button-bg 混 24% danger。"
+      },
+      {
+        "name": "danger-border",
+        "value": {
+          "light": "#db9f97",
+          "dark": "#bf6f64"
+        },
+        "usage": "危险按钮边框：button-border 混 50% danger。比底色更明确，但仍低于正文对比。"
+      },
+      {
+        "name": "danger-label",
+        "value": {
+          "light": "#983d35",
+          "dark": "#edc2bc"
+        },
+        "usage": "危险按钮/错误说明的文字色。浅色在 button-bg 上 6.6:1，深色 8.6:1；不要直接用 danger 当正文。"
+      },
+      {
+        "name": "accent",
+        "value": {
+          "light": "#e97924",
+          "dark": "#f59a4a"
+        },
+        "usage": "强调色“火”：选中、光标、焦点环、活动图标。浅色对白 2.8–2.9:1，不能当正文或焦点环；深色 6.2–8.2:1。"
+      },
+      {
+        "name": "danger",
+        "value": {
+          "light": "#e45649",
+          "dark": "#e45649"
+        },
+        "usage": "危险语义色：图标、指示条、危险按钮的混色源。作为正文仅 3.7:1（浅）/4.9:1（深），正文用 danger-label。"
+      },
+      {
+        "name": "warning",
+        "value": {
+          "light": "#c18401",
+          "dark": "#dfc184"
+        },
+        "usage": "警告语义色：列表指示条、思维导图状态。浅色作为正文 3.2:1，不达标；正文用优化方案里的 warning-text。"
+      },
+      {
+        "name": "focus-ring",
+        "value": {
+          "light": "{accent}",
+          "dark": "{accent}"
+        },
+        "usage": "键盘焦点环。当前等于 accent，浅色 2.8:1，未达 3:1；优化 P0 建议浅色改为 #c2410c。"
+      },
+      {
+        "name": "scrim",
+        "value": {
+          "light": "#00000073",
+          "dark": "#00000073"
+        },
+        "usage": "模态遮罩。由 shadow 色提升到至少 45% alpha；两个主题共用。不要用纯黑 60% 以上的“影院遮罩”。"
+      }
+    ]
+  },
+  "type": {
+    "fonts": [],
+    "families": {
+      "sans": "system-ui, -apple-system, \"SF Pro Text\", \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif"
+    },
+    "groups": [
+      {
+        "name": "界面",
+        "family": "sans",
+        "note": "系统字体栈；macOS 落 SF Pro + PingFang SC，Windows 落 Segoe UI + 微软雅黑。界面不引入自定义字体。",
+        "styles": [
+          {
+            "name": "page-title",
+            "fontSize": "22px",
+            "lineHeight": "30px",
+            "fontWeight": 600,
+            "letterSpacing": "-0.01em",
+            "sample": "会议记录 · 十一月",
+            "usage": "编辑器标题。一个视图只出现一次。"
+          },
+          {
+            "name": "section-title",
+            "fontSize": "16px",
+            "lineHeight": "22px",
+            "fontWeight": 600,
+            "sample": "全部笔记",
+            "usage": "中栏标题、对话框标题。不要与 page-title 同屏竞争。"
+          },
+          {
+            "name": "card-title",
+            "fontSize": "15px",
+            "lineHeight": "20px",
+            "fontWeight": 600,
+            "sample": "周五的产品评审",
+            "usage": "文件卡片标题，最多两行；选中时改用 ink-row-selected，字重不变。"
+          },
+          {
+            "name": "body",
+            "fontSize": "14px",
+            "lineHeight": "20px",
+            "fontWeight": 400,
+            "sample": "保存",
+            "usage": "按钮、输入、菜单和默认界面文本。"
+          },
+          {
+            "name": "label",
+            "fontSize": "13px",
+            "lineHeight": "18px",
+            "fontWeight": 400,
+            "sample": "工作区 / 笔记",
+            "usage": "树行、标签、辅助操作；选中行改用 600，不换字号。"
+          },
+          {
+            "name": "meta",
+            "fontSize": "12px",
+            "lineHeight": "16px",
+            "fontWeight": 400,
+            "sample": "3 天前",
+            "usage": "卡片元数据、路径、计数。"
+          },
+          {
+            "name": "caption",
+            "fontSize": "11px",
+            "lineHeight": "16px",
+            "fontWeight": 400,
+            "sample": "已保存",
+            "usage": "保存状态、快捷键提示、最小说明。"
+          }
+        ]
+      }
+    ]
+  },
+  "spacing": {
+    "tokens": [
+      {
+        "name": "space-1",
+        "value": "2px",
+        "usage": "微调：图标与文字的光学修正、徽标内边距。"
+      },
+      {
+        "name": "space-2",
+        "value": "4px",
+        "usage": "图标与文字间隙、卡片之间的缝。"
+      },
+      {
+        "name": "space-3",
+        "value": "8px",
+        "usage": "控件内边距、行内块间距、卡片水平内边距。"
+      },
+      {
+        "name": "space-4",
+        "value": "10px",
+        "usage": "卡片垂直内边距。2px 网格上的光学例外，不要扩散到其他位置。"
+      },
+      {
+        "name": "space-5",
+        "value": "12px",
+        "usage": "工具栏/侧栏横向内边距、常用水平留白。"
+      },
+      {
+        "name": "space-6",
+        "value": "16px",
+        "usage": "区块间距、树缩进一级、图标尺寸。"
+      },
+      {
+        "name": "space-7",
+        "value": "24px",
+        "usage": "对话框外边距、页面级留白。"
+      }
+    ]
+  },
+  "radius": {
+    "tokens": [
+      {
+        "name": "radius-sm",
+        "value": "4px",
+        "usage": "紧凑控件、徽标、部分小标记；不用于分段选中块。"
+      },
+      {
+        "name": "radius-md",
+        "value": "8px",
+        "usage": "按钮、输入、卡片、菜单、对话框、分段按钮的选中块。"
+      },
+      {
+        "name": "radius-lg",
+        "value": "16px",
+        "usage": "三栏外壳内容面的外圆角。只用于最外层，不用于卡片。"
+      }
+    ]
+  },
+  "size": {
+    "tokens": [
+      {
+        "name": "control-height",
+        "value": "32px",
+        "usage": "对话框、设置页的标准控件高度。"
+      },
+      {
+        "name": "bar-height",
+        "value": "28px",
+        "usage": "工具栏、搜索栏、标签栏、模态头部。"
+      },
+      {
+        "name": "title-bar-height",
+        "value": "36px",
+        "usage": "窗口标题栏与侧栏头部。"
+      },
+      {
+        "name": "row-height",
+        "value": "32px",
+        "usage": "侧栏行高。"
+      },
+      {
+        "name": "tree-row-height",
+        "value": "28px",
+        "usage": "文件树行高；比侧栏主行更紧。"
+      },
+      {
+        "name": "navigation-width",
+        "value": "220px",
+        "usage": "默认导航栏宽度，可调范围 180–320。"
+      },
+      {
+        "name": "card-list-width",
+        "value": "340px",
+        "usage": "默认中栏宽度，可调范围 260–520。"
+      },
+      {
+        "name": "icon-size",
+        "value": "16px",
+        "usage": "默认图标尺寸；工具栏 18，树与卡片 14–16。"
+      }
+    ]
+  }
+}

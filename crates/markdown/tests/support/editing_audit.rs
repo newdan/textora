@@ -1,7 +1,5 @@
-extern crate core as doc_core;
-
-use doc_core::document::{DocView, DocViewMut, StringDocView};
 use std::borrow::Cow;
+use textora_core::document::{DocView, DocViewMut, StringDocView};
 use textora_markdown::builder::{BlockNode, MarkdownDoc};
 use textora_markdown::parser::{MarkdownEvent, MarkdownTag, parse_markdown};
 use textora_markdown::style::MarkdownStyle;
@@ -151,6 +149,7 @@ pub fn content_signature(source: &str) -> Vec<MarkdownEvent> {
             MarkdownEvent::Code(_)
             | MarkdownEvent::InlineMath(_)
             | MarkdownEvent::DisplayMath(_)
+            | MarkdownEvent::HtmlBlock(_)
             | MarkdownEvent::InlineHtml(_)
             | MarkdownEvent::TaskListMarker(_) => true,
             _ => false,

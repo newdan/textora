@@ -1,313 +1,77 @@
-//! Mouse input handling and hit-testing.
-//!
-//! Extracts mouse-related state and logic from App.
-
-use std::time::Instant;
-use winit::event::ElementState;
-use winit::keyboard::ModifiersState;
-
-use crate::cursor_motion::CursorRenderState;
-#[cfg(test)]
-use crate::document_view::DocumentView;
-use crate::edit_transaction::DocumentModelMut;
-use crate::line_index::LineIndex;
-use core::types::UniCharOffset;
-use ui::render_geom::AdvanceCacheEntry;
-use ui::settings::UiMetrics;
-
 pub(crate) use appkit_shell::mouse_state::{CanvasDragEligibility, CanvasDragSession, MouseState};
-
-/// Convert mouse click position (physical pixels) to (document byte offset, doc_line, vis_line).
-/// vis_line is the advance_cache index — preserved so cursor rendering
-/// can avoid ambiguous VL boundary disambiguation.
-/// Uses the advance cache populated during `shape_visible_lines()`.
-/// Accounts for sub-line pixel offset from scroll_y fractional part.
 #[cfg(test)]
-pub(crate) fn hit_test(
-    px: f32,
-    py: f32,
-    dv: &DocumentView,
-    advance_cache: &[AdvanceCacheEntry],
-    metrics: &UiMetrics,
-    left_margin: f32,
-    tab_bar_height: f32,
-    line_index: &LineIndex,
-) -> Option<(UniCharOffset, usize, usize)> {
-    let sub_line_offset = dv.sub_line_pixel_offset(metrics.line_height);
-    hit_test_with_sub_line_offset(
-        px,
-        py,
-        advance_cache,
-        metrics,
-        left_margin,
-        tab_bar_height,
-        sub_line_offset,
-        line_index,
-    )
-}
-
-pub(crate) fn hit_test_with_sub_line_offset(
-    px: f32,
-    py: f32,
-    advance_cache: &[AdvanceCacheEntry],
-    metrics: &UiMetrics,
-    left_margin: f32,
-    tab_bar_height: f32,
-    sub_line_offset: f32,
-    line_index: &LineIndex,
-) -> Option<(UniCharOffset, usize, usize)> {
-    let adjusted_py = py - tab_bar_height - sub_line_offset;
-    if adjusted_py < 0.0 {
-        return None;
-    }
-    let vis_line = (adjusted_py / metrics.line_height) as usize;
-    if vis_line >= advance_cache.len() {
-        return None;
-    }
-    let entry = &advance_cache[vis_line];
-    let doc_line = entry.doc_line;
-    let vl_grapheme_start = entry.vl_grapheme_start;
-    let clusters = &entry.clusters;
-
-    // 簇是字符边界单位（可能含 multi-byte 字符）。按像素位置 snap 到簇起点
-    // 或终点，**不在簇内插字节偏移**——否则 multi-byte 字符簇内会得到非字符
-    // 边界 offset，set_cursor_offset_synced 调用 tb.cursor_move_to_offset 后位置
-    // 被规整成合法字符边界，与请求 offset 不一致，触发 debug_assert panic
-    // (cursor desync: tb.cursor_offset() != requested offset)。
-    let mut unichar_in_vl = vl_grapheme_start;
-    let mut prev_x = left_margin;
-    let mut prev_unichar = vl_grapheme_start;
-    for &(cluster_end, cluster_x, grapheme_idx) in clusters {
-        let _ = cluster_end; // still needed for pixel lookup
-        if px <= cluster_x {
-            let pixel_width = cluster_x - prev_x;
-            let fraction =
-                if pixel_width > 0.0 { ((px - prev_x) / pixel_width).clamp(0.0, 1.0) } else { 0.0 };
-            unichar_in_vl = if fraction >= 0.5 {
-                vl_grapheme_start + grapheme_idx as usize + 1
-            } else {
-                prev_unichar
-            };
-            break;
-        }
-        prev_x = cluster_x;
-        prev_unichar = vl_grapheme_start + grapheme_idx as usize + 1;
-        unichar_in_vl = vl_grapheme_start + grapheme_idx as usize + 1;
-    }
-
-    // Convert line-local unichar offset to document-level UniCharOffset
-    let doc_unichar = line_index.unichar_of_line(doc_line) + unichar_in_vl;
-    Some((doc_unichar, doc_line, vis_line))
-}
-
-/// Handle CursorMoved while mouse button is held.
-/// Returns true if redraw is needed.
-///
-/// For double-click (click_count == 2) and triple-click (click_count == 3),
-/// uses word-level and line-level granularity respectively, matching standard
-/// editor behavior (VS Code, Sublime Text, etc.).
-pub(crate) fn handle_cursor_moved(
-    _px: f32,
-    _py: f32,
-    mouse: &mut MouseState,
-    dv: &mut impl DocumentModelMut,
-    hit: Option<(UniCharOffset, usize, usize)>,
-) -> bool {
-    let dv = dv.document_model_mut();
-    if !mouse.captures_pointer() {
-        return false;
-    }
-    if let Some((offset, doc_line, _vis_line)) = hit {
-        if mouse.click_count >= 2 {
-            // Double/triple-click drag: word or line granularity.
-            let is_first_drag = mouse.down_byte_offset.is_some();
-
-            if mouse.click_count >= 3 {
-                // ── Triple-click: line granularity ──
-                let line_start = dv.line_byte_offset(doc_line).unwrap_or(0);
-                let line_end = if doc_line + 1 < dv.line_count() {
-                    dv.line_byte_offset(doc_line + 1).unwrap_or(dv.buffer_len())
-                } else {
-                    dv.buffer_len()
-                };
-                let byte_offset = dv.unichar_to_byte_offset(offset);
-                // TODO(Phase 5): migrate to unichar when word_select_at/line APIs migrate
-
-                if is_first_drag {
-                    let initial_anchor_byte = mouse.down_byte_offset.take().unwrap();
-                    let initial_cursor = dv.cursor().offset;
-                    if byte_offset >= initial_anchor_byte {
-                        dv.cursor_mut().selection_anchor = Some(initial_anchor_byte);
-                    } else {
-                        dv.cursor_mut().selection_anchor = Some(initial_cursor.to_usize());
-                    }
-                }
-
-                let anchor = dv.cursor().selection_anchor.unwrap_or(line_start);
-                if byte_offset >= anchor {
-                    dv.set_cursor_offset_synced(line_end);
-                } else {
-                    dv.set_cursor_offset_synced(line_start);
-                }
-            } else {
-                // ── Double-click: word granularity ──
-                let byte_offset = dv.unichar_to_byte_offset(offset);
-                // TODO(Phase 5): migrate to unichar when word_select_at/line APIs migrate
-                let (ws, we) = dv.word_select_at(byte_offset);
-
-                if is_first_drag {
-                    let initial_anchor_byte = mouse.down_byte_offset.take().unwrap();
-                    let initial_cursor = dv.cursor().offset;
-                    if byte_offset >= initial_anchor_byte {
-                        dv.cursor_mut().selection_anchor = Some(initial_anchor_byte);
-                    } else {
-                        dv.cursor_mut().selection_anchor = Some(initial_cursor.to_usize());
-                    }
-                }
-
-                let anchor = dv.cursor().selection_anchor.unwrap_or(ws);
-                if byte_offset >= anchor {
-                    dv.set_cursor_offset_synced(we);
-                } else {
-                    dv.set_cursor_offset_synced(ws);
-                }
-            }
-        } else {
-            // ── Single-click drag: character granularity ──
-            if let Some(anchor_byte) = mouse.down_byte_offset.take() {
-                dv.cursor_mut().selection_anchor = Some(anchor_byte);
-            }
-            dv.set_cursor_unichar_synced_on_line(offset, doc_line);
-        }
-        return true;
-    }
-    false
-}
-
-/// Handle MouseInput (left button press/release).
-/// Returns true if redraw is needed.
-#[cfg(test)]
-pub(crate) fn handle_mouse_input(
-    state: ElementState,
-    px: f32,
-    py: f32,
-    mouse: &mut MouseState,
-    dv: &mut DocumentView,
-    modifiers: ModifiersState,
-    hit: Option<(UniCharOffset, usize, usize)>,
-) -> bool {
-    let mut presentation = dv.take_presentation();
-    let handled = handle_mouse_input_with_cursor_state(
-        state,
-        px,
-        py,
-        mouse,
-        dv,
-        &mut presentation.cursor_render_state,
-        modifiers,
-        hit,
-    );
-    dv.restore_presentation(presentation);
-    handled
-}
-
-pub(crate) fn handle_mouse_input_with_cursor_state(
-    state: ElementState,
-    px: f32,
-    py: f32,
-    mouse: &mut MouseState,
-    dv: &mut impl DocumentModelMut,
-    cursor_render_state: &mut CursorRenderState,
-    modifiers: ModifiersState,
-    hit: Option<(UniCharOffset, usize, usize)>,
-) -> bool {
-    let dv = dv.document_model_mut();
-    if state.is_pressed() {
-        mouse.is_down = true;
-
-        // A pointer press is user-driven caret movement: split any ongoing
-        // undo coalescing run even if the click lands back on the byte where
-        // the last edit ended.
-        dv.break_edit_merge();
-
-        // Double/triple click detection (within 500ms and 5 pixels distance)
-        let now = Instant::now();
-        let elapsed = now.duration_since(mouse.last_click_time);
-        let dx = px - mouse.last_click_pos.0;
-        let dy = py - mouse.last_click_pos.1;
-        let dist_sq = dx * dx + dy * dy;
-
-        if elapsed.as_millis() > 500 || dist_sq > 25.0 {
-            mouse.click_count = 0;
-        }
-        mouse.click_count = (mouse.click_count + 1).min(3);
-        mouse.last_click_time = now;
-        mouse.last_click_pos = (px, py);
-
-        if let Some((offset, doc_line, vis_line)) = hit {
-            let shift = modifiers.shift_key();
-
-            if mouse.click_count == 3 {
-                // Triple-click: select line
-                let line_start = dv.line_byte_offset(doc_line).unwrap_or(0);
-                let line_end = if doc_line + 1 < dv.line_count() {
-                    dv.line_byte_offset(doc_line + 1).unwrap_or(dv.buffer_len())
-                } else {
-                    dv.buffer_len()
-                };
-                dv.cursor_mut().selection_anchor = Some(line_start);
-                dv.set_cursor_offset_synced(line_end);
-                mouse.down_byte_offset = Some(line_start);
-            } else if mouse.click_count == 2 {
-                // Double-click: word select
-                let byte_offset = dv.unichar_to_byte_offset(offset);
-                let (start, end) = dv.word_select_at(byte_offset);
-                dv.cursor_mut().selection_anchor = Some(start);
-                dv.set_cursor_offset_synced(end);
-                mouse.down_byte_offset = Some(start);
-            } else if shift {
-                // Shift+click: extend selection
-                if dv.cursor().selection_anchor.is_none() {
-                    dv.cursor_mut().selection_anchor = Some(dv.cursor().offset.to_usize());
-                }
-                dv.set_cursor_unichar_synced_on_line(offset, doc_line);
-                cursor_render_state.click_hint = Some((offset, vis_line));
-            } else {
-                // Single click: set cursor, clear any existing selection
-                // Record down_byte_offset for potential drag-to-select
-                dv.cursor_mut().selection_anchor = None;
-                dv.cursor_move_to_unichar_on_line(offset, doc_line);
-                mouse.down_byte_offset = Some(dv.cursor().offset.to_usize());
-                cursor_render_state.click_hint = Some((offset, vis_line));
-            }
-            cursor_render_state.sticky_x = px;
-            cursor_render_state.cursor_blink_instant = Instant::now();
-            return true;
-        } else {
-            // 点击空白区域（hit 为 None，即 advance_cache 之外的空白）：
-            // 取消选区并将光标移至文档末尾，同时隐藏选区高亮。
-            dv.cursor_mut().selection_anchor = None;
-            dv.cursor_move_to_offset(dv.buffer_len()); // byte offset OK for EOF
-            mouse.down_byte_offset = None;
-            cursor_render_state.sticky_x = px;
-            cursor_render_state.cursor_blink_instant = Instant::now();
-            return true;
-        }
-    } else {
-        mouse.is_down = false;
-        mouse.down_byte_offset = None;
-        if dv.cursor().selection_anchor == Some(dv.cursor().offset.to_usize()) {
-            dv.cursor_mut().selection_anchor = None;
-        }
-    }
-    false
-}
+pub(crate) use appkit_shell::source_pointer::handle_mouse_input_with_cursor_state;
+pub(crate) use appkit_shell::source_pointer::hit_test_with_sub_line_offset;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appkit_core::line_index::LineIndex;
+    use appkit_shell::source_pointer::handle_cursor_moved as move_selection;
+    use textora_core::types::{ByteIndex, UniCharOffset};
+    use ui::render_geom::AdvanceCacheEntry;
+    use ui::settings::UiMetrics;
+    use winit::event::ElementState;
+    use winit::keyboard::ModifiersState;
+
+    fn hit_test(
+        px: f32,
+        py: f32,
+        dv: &DocumentView,
+        advance_cache: &[AdvanceCacheEntry],
+        metrics: &UiMetrics,
+        left_margin: f32,
+        tab_bar_height: f32,
+        line_index: &LineIndex,
+    ) -> Option<(UniCharOffset, usize, usize)> {
+        let sub_line_offset = dv.sub_line_pixel_offset(metrics.line_height);
+        hit_test_with_sub_line_offset(
+            px,
+            py,
+            advance_cache,
+            metrics,
+            left_margin,
+            tab_bar_height,
+            sub_line_offset,
+            line_index,
+        )
+    }
+
+    fn handle_mouse_input(
+        state: ElementState,
+        px: f32,
+        py: f32,
+        mouse: &mut MouseState,
+        dv: &mut DocumentView,
+        modifiers: ModifiersState,
+        hit: Option<(UniCharOffset, usize, usize)>,
+    ) -> bool {
+        let mut presentation = dv.take_presentation();
+        let handled = handle_mouse_input_with_cursor_state(
+            state,
+            px,
+            py,
+            mouse,
+            &mut dv.model,
+            &mut presentation.cursor_render_state,
+            modifiers,
+            hit,
+        );
+        dv.restore_presentation(presentation);
+        handled
+    }
+
+    fn handle_cursor_moved(
+        _px: f32,
+        _py: f32,
+        mouse: &mut MouseState,
+        document: &mut DocumentView,
+        hit: Option<(UniCharOffset, usize, usize)>,
+    ) -> bool {
+        move_selection(mouse, &mut document.model, hit)
+    }
+
     use crate::document_view::DocumentView;
-    use core::types::ByteIndex;
     use ui::settings::Settings;
 
     fn make_dv(content: &str) -> DocumentView {
@@ -446,12 +210,12 @@ mod tests {
         // vis_line=1，点击簇左半段 → fraction≈0.33 < 0.5 → snap to prev_end
         let r =
             hit_test(110.0, lh * 1.5, &dv, &cache, &metrics, 100.0, 0.0, &dv.line_index).unwrap();
-        assert_eq!(r.0, UniCharOffset(5), "第二 VL 左半段应返回 line-local offset=5");
+        assert_eq!(r, (UniCharOffset(5), 0, 1), "折行起点应保留被点击的第二可视行");
 
         // vis_line=0（第一 VL），右半段点击
         let r =
             hit_test(120.0, lh * 0.5, &dv, &cache, &metrics, 100.0, 0.0, &dv.line_index).unwrap();
-        assert_eq!(r.0, UniCharOffset(5), "第一 VL 右半段应返回 line-local offset=5");
+        assert_eq!(r, (UniCharOffset(5), 0, 0), "同一偏移在上一可视行末尾也可命中");
     }
 
     #[test]
@@ -919,6 +683,14 @@ mod tests {
             "anchor should be at original word_end (world end)"
         );
         assert_eq!(dv.cursor().offset, ByteIndex(0), "cursor at word_start of 'hello'");
+
+        handle_cursor_moved(20.0, 10.0, &mut mouse, &mut dv, Some((UniCharOffset(7), 0, 0)));
+        assert_eq!(dv.cursor().selection_anchor, Some(11));
+        assert_eq!(dv.cursor().offset, ByteIndex(6));
+
+        handle_cursor_moved(40.0, 10.0, &mut mouse, &mut dv, Some((UniCharOffset(13), 0, 0)));
+        assert_eq!(dv.cursor().selection_anchor, Some(11));
+        assert_eq!(dv.cursor().offset, ByteIndex(16));
     }
 
     #[test]

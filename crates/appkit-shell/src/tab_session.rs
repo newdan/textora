@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use appkit_core::document::DocumentModel;
 use appkit_core::workspace::types::TabId;
-use core::document::{DocView, DocViewMut};
 use shaping::Shaper;
+use textora_core::document::{DocView, DocViewMut};
 use ui::canvas::CanvasViewportSnapshot;
 use ui::core::geom::Rect;
 use ui::core::paint::DrawList;
@@ -683,16 +683,16 @@ impl<'a> TabSessionMut<'a> {
         self.cursor_render_state().cursor_blink_instant
     }
 
-    pub fn last_cursor_offset(&self) -> core::types::ByteIndex {
+    pub fn last_cursor_offset(&self) -> textora_core::types::ByteIndex {
         self.cursor_render_state().last_cursor_offset
     }
 
-    pub fn set_last_cursor_offset(&mut self, offset: core::types::ByteIndex) {
+    pub fn set_last_cursor_offset(&mut self, offset: textora_core::types::ByteIndex) {
         self.cursor_render_state_mut().last_cursor_offset = offset;
     }
 
     pub(crate) fn invalidate_cursor_visibility(&mut self) {
-        self.set_last_cursor_offset(core::types::ByteIndex::MAX);
+        self.set_last_cursor_offset(textora_core::types::ByteIndex::MAX);
     }
 
     pub fn scroll_anchor_doc_line(&self) -> usize {
@@ -984,8 +984,8 @@ impl<'a> TabSessionMut<'a> {
 mod tests {
     use appkit_core::document::DocumentModel;
     use appkit_core::workspace::types::TabIdAllocator;
-    use core::buffer::TextBuffer;
-    use core::document::DocView;
+    use textora_core::buffer::TextBuffer;
+    use textora_core::document::DocView;
     use ui::plugin::{PastePreference, PluginQuery, PluginResponse, ViewPlugin};
 
     use crate::tab_runtime::TabRuntime;
