@@ -1,6 +1,10 @@
 use super::{MarkdownEditorView, MarkdownView, PluginQuery, PluginResponse, ViewPlugin};
 use crate::parser::MARKDOWN_PARSE_COUNT;
 use textora_core::document::StringDocView;
+use ui::plugin::{EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction};
+
+const EDIT_SOURCE: &str = "普通段落\n\n| first | second |";
+const SOURCE_GENERATION: u32 = 1;
 
 fn render(view: &mut MarkdownEditorView) {
     let mut shaper = shaping::Shaper::new().expect("test font shaper must initialize");
@@ -12,6 +16,90 @@ fn render(view: &mut MarkdownEditorView) {
         &mut shaper,
         1.0,
     );
+}
+
+fn count_parses<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+    MARKDOWN_PARSE_COUNT.with(|count| count.set(0));
+    let output = operation();
+    (output, MARKDOWN_PARSE_COUNT.with(std::cell::Cell::get))
+}
+
+fn assert_committed_edit(
+    view: &mut MarkdownEditorView,
+    transaction: EditTransaction,
+    expected_source: &str,
+    expected_caret: usize,
+) {
+    let mut edited = EDIT_SOURCE.to_owned();
+    for replacement in transaction.replacements.into_iter().rev() {
+        edited.replace_range(replacement.range, &replacement.text);
+    }
+    assert_eq!(edited.as_bytes(), expected_source.as_bytes());
+    assert_eq!(transaction.selection_after, EditSelection::Caret(expected_caret));
+
+    let (_, sync_parses) = count_parses(|| {
+        view.set_source(edited, transaction.source_generation + 1);
+    });
+    let (_, frame_parses) = count_parses(|| {
+        view.engine.handle_set_cursor_byte(expected_caret);
+        render(view);
+    });
+    assert_eq!(sync_parses, 1, "source synchronization");
+    assert_eq!(frame_parses, 0, "first frame after synchronization");
+    assert_eq!(view.source.as_bytes(), expected_source.as_bytes());
+    assert_eq!(
+        view.engine.edit_ctx.as_ref().map(|context| context.cursor_byte),
+        Some(expected_caret)
+    );
+}
+
+fn plan_rendered_edit(request: EditRequest) -> (MarkdownEditorView, EditPlan, usize) {
+    let mut view = MarkdownEditorView::new();
+    view.set_source(EDIT_SOURCE.into(), SOURCE_GENERATION);
+    view.engine.handle_set_cursor_byte(request.cursor_byte);
+    render(&mut view);
+    let (plan, parses) = count_parses(|| view.edit_policy().plan_edit(&request));
+    (view, plan, parses)
+}
+
+#[test]
+fn ordinary_insert_uses_default_without_parsing_after_layout() {
+    let caret = "普通".len();
+    let (mut view, plan, parses) = plan_rendered_edit(EditRequest {
+        source_generation: SOURCE_GENERATION,
+        cursor_byte: caret,
+        selection: None,
+        intent: EditIntent::InsertText("新".into()),
+    });
+    assert_eq!(parses, 0);
+    assert_eq!(plan, EditPlan::UseDefault);
+    let caret_after = "普通新".len();
+    let transaction =
+        EditTransaction::replace(SOURCE_GENERATION, caret..caret, "新".into(), caret_after);
+    assert_committed_edit(&mut view, transaction, "普通新段落\n\n| first | second |", caret_after);
+}
+
+#[test]
+fn selection_replacement_plans_and_commits_against_the_same_source() {
+    let selection = 0.."普通段落".len();
+    let (mut view, plan, parses) = plan_rendered_edit(EditRequest {
+        source_generation: SOURCE_GENERATION,
+        cursor_byte: selection.end,
+        selection: Some(selection.clone()),
+        intent: EditIntent::InsertText(" 新".into()),
+    });
+    assert_eq!(parses, 2);
+
+    let replacement = "\u{a0}新\n";
+    let caret_after = "\u{a0}新".len();
+    let EditPlan::Apply(transaction) = plan else {
+        panic!("leading space must be protected when replacing a paragraph selection: {plan:?}");
+    };
+    assert_eq!(
+        transaction,
+        EditTransaction::replace(SOURCE_GENERATION, selection, replacement.into(), caret_after)
+    );
+    assert_committed_edit(&mut view, transaction, "\u{a0}新\n\n\n| first | second |", caret_after);
 }
 
 #[test]
@@ -29,24 +117,31 @@ fn source_snapshot_shares_text_between_editor_and_engine() {
 
 #[test]
 fn table_enter_parses_only_the_candidate_after_layout() {
-    let mut view = MarkdownEditorView::new();
-    let source = "| first | second |";
-    view.set_source(source.into(), 1);
-    view.engine.handle_set_cursor_byte(source.len());
-    render(&mut view);
+    let caret = EDIT_SOURCE.len();
+    let (mut view, plan, parses) = plan_rendered_edit(EditRequest {
+        source_generation: SOURCE_GENERATION,
+        cursor_byte: caret,
+        selection: None,
+        intent: EditIntent::InsertParagraphBreak,
+    });
+    assert_eq!(parses, 1);
 
-    MARKDOWN_PARSE_COUNT.with(|count| count.set(0));
-    let plan = ui::plugin::EditPolicy::plan_edit(
-        &view,
-        &ui::plugin::EditRequest {
-            source_generation: 1,
-            cursor_byte: source.len(),
-            selection: None,
-            intent: ui::plugin::EditIntent::InsertParagraphBreak,
-        },
+    let header_start = "普通段落\n\n".len();
+    let expected_source = "普通段落\n\n| first | second |\n| --- | --- |\n|  |  |";
+    let caret_after = "普通段落\n\n| first | second |\n| --- | --- |\n| ".len();
+    let EditPlan::Apply(transaction) = plan else {
+        panic!("table Enter must create a table transaction");
+    };
+    assert_eq!(
+        transaction,
+        EditTransaction::replace(
+            SOURCE_GENERATION,
+            header_start..caret,
+            expected_source[header_start..].into(),
+            caret_after,
+        )
     );
-    assert!(matches!(plan, ui::plugin::EditPlan::Apply(_)));
-    assert_eq!(MARKDOWN_PARSE_COUNT.with(std::cell::Cell::get), 1);
+    assert_committed_edit(&mut view, transaction, expected_source, caret_after);
 }
 
 #[test]
@@ -204,7 +299,7 @@ fn semantic_edit_query_rejects_stale_snapshot() {
 #[test]
 fn layout_reflow_reuses_the_current_source_parse() {
     let mut view = MarkdownEditorView::new();
-    view.set_source("First paragraph\n\nSecond paragraph".into(), 1);
+    view.set_source(EDIT_SOURCE.into(), SOURCE_GENERATION);
     render(&mut view);
 
     MARKDOWN_PARSE_COUNT.with(|count| count.set(0));

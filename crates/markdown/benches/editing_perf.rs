@@ -1,10 +1,24 @@
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{
+    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
+};
+use shaping::Shaper;
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::ops::Range;
+use textora_core::document::{DocView, DocViewMut, StringDocView};
 use textora_markdown::augmenter::augment_edit;
 use textora_markdown::builder::MarkdownDoc;
 use textora_markdown::layout::layout_doc_for_rendering;
 use textora_markdown::parser::parse_markdown;
 use textora_markdown::style::MarkdownStyle;
-use ui::plugin::AugmentKind;
+use textora_markdown::view::MarkdownEditorView;
+use ui::Rect;
+use ui::core::DrawList;
+use ui::plugin::{
+    AugmentKind, EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, PluginMessage,
+    ViewPlugin,
+};
+use ui::theme::Theme;
 
 const VIEWPORT_WIDTH: f32 = 720.0;
 const MIXED_DOCUMENT_SIZES_KIB: &[usize] = &[5, 22, 87, 218];
@@ -112,9 +126,199 @@ fn benchmark_long_paragraph_layout(criterion: &mut Criterion) {
     group.finish();
 }
 
+const VIEWPORT_HEIGHT: f32 = 600.0;
+const REFLOWED_VIEWPORT_WIDTH: f32 = 540.0;
+const DPI_SCALE: f32 = 1.0;
+const INITIAL_GENERATION: u32 = 1;
+const INSERTED_TEXT: &str = "中";
+const TABLE_HEADER: &str = "| 名称 | 说明 |";
+
+// The plugin accepts a mutable viewport when receiving cursor messages.
+struct BenchmarkDocument<'a>(StringDocView<'a>);
+
+impl DocView for BenchmarkDocument<'_> {
+    fn line_count(&self) -> usize {
+        self.0.line_count()
+    }
+
+    fn doc_line_text(&self, line: usize) -> Cow<'_, str> {
+        self.0.doc_line_text(line)
+    }
+
+    fn doc_text_in_range(&self, range: Range<usize>) -> Cow<'_, str> {
+        self.0.doc_text_in_range(range)
+    }
+
+    fn line_byte_offset(&self, line: usize) -> usize {
+        self.0.line_byte_offset(line)
+    }
+
+    fn line_byte_length(&self, line: usize) -> usize {
+        self.0.line_byte_length(line)
+    }
+
+    fn scroll_y(&self) -> f32 {
+        self.0.scroll_y()
+    }
+
+    fn viewport_height(&self) -> f32 {
+        VIEWPORT_HEIGHT
+    }
+}
+
+impl DocViewMut for BenchmarkDocument<'_> {}
+
+struct EditorFrame {
+    view: MarkdownEditorView,
+    source: String,
+}
+
+impl EditorFrame {
+    fn prepare(source: &str, caret: usize, theme: &Theme, shaper: &mut Shaper) -> Self {
+        let mut frame = Self { view: MarkdownEditorView::new(), source: source.to_owned() };
+        frame.view.set_source(source.to_owned(), INITIAL_GENERATION);
+        frame.set_caret(caret);
+        black_box(frame.draw(VIEWPORT_WIDTH, theme, shaper));
+        frame
+    }
+
+    fn set_caret(&mut self, caret: usize) {
+        let mut document = BenchmarkDocument(StringDocView::new(&self.source));
+        self.view.handle_message(PluginMessage::SetCursorByte(caret), &mut document);
+    }
+
+    fn draw(&mut self, width: f32, theme: &Theme, shaper: &mut Shaper) -> DrawList {
+        let document = StringDocView::new(&self.source);
+        let bounds = Rect::new(0.0, 0.0, width, VIEWPORT_HEIGHT);
+        self.view.render(&document, bounds, theme, shaper, DPI_SCALE)
+    }
+
+    fn apply_edit(&mut self, request: &EditRequest) {
+        let plan = self.view.edit_policy().plan_edit(request);
+        let transaction = match (plan, &request.intent) {
+            (EditPlan::Apply(transaction), _) => transaction,
+            (EditPlan::UseDefault, EditIntent::InsertText(text)) => EditTransaction::replace(
+                request.source_generation,
+                request.cursor_byte..request.cursor_byte,
+                text.clone(),
+                request.cursor_byte + text.len(),
+            ),
+            (plan, _) => panic!("editor benchmark expected a text replacement: {plan:?}"),
+        };
+        for replacement in transaction.replacements.into_iter().rev() {
+            self.source.replace_range(replacement.range, &replacement.text);
+        }
+        let EditSelection::Caret(caret) = transaction.selection_after else {
+            panic!("editor benchmark expected a caret after the replacement");
+        };
+        self.view.set_source(self.source.clone(), transaction.source_generation + 1);
+        self.set_caret(caret);
+    }
+}
+
+fn benchmark_editor_insert(
+    criterion: &mut Criterion,
+    group_name: &str,
+    sizes_kib: &[usize],
+    source_for_size: fn(usize) -> String,
+    insertion_caret: fn(&str) -> usize,
+) {
+    let mut group = criterion.benchmark_group(group_name);
+    let theme = ui::theme::test_theme();
+    let shaper = RefCell::new(Shaper::new().expect("benchmark font shaper must initialize"));
+    for &size_kib in sizes_kib {
+        let source = source_for_size(size_kib * 1024);
+        let caret = insertion_caret(&source);
+        let request = EditRequest {
+            source_generation: INITIAL_GENERATION,
+            cursor_byte: caret,
+            selection: None,
+            intent: EditIntent::InsertText(INSERTED_TEXT.into()),
+        };
+        group.throughput(Throughput::Bytes(source.len() as u64));
+        group.bench_function(BenchmarkId::new("insert", size_kib), |bencher| {
+            bencher.iter_batched_ref(
+                || EditorFrame::prepare(&source, caret, &theme, &mut shaper.borrow_mut()),
+                |frame| {
+                    frame.apply_edit(&request);
+                    frame.draw(VIEWPORT_WIDTH, &theme, &mut shaper.borrow_mut())
+                },
+                BatchSize::PerIteration,
+            );
+        });
+        group.bench_function(BenchmarkId::new("reflow", size_kib), |bencher| {
+            bencher.iter_batched_ref(
+                || EditorFrame::prepare(&source, caret, &theme, &mut shaper.borrow_mut()),
+                |frame| frame.draw(REFLOWED_VIEWPORT_WIDTH, &theme, &mut shaper.borrow_mut()),
+                BatchSize::PerIteration,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn benchmark_editor_table_enter(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("markdown_editor_mixed");
+    let theme = ui::theme::test_theme();
+    let shaper = RefCell::new(Shaper::new().expect("benchmark font shaper must initialize"));
+    for &size_kib in MIXED_DOCUMENT_SIZES_KIB {
+        let source = format!(
+            "{TABLE_HEADER}
+
+{}",
+            mixed_document(size_kib * 1024)
+        );
+        let caret = TABLE_HEADER.len();
+        let request = EditRequest {
+            source_generation: INITIAL_GENERATION,
+            cursor_byte: caret,
+            selection: None,
+            intent: EditIntent::InsertParagraphBreak,
+        };
+        group.throughput(Throughput::Bytes(source.len() as u64));
+        group.bench_function(BenchmarkId::new("table_enter", size_kib), |bencher| {
+            bencher.iter_batched_ref(
+                || EditorFrame::prepare(&source, caret, &theme, &mut shaper.borrow_mut()),
+                |frame| {
+                    frame.apply_edit(&request);
+                    frame.draw(VIEWPORT_WIDTH, &theme, &mut shaper.borrow_mut())
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn benchmark_editor_view(criterion: &mut Criterion) {
+    benchmark_editor_insert(
+        criterion,
+        "markdown_editor_mixed",
+        MIXED_DOCUMENT_SIZES_KIB,
+        mixed_document,
+        |source| {
+            let paragraph = "这是包含";
+            let (start, _) = source
+                .match_indices(paragraph)
+                .min_by_key(|(start, _)| start.abs_diff(source.len() / 2))
+                .expect("mixed benchmark fixtures contain a body paragraph");
+            start + paragraph.len()
+        },
+    );
+    benchmark_editor_insert(
+        criterion,
+        "markdown_editor_long_cjk",
+        LONG_PARAGRAPH_SIZES_KIB,
+        long_cjk_paragraph,
+        |source| floor_char_boundary(source, source.len() / 2),
+    );
+    benchmark_editor_table_enter(criterion);
+}
+
 criterion_group!(
     editing_benches,
     benchmark_mixed_document_editing,
-    benchmark_long_paragraph_layout
+    benchmark_long_paragraph_layout,
+    benchmark_editor_view
 );
 criterion_main!(editing_benches);
