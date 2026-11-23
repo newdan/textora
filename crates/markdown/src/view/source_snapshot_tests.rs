@@ -1,4 +1,4 @@
-use super::{MarkdownEditorView, PluginQuery, PluginResponse, ViewPlugin};
+use super::{MarkdownEditorView, MarkdownView, PluginQuery, PluginResponse, ViewPlugin};
 use crate::parser::MARKDOWN_PARSE_COUNT;
 use textora_core::document::StringDocView;
 
@@ -120,6 +120,85 @@ fn host_queries_use_the_current_snapshot_parse() {
         PluginResponse::None
     ));
     assert_eq!(MARKDOWN_PARSE_COUNT.with(std::cell::Cell::get), 0);
+}
+
+#[test]
+fn editor_snapshot_requires_initial_generation_zero_sync() {
+    let mut view = MarkdownEditorView::new();
+    let source = "| first | second |\n| --- | --- |\n| left | right |";
+    let doc = StringDocView::new(source);
+    let table_query =
+        || PluginQuery::TableStructureCapabilities { source_generation: 0, cursor_byte: 2 };
+
+    assert!(matches!(view.query(table_query(), &doc), PluginResponse::None));
+    assert!(matches!(
+        view.query(PluginQuery::SourceSpacingProtectedRanges { source_generation: 0 }, &doc),
+        PluginResponse::None
+    ));
+    assert!(matches!(
+        view.query(PluginQuery::NeedsSourceUpdate(0), &doc),
+        PluginResponse::Bool(true)
+    ));
+
+    view.set_source(source.into(), 0);
+
+    assert!(matches!(
+        view.query(table_query(), &doc),
+        PluginResponse::TableStructureCapabilities(Some(_))
+    ));
+    assert!(matches!(
+        view.query(PluginQuery::NeedsSourceUpdate(0), &doc),
+        PluginResponse::Bool(false)
+    ));
+}
+
+#[test]
+fn preview_snapshot_requires_initial_generation_zero_sync() {
+    let mut view = MarkdownView::new();
+    let source = "`inline code`";
+    let doc = StringDocView::new(source);
+    let spacing_query = || PluginQuery::SourceSpacingProtectedRanges { source_generation: 0 };
+
+    assert!(matches!(view.query(spacing_query(), &doc), PluginResponse::None));
+    assert!(matches!(
+        view.query(PluginQuery::NeedsSourceUpdate(0), &doc),
+        PluginResponse::Bool(true)
+    ));
+
+    view.set_source(source.into(), 0);
+
+    assert!(matches!(
+        view.query(spacing_query(), &doc),
+        PluginResponse::SourceSpacingProtectedRanges(ranges) if !ranges.is_empty()
+    ));
+    assert!(matches!(
+        view.query(PluginQuery::NeedsSourceUpdate(0), &doc),
+        PluginResponse::Bool(false)
+    ));
+}
+
+#[test]
+fn semantic_edit_query_rejects_stale_snapshot() {
+    use ui::plugin::{SemanticEditCommand, SemanticEditPlan};
+
+    let mut view = MarkdownEditorView::new();
+    view.set_source("old".into(), 1);
+    let doc = StringDocView::new("new");
+    let query = || PluginQuery::PlanSemanticEdit {
+        command: SemanticEditCommand::SetHeadingLevel(2),
+        source_generation: 2,
+        cursor_byte: 0,
+        selection: None,
+    };
+
+    assert!(matches!(view.query(query(), &doc), PluginResponse::None));
+
+    view.set_source("new".into(), 2);
+
+    assert!(
+        matches!(view.query(query(), &doc), PluginResponse::SemanticEdit(SemanticEditPlan::Apply(transaction))
+        if transaction.replacements[0].text == "## new")
+    );
 }
 
 #[test]

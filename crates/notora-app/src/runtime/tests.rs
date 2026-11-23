@@ -3984,6 +3984,66 @@ fn editor_runtime_routes_text_markdown_and_mindmap_documents_to_product_plugins(
 }
 
 #[test]
+fn switching_back_to_mindmap_after_reload_refreshes_reused_generation() {
+    use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MINDMAP};
+    use ui::theme::MindmapThemeSelection;
+
+    const PATH: &str = "diagram.mmap.md";
+    const ORIGINAL_SOURCE: &str = "```toml mindmap\ntheme = \"warm-night\"\n```\n# Original\n";
+    const RELOADED_SOURCE: &str = "```toml mindmap\ntheme = \"dawn\"\n```\n# Reloaded\n";
+    let mut app = app();
+    let (identity, tab_id) = install_registered_note(&mut app, PATH, ORIGINAL_SOURCE);
+    let editor = app.document_runtime.editor_mut();
+    let tab = editor.tab_session(tab_id).expect("mindmap tab should be installed");
+    assert_eq!(tab.plugin_name(), PLUGIN_MINDMAP);
+    assert_eq!(tab.mindmap_theme_selection(), MindmapThemeSelection::Selected("warm-night".into()));
+    let generation = tab.document.generation();
+    let content_revision = tab.document.content_revision();
+    editor.switch_active_plugin();
+    assert_eq!(
+        editor.tab_session(tab_id).expect("source tab should exist").plugin_name(),
+        PLUGIN_EDITOR
+    );
+
+    app.document_runtime.complete_conflict_reload(
+        identity,
+        tab_id,
+        content_revision,
+        LoadedDocument { path: PATH.into(), contents: RELOADED_SOURCE.into(), disk_revision: None },
+    );
+
+    let editor = app.document_runtime.editor_mut();
+    let tab = editor.tab_session(tab_id).expect("reloaded tab should exist");
+    assert!(tab.document.full_text().contains("# Reloaded"));
+    assert_eq!(tab.document.generation(), generation);
+
+    editor.switch_active_plugin();
+
+    let tab = editor.tab_session(tab_id).expect("restored mindmap tab should exist");
+    assert_eq!(tab.plugin_name(), PLUGIN_MINDMAP);
+    assert_eq!(tab.mindmap_theme_selection(), MindmapThemeSelection::Selected("dawn".into()));
+}
+
+#[test]
+fn semantic_edit_refreshes_stale_plugin_source_before_planning() {
+    use appkit_shell::editor_runtime::SemanticEditResult;
+    use ui::plugin::SemanticEditCommand;
+
+    let mut app = app();
+    let (_, tab_id) = install_registered_note(&mut app, "note.md", "old");
+    let editor = app.document_runtime.editor_mut();
+    let tab = editor.tab_session_mut(tab_id).expect("Markdown tab should be installed");
+    // Change the document without sending UpdateSource to the active plugin.
+    tab.document.replace_range(0.."old".len(), "new");
+
+    let (result, _) = editor.execute_semantic_edit(SemanticEditCommand::SetHeadingLevel(2));
+
+    assert_eq!(result, SemanticEditResult::Applied);
+    let tab = editor.tab_session(tab_id).expect("edited Markdown tab should exist");
+    assert_eq!(tab.document.full_text(), "## new");
+}
+
+#[test]
 fn open_document_sender_routes_system_paths_through_product_inbox() {
     let directory = tempfile::tempdir().expect("external fixture directory should exist");
     let path = directory.path().join("architecture.md");

@@ -8,7 +8,7 @@ use super::*;
 pub struct MarkdownEditorView {
     pub(in crate::view) engine: PreviewEngine,
     pub(in crate::view) source: SourceSnapshot,
-    pub(in crate::view) cached_generation: u32,
+    pub(in crate::view) cached_generation: Option<u32>,
     pub(in crate::view) split_history: std::cell::RefCell<split_history::SplitHistory>,
 }
 
@@ -23,13 +23,13 @@ impl MarkdownEditorView {
         let mut engine = PreviewEngine::new();
         let source = MarkdownSource::snapshot(String::new());
         engine.edit_source = Some(source.clone());
-        Self { engine, source, cached_generation: 0, split_history: Default::default() }
+        Self { engine, source, cached_generation: None, split_history: Default::default() }
     }
 
     pub fn set_source(&mut self, text: String, generation: u32) {
         self.split_history.get_mut().synchronize(&self.source, &text);
         let text_changed = self.source.as_str() != text;
-        let source_changed = text_changed || generation != self.cached_generation;
+        let source_changed = text_changed || self.needs_source_update(generation);
         if source_changed {
             self.engine.set_preedit_text(String::new(), None);
         }
@@ -39,14 +39,14 @@ impl MarkdownEditorView {
             self.engine.mark_source_dirty();
         }
         self.engine.set_source_generation(generation);
-        self.cached_generation = generation;
+        self.cached_generation = Some(generation);
         if source_changed {
             self.engine.prepare_current_source_layout(&self.source);
         }
     }
 
     pub fn needs_source_update(&self, generation: u32) -> bool {
-        generation != self.cached_generation
+        self.cached_generation != Some(generation)
     }
 
     pub fn engine(&self) -> &PreviewEngine {
@@ -157,7 +157,7 @@ fn selection_augmentation_edit_plan(
 impl ui::plugin::EditPolicy for MarkdownEditorView {
     fn plan_edit(&self, request: &ui::plugin::EditRequest) -> ui::plugin::EditPlan {
         self.split_history.borrow_mut().begin_request();
-        if request.source_generation != self.cached_generation {
+        if self.needs_source_update(request.source_generation) {
             return ui::plugin::EditPlan::UseDefault;
         }
         // 零宽选区视为无选区。
@@ -541,7 +541,7 @@ impl ViewPlugin for MarkdownEditorView {
         }
         match q {
             PluginQuery::SourceSpacingProtectedRanges { source_generation }
-                if source_generation == self.cached_generation =>
+                if !self.needs_source_update(source_generation) =>
             {
                 PluginResponse::SourceSpacingProtectedRanges(
                     self.source.source_spacing_protected_ranges(),
@@ -571,13 +571,13 @@ impl ViewPlugin for MarkdownEditorView {
                 active_idx,
                 match_color,
                 inactive_color,
-            } => PluginResponse::DrawList(if source_generation == self.cached_generation {
+            } => PluginResponse::DrawList(if !self.needs_source_update(source_generation) {
                 self.source_search_highlights(&matches, active_idx, match_color, inactive_color)
             } else {
                 DrawList::new()
             }),
             PluginQuery::TableStructureCapabilities { source_generation, cursor_byte }
-                if source_generation == self.cached_generation =>
+                if !self.needs_source_update(source_generation) =>
             {
                 PluginResponse::TableStructureCapabilities(
                     crate::commands::snapshot_table_capabilities(&self.source, cursor_byte),
@@ -588,13 +588,15 @@ impl ViewPlugin for MarkdownEditorView {
                 source_generation,
                 cursor_byte,
                 selection,
-            } => PluginResponse::SemanticEdit(crate::commands::plan_semantic_source(
-                &self.source,
-                source_generation,
-                cursor_byte,
-                selection,
-                command,
-            )),
+            } if !self.needs_source_update(source_generation) => {
+                PluginResponse::SemanticEdit(crate::commands::plan_semantic_source(
+                    &self.source,
+                    source_generation,
+                    cursor_byte,
+                    selection,
+                    command,
+                ))
+            }
             _ => PluginResponse::None,
         }
     }

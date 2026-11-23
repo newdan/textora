@@ -6,7 +6,7 @@ use super::*;
 pub struct MarkdownView {
     pub(in crate::view) engine: PreviewEngine,
     pub(in crate::view) source: SourceSnapshot,
-    pub(in crate::view) cached_generation: u32,
+    pub(in crate::view) cached_generation: Option<u32>,
 }
 
 impl Default for MarkdownView {
@@ -20,7 +20,7 @@ impl MarkdownView {
         Self {
             engine: PreviewEngine::new(),
             source: MarkdownSource::snapshot(String::new()),
-            cached_generation: 0,
+            cached_generation: None,
         }
     }
 
@@ -30,11 +30,11 @@ impl MarkdownView {
             self.engine.mark_source_dirty();
         }
         self.engine.set_source_generation(generation);
-        self.cached_generation = generation;
+        self.cached_generation = Some(generation);
     }
 
     pub fn needs_source_update(&self, generation: u32) -> bool {
-        generation != self.cached_generation
+        self.cached_generation != Some(generation)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -177,7 +177,7 @@ impl ViewPlugin for MarkdownView {
         }
         match q {
             PluginQuery::SourceSpacingProtectedRanges { source_generation }
-                if source_generation == self.cached_generation =>
+                if !self.needs_source_update(source_generation) =>
             {
                 PluginResponse::SourceSpacingProtectedRanges(
                     self.source.source_spacing_protected_ranges(),

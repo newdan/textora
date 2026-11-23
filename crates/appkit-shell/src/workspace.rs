@@ -328,36 +328,19 @@ impl Workspace {
     pub fn switch_plugin_with_runtime(
         &mut self,
         runtime_store: &mut crate::tab_runtime::TabRuntimeStore,
-    ) {
+    ) -> Option<TabId> {
         let active_idx = self.model.active_index();
-        if active_idx >= self.model.len() {
-            return;
-        }
-        let path = match self.model.entries()[active_idx].value.file_path.clone() {
-            Some(path) => path,
-            None => return,
-        };
-        let route = match self.view_routes.resolve(&path).copied() {
-            Some(route) => route,
-            None => return,
-        };
+        let entry = self.model.entries().get(active_idx)?;
+        let path = entry.value.file_path.as_deref()?;
+        let route = self.view_routes.resolve(path)?;
         let default_plugin = route.default_plugin;
-        let toggle_target = match route.toggle_target {
-            Some(toggle_target) => toggle_target,
-            None => return,
-        };
-        let tab_id = self.model.entries()[active_idx].id;
-        let current_name = match runtime_store.get(tab_id) {
-            Some(runtime) => runtime.plugin.name().to_string(),
-            None => return,
-        };
-        let is_default = current_name == default_plugin;
+        let toggle_target = route.toggle_target?;
+        let tab_id = entry.id;
+        let runtime = runtime_store.get_mut(tab_id)?;
+        let is_default = runtime.plugin.name() == default_plugin;
         let plugin_name = if is_default { toggle_target } else { default_plugin };
         let replacement = self.registry.create_by_name(plugin_name, Box::new(EditorPlugin::new()));
 
-        let Some(runtime) = runtime_store.get_mut(tab_id) else {
-            return;
-        };
         let document = &mut self.model.entries_mut()[active_idx].value;
         let mut session = crate::tab_session::TabSessionMut::new(tab_id, document, runtime);
         if is_default {
@@ -365,6 +348,7 @@ impl Workspace {
         } else if !session.restore_cached_toggle_source() {
             session.replace_plugin(replacement);
         }
+        Some(tab_id)
     }
 
     /// 返回当前 tab 的切换目标视图名。None 表示不可切换。

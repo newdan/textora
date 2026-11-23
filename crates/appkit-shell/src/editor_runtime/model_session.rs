@@ -641,6 +641,7 @@ impl ModelSession {
             );
         }
 
+        self.synchronize_plugin_source_if_stale(tab_id);
         let structural_intent = match &command {
             ui::plugin::SemanticEditCommand::PromoteObject => {
                 Some(ui::plugin::EditIntent::PromoteObject)
@@ -946,13 +947,9 @@ impl ModelSession {
     }
 
     pub(crate) fn switch_active_plugin(&mut self) {
-        self.workspace.switch_plugin_with_runtime(&mut self.runtimes);
-        if let Some(tab_id) = self.active_tab_id()
-            && let Some(mut tab) = self.tab_session_mut(tab_id)
-            && tab.plugin_name() == ui::plugin::PLUGIN_MARKDOWN_EDITOR
-        {
-            // The source editor can reuse a buffer generation after undo and a new edit.
-            synchronize_plugin_source(&mut tab);
+        if let Some(tab_id) = self.workspace.switch_plugin_with_runtime(&mut self.runtimes) {
+            // Undo or a reload can reuse a cached plugin's generation with different text.
+            self.synchronize_plugin_source(tab_id);
         }
         debug_assert_eq!(self.workspace.tab_ids(), self.runtimes.ids());
     }
