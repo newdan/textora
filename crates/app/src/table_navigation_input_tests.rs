@@ -32,7 +32,7 @@ fn markdown_table_tabs_navigate_cells_respect_ime_and_preserve_enter_navigation(
     let source = "| head | other |\n| --- | --- |\n| one | two |\n| three | four |\n\noutside";
     std::fs::write(&path, source).expect("table navigation fixture should be writable");
     let mut app = App::new(None);
-    app.open_file(&path).expect("Markdown fixture should open");
+    let _ = app.open_file(&path).expect("Markdown fixture should open");
 
     let first_cell = source.find("one").expect("first body cell should exist");
     let next_cell = source.find("two").expect("next body cell should exist");

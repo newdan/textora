@@ -4,7 +4,7 @@ use std::path::Path;
 
 use appkit_core::workspace::types::TabId;
 
-use crate::cursor_motion::{CursorContext, PageDirection};
+use crate::cursor_motion::PageDirection;
 use crate::edit_transaction::{build_edit_request, default_edit_plan, execute_edit_plan};
 use crate::editor_runtime::{
     CloseConfirmation, DocumentTextEditError, DocumentTextReplacement, DocumentTextSnapshot,
@@ -13,7 +13,7 @@ use crate::editor_runtime::{
 };
 use crate::input_mapper::EditCommand;
 use crate::prepared_tab::{PreparedTab, placeholder_display_entries};
-use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
+use crate::tab_runtime::{DocumentEditingAccess, TabRuntime, TabRuntimeStore};
 use crate::tab_session::{TabSession, TabSessionMut};
 use crate::view_route::ViewRouteTable;
 use crate::workspace::{CloseTabDecision, Workspace, WorkspaceEffect};
@@ -289,18 +289,16 @@ impl ModelSession {
         }
         let previous_revision = tab.document.content_revision();
         let previous_dirty = tab.document.dirty;
-        let advance_cache = tab.take_advance_cache();
-        let mut presentation = tab.take_presentation();
-        let page_step = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
-        let edit = crate::editor_commands::execute_edit_command_with_system_clipboard(
-            command,
-            tab.document,
-            &advance_cache,
-            &mut presentation.cursor_render_state,
-            page_step,
-        );
-        tab.restore_presentation(presentation);
-        tab.restore_advance_cache(advance_cache);
+        let edit = tab.with_presentation(|document, presentation| {
+            let page_step = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
+            crate::editor_commands::execute_edit_command_with_system_clipboard(
+                command,
+                document,
+                &presentation.display.advance_cache,
+                &mut presentation.cursor_render_state,
+                page_step,
+            )
+        });
         if !edit.executed {
             return EditorOutcome::default();
         }
@@ -337,6 +335,26 @@ impl ModelSession {
             .unwrap_or_default()
     }
 
+    pub(crate) fn apply_active_document_edit_transaction(
+        &mut self,
+        transaction: ui::plugin::EditTransaction,
+        line_height: f32,
+    ) -> EditorOutcome {
+        self.active_tab_id()
+            .and_then(|tab_id| {
+                let mut tab = self.tab_session_mut(tab_id)?;
+                if tab.runtime.editing_access() != DocumentEditingAccess::Editable {
+                    return None;
+                }
+                Self::apply_edit_to_tab(
+                    &mut tab,
+                    ui::plugin::EditPlan::Apply(transaction),
+                    line_height,
+                )
+            })
+            .unwrap_or_default()
+    }
+
     fn apply_session_edit(
         &mut self,
         tab_id: TabId,
@@ -347,6 +365,14 @@ impl ModelSession {
         if !tab.allows_editing() {
             return None;
         }
+        Self::apply_edit_to_tab(&mut tab, plan, line_height)
+    }
+
+    fn apply_edit_to_tab(
+        tab: &mut TabSessionMut<'_>,
+        plan: ui::plugin::EditPlan,
+        line_height: f32,
+    ) -> Option<EditorOutcome> {
         let previous_revision = tab.document.content_revision();
         let previous_dirty = tab.document.dirty;
         let previous_anchor = tab.document.cursor().selection_anchor;
@@ -355,14 +381,14 @@ impl ModelSession {
         if !edit.edit_outcome.executed && !edit.cursor_moved && !selection_changed {
             return Some(EditorOutcome::default());
         }
-        refresh_transaction_presentation(&mut tab, &edit.edit_outcome, line_height);
+        refresh_transaction_presentation(tab, &edit.edit_outcome, line_height);
         if edit.content_revision != previous_revision {
-            synchronize_plugin_source(&mut tab);
+            synchronize_plugin_source(tab);
         } else {
-            synchronize_plugin_caret(&mut tab);
+            synchronize_plugin_caret(tab);
         }
         let mut outcome = edit_outcome(
-            tab_id,
+            tab.id,
             previous_revision,
             previous_dirty,
             edit.content_revision,
@@ -472,26 +498,12 @@ impl ModelSession {
         let display_map = tab.display_map_clone();
         let previous_visual_line = tab.cursor_visual_line();
         let previous_document_line = tab.document.cursor_line();
-        let advance_cache = tab.take_advance_cache();
-        let context = CursorContext {
-            display_map: &display_map,
-            cursor_visual_line: previous_visual_line,
-            advance_cache: &advance_cache,
-            first_line: &frame_cache.first_line,
-            last_line: &frame_cache.last_line,
-            visible_rows: tab.visible_rows(),
-            first_visible_row: tab.display().viewport.first_visible_row(),
-            scroll_top: tab.scroll_top(),
-            sticky_x: tab.cursor_render_state().sticky_x,
-            dpi_scale,
-        };
         if extend_selection {
             tab.document.ensure_selection_active();
         } else {
             tab.document.cursor_mut().selection_anchor = None;
         }
-        tab.move_cursor_visual(delta, context);
-        tab.restore_advance_cache(advance_cache);
+        tab.move_cursor_visual(delta, &display_map, frame_cache, dpi_scale);
         tab.ensure_cursor_visible(line_height);
         // A wrapped line can extend past the viewport without crossing a document line.
         if delta > 0

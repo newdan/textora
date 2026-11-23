@@ -197,8 +197,6 @@ fn render_engine(
     shaper: &mut shaping::Shaper,
     dpi_scale: f32,
 ) -> DrawList {
-    #[cfg(debug_assertions)]
-    let render_started_at = std::time::Instant::now();
     let settings = MarkdownRenderSettings {
         font_family: &engine.base_font_family,
         font_size: engine.base_font_size * dpi_scale,
@@ -223,18 +221,6 @@ fn render_engine(
         true,  // editing keeps whole-document flat lines for selection/navigation.
         false, // precise shaping/highlighting stays viewport-driven for responsiveness.
     );
-    #[cfg(debug_assertions)]
-    {
-        let render_duration_us = render_started_at.elapsed().as_micros();
-        let _ =
-            std::fs::OpenOptions::new().create(true).append(true).open("/tmp/perf.log").and_then(
-                |mut f| {
-                    use std::io::Write;
-                    writeln!(f, "[md render] {} us", render_duration_us)
-                },
-            );
-        println!("[md render] {} us", render_duration_us);
-    }
     draw_empty_heading_placeholder(engine, &mut dl, bounds, &style, shaper);
     draw_standalone_preedit(engine, &mut dl, bounds, theme, shaper);
     // Draw cursor at the WYSIWYG position (only when blink phase is visible)

@@ -1,4 +1,4 @@
-//! Markdown rendering for edit+.
+//! Markdown rendering for textora.
 
 pub mod augmenter;
 pub mod builder;

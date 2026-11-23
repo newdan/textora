@@ -17,7 +17,7 @@ use crate::ignore::{
     IgnoreRequest, IgnoreResponse, append_managed_ignore_block, repair_managed_ignore_block,
 };
 use crate::{ApiKey, DeviceId, FolderId, FolderPhase, FolderStatus, LoopbackEndpoint, SyncError};
-use crate::{EventCursor, RemoteEvent, SyncEvent, SyncEventKind, reduce_event_batch};
+use crate::{EventBatch, EventCursor, RemoteEvent, SyncEvent, SyncEventKind, reduce_event_batch};
 
 const API_KEY_HEADER: &str = "X-API-Key";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -300,6 +300,14 @@ impl SyncthingClient {
         cursor: EventCursor,
         timeout_seconds: u16,
     ) -> Result<Vec<SyncEvent>, SyncError> {
+        Ok(self.event_batch_since(cursor, timeout_seconds)?.events)
+    }
+
+    pub(crate) fn event_batch_since(
+        &self,
+        cursor: EventCursor,
+        timeout_seconds: u16,
+    ) -> Result<EventBatch, SyncError> {
         let mut url = self.endpoint.join("/rest/events")?;
         url.query_pairs_mut()
             .append_pair("since", &cursor.0.to_string())
@@ -309,7 +317,7 @@ impl SyncthingClient {
             .into_iter()
             .map(|event| RemoteEvent { id: event.id, kind: event_kind(&event.event_type) })
             .collect();
-        Ok(reduce_event_batch(cursor, remote_events).events)
+        Ok(reduce_event_batch(cursor, remote_events))
     }
 
     pub fn folder_status(&self, folder: &FolderId) -> Result<FolderStatus, SyncError> {
@@ -814,6 +822,45 @@ mod tests {
         );
         let requests = server.join();
         assert!(requests[0].starts_with("GET /rest/events?since=4&timeout=30 HTTP/1.1"));
+    }
+
+    #[test]
+    fn service_advances_past_unknown_events_and_forward_gaps() {
+        let server = MockServer::start(vec![
+            (200, r#"[{"id":1,"type":"NewFutureEvent","data":{}}]"#.to_owned()),
+            (200, r#"[{"id":3,"type":"FolderStateChanged","data":{}}]"#.to_owned()),
+            (200, r#"[{"id":4,"type":"FolderStateChanged","data":{}}]"#.to_owned()),
+        ]);
+        let client = SyncthingClient::new(
+            server.endpoint.clone(),
+            ApiKey::new("test-api-key".to_owned()).expect("test key should parse"),
+        )
+        .expect("client should build");
+        let (wake_sender, wake_receiver) = std::sync::mpsc::channel();
+        let service = crate::SyncService::spawn(client, move || {
+            let _ = wake_sender.send(());
+        });
+        service
+            .submit(crate::SyncCommand::Subscribe { cursor: EventCursor(0) })
+            .expect("subscription should submit");
+
+        let receive_event = || {
+            wake_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("event worker should wake");
+            service.try_recv_event().expect("wake must publish a sync event")
+        };
+        assert_eq!(receive_event(), SyncEvent::FullRefreshRequired);
+        assert_eq!(
+            receive_event(),
+            SyncEvent::Remote { id: 4, kind: SyncEventKind::FolderStateChanged },
+        );
+        service.shutdown();
+
+        let requests = server.join();
+        assert!(requests[0].starts_with("GET /rest/events?since=0&timeout=1 "));
+        assert!(requests[1].starts_with("GET /rest/events?since=1&timeout=1 "));
+        assert!(requests[2].starts_with("GET /rest/events?since=3&timeout=1 "));
     }
 
     #[test]

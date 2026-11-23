@@ -438,6 +438,7 @@ impl DocumentRuntime {
         self.pending_metadata_generations.clear();
         self.pending_metadata_mutations.clear();
         self.unlocked_note_sessions.clear();
+        self.unlocked_workspace_note_sessions.clear();
         self.encrypted_note_tabs.clear();
         self.catalog_reconciliation_pending = false;
     }
@@ -479,6 +480,7 @@ impl DocumentRuntime {
         self.pending_metadata_generations.clear();
         self.pending_metadata_mutations.clear();
         self.unlocked_note_sessions.clear();
+        self.unlocked_workspace_note_sessions.clear();
         self.encrypted_note_tabs.clear();
         self.catalog_reconciliation_pending = false;
     }
@@ -1442,11 +1444,6 @@ impl DocumentRuntime {
                     .get(&request.tab_id)
                     .cloned()
                     .filter(|pending| pending.content_revision == request.content_revision);
-                let pending_title_update = self
-                    .pending_title_updates
-                    .get(&request.tab_id)
-                    .cloned()
-                    .filter(|pending| pending.content_revision == request.content_revision);
                 if completed_conflict_retry.is_some() {
                     self.pending_conflict_retries.remove(&request.tab_id);
                 }
@@ -1466,7 +1463,6 @@ impl DocumentRuntime {
                         completed_conflict_retry,
                         pending_trash_move,
                         pending_note_move,
-                        pending_title_update,
                         &mut outcome,
                     );
                 } else {
@@ -1529,7 +1525,6 @@ impl DocumentRuntime {
         completed_conflict_retry: Option<PendingConflictRetry>,
         pending_trash_move: Option<PendingTrashMove>,
         pending_note_move: Option<PendingNoteMove>,
-        pending_title_update: Option<PendingTitleUpdate>,
         outcome: &mut DocumentOutcome,
     ) {
         self.save_failure_messages.remove(&request.tab_id);
@@ -1555,16 +1550,7 @@ impl DocumentRuntime {
                 self.cancel_pending_note_move_into(request, MOVE_SAVE_STALE_MESSAGE, outcome);
             }
         }
-        if let Some(pending) = pending_title_update {
-            if self.pending_title_update_has_current_saved_document(request.tab_id, &pending) {
-                self.pending_title_updates.remove(&request.tab_id);
-                outcome
-                    .commands
-                    .push(DocumentCommand::ExecuteNote(NoteCommand::UpdateTitle(pending.request)));
-            } else if let Some(pending) = self.pending_title_updates.remove(&request.tab_id) {
-                outcome.commands.push(DocumentCommand::RetryTitleUpdate(pending.request));
-            }
-        }
+        self.finish_pending_title_update(request, outcome);
         if let Some(retry) = completed_conflict_retry {
             outcome.actions.push(crate::action::NotoraAction::SaveConflictResolved {
                 identity: retry.identity,
@@ -1636,7 +1622,28 @@ impl DocumentRuntime {
             self.pending_note_moves.remove(&request.tab_id);
             outcome.commands.push(DocumentCommand::ExecuteNote(NoteCommand::Move(pending.request)));
         }
+        self.finish_pending_title_update(request, &mut outcome);
         outcome
+    }
+
+    fn finish_pending_title_update(
+        &mut self,
+        request: AutoSaveRequest,
+        outcome: &mut DocumentOutcome,
+    ) {
+        let matching = self
+            .pending_title_updates
+            .get(&request.tab_id)
+            .is_some_and(|pending| pending.content_revision == request.content_revision);
+        if matching && let Some(pending) = self.pending_title_updates.remove(&request.tab_id) {
+            let command =
+                if self.pending_title_update_has_current_saved_document(request.tab_id, &pending) {
+                    DocumentCommand::ExecuteNote(NoteCommand::UpdateTitle(pending.request))
+                } else {
+                    DocumentCommand::RetryTitleUpdate(pending.request)
+                };
+            outcome.commands.push(command);
+        }
     }
 
     fn fail_autosave(&mut self, request: AutoSaveRequest, message: String) -> DocumentOutcome {

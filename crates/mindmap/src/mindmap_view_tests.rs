@@ -408,12 +408,8 @@ fn canvas_snapshot_round_trips_hit_cursor_and_drag_at_zoom_and_scroll() {
             geometry.card_rect.y + geometry.card_rect.h + 8.0,
         );
         let pointer_screen = snapshot.content_to_screen(pointer_content);
-        // 叶节点 B 的预览标签不带后代数量，宽度按 depth 1 的字号测量。
-        let mut preview_shaper = Shaper::new().expect("test shaper should initialize");
-        preview_shaper
-            .set_font_size(view.cached_font_size * view.constants.font_scale_for_depth(1));
-        let expected_preview_width = measured_card_width("B", &view.constants, &mut preview_shaper)
-            .max(geometry.card_rect.w);
+        // 叶节点 B 的预览未添加后代数量，可沿用源卡片的宽度。
+        let expected_preview_width = geometry.card_rect.w;
         let expected_preview_center_x = pointer_content.x
             + (geometry.card_rect.x + expected_preview_width * 0.5
                 - (geometry.title_rect.x - ONE_PIXEL_BEFORE_TITLE_LEFT_EDGE));
@@ -2155,19 +2151,32 @@ fn drag_preview_width_covers_unicode_label_suffix() {
 }
 
 #[test]
-fn preview_card_width_scales_with_source_depth() {
-    let constants = LayoutConstants::default();
-    assert!(
-        constants.font_scale_for_depth(0) > constants.font_scale_for_depth(2),
-        "test requires root depth to render at a larger font size"
+fn drag_preview_width_uses_the_canvas_font_for_the_subtree_label() {
+    let title = "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii";
+    let source = format!("# Root\n## {title}\n### Child\n");
+    let (mut view, doc) = view_with_source(&source);
+    let theme = ui::theme::test_theme();
+    let mut shaper = Shaper::new().expect("test shaper").with_font_family("monospace");
+    shaper.set_font_size(23.0);
+    view.render(&doc, Rect::new(0.0, 0.0, 1200.0, 800.0), &theme, &mut shaper, 1.0);
+    let branch = &view.ready_tree().root.children[0];
+    let label = format!("{title} · 1");
+    let expected =
+        mmf::layout::measured_card_width_for_depth(&label, &view.constants, &mut shaper, 1);
+    let request = drag_request(
+        &view,
+        CanvasDragPhase::Update,
+        branch.subtree_source_range.clone(),
+        700.0,
+        120.0,
+        1,
     );
-    let label = "Branch · 3";
-    let root_width = measured_preview_card_width(label, 0.0, &constants, 16.0, 0);
-    let nested_width = measured_preview_card_width(label, 0.0, &constants, 16.0, 2);
-    assert!(
-        root_width > nested_width,
-        "root preview width {root_width} should exceed depth-2 width {nested_width}"
-    );
+
+    let CanvasDragResponse::Preview(preview) = view.handle_canvas_drag(request, &doc) else {
+        panic!("branch drag must produce a preview");
+    };
+    assert_eq!(preview.label, label);
+    assert_eq!(preview.preview_rect.w, expected.max(preview.source_rect.w));
 }
 
 #[test]

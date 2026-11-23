@@ -521,7 +521,7 @@ mod tests {
 
     use super::{restore_workspace, snapshot_workspace};
     use crate::app_init::build_product_workspace;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
     use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
     use crate::tab_session::{TabSession, TabSessionMut};
@@ -530,7 +530,7 @@ mod tests {
     fn append_document(
         workspace: &mut crate::workspace::Workspace,
         runtimes: &mut TabRuntimeStore,
-        document: DocumentView,
+        document: DocumentFixture,
     ) -> appkit_core::workspace::types::TabId {
         let (document, presentation) = document.into_parts();
         let prepared = PreparedTab::new(
@@ -563,7 +563,7 @@ dirty = false
         let directory = tempfile::tempdir().expect("stub snapshot directory should be created");
         let mut workspace = build_product_workspace();
         let mut runtimes = TabRuntimeStore::default();
-        let mut stub = DocumentView::new(vec![String::new()], 10, 160.0);
+        let mut stub = DocumentFixture::new(vec![String::new()], 10, 160.0);
         stub.file_path = Some(directory.path().join("missing.txt"));
         stub.dirty = true;
         stub.cursor_mut().snapshot_offset = Some(5);
@@ -587,7 +587,7 @@ dirty = false
         let tab_id = append_document(
             &mut workspace,
             &mut runtimes,
-            DocumentView::from_file(
+            DocumentFixture::from_file(
                 &file_path,
                 dimensions.visible_rows,
                 dimensions.viewport_height,
@@ -629,7 +629,7 @@ dirty = false
         append_document(
             &mut source,
             &mut source_runtimes,
-            DocumentView::new(vec![String::new()], 3, 48.0),
+            DocumentFixture::new(vec![String::new()], 3, 48.0),
         );
         let snapshot = snapshot_workspace(&source, &source_runtimes, false, None, directory.path());
         let dimensions = ViewportDimensions { visible_rows: 9, viewport_height: 144.0 };
@@ -664,7 +664,7 @@ dirty = false
             tempfile::tempdir().expect("suggested-name snapshot directory should be created");
         let mut workspace = build_product_workspace();
         let mut runtimes = TabRuntimeStore::default();
-        let document = DocumentView::new(vec![String::new()], 10, 160.0);
+        let document = DocumentFixture::new(vec![String::new()], 10, 160.0);
         let (document, presentation) = document.into_parts();
         let prepared = PreparedTab::new(
             document,
@@ -690,7 +690,7 @@ dirty = false
         append_document(
             &mut workspace,
             &mut runtimes,
-            DocumentView::from_file(&file_path, 20, 320.0)
+            DocumentFixture::from_file(&file_path, 20, 320.0)
                 .expect("default-plugin snapshot file should load"),
         );
 
@@ -708,7 +708,7 @@ dirty = false
             append_document(
                 &mut workspace,
                 &mut runtimes,
-                DocumentView::new(lines.clone(), 80, 1280.0),
+                DocumentFixture::new(lines.clone(), 80, 1280.0),
             );
         }
         let directory = tempfile::tempdir().expect("large snapshot directory should be created");
@@ -763,7 +763,7 @@ dirty = false
         append_document(
             &mut workspace,
             &mut runtimes,
-            DocumentView::from_file(
+            DocumentFixture::from_file(
                 &first_path,
                 dimensions.visible_rows,
                 dimensions.viewport_height,
@@ -773,7 +773,7 @@ dirty = false
         append_document(
             &mut workspace,
             &mut runtimes,
-            DocumentView::from_file(
+            DocumentFixture::from_file(
                 &active_path,
                 dimensions.visible_rows,
                 dimensions.viewport_height,
@@ -843,7 +843,7 @@ dirty = false
         append_document(
             &mut workspace,
             &mut runtimes,
-            DocumentView::from_file(
+            DocumentFixture::from_file(
                 &file_path,
                 dimensions.visible_rows,
                 dimensions.viewport_height,

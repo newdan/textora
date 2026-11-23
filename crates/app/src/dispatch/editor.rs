@@ -459,16 +459,14 @@ impl App {
                 return effect;
             }
             EditCommand::OpenFile => {
-                self.open_file_dialog();
-                return effect;
+                return effect.merge(self.open_file_dialog());
             }
             EditCommand::NewTab => {
-                self.new_untitled_doc();
-                return effect;
+                return effect.merge(self.new_untitled_doc());
             }
             EditCommand::CloseTab => {
                 if let Some(id) = self.active_tab_id() {
-                    self.try_close_entry_with_prompt(id);
+                    effect = effect.merge(self.try_close_entry_with_prompt(id));
                 }
                 return effect;
             }
@@ -478,13 +476,11 @@ impl App {
             }
             EditCommand::NavigateBack => {
                 let ws_effect = self.navigate_editor_back();
-                self.handle_nav_effect(ws_effect);
-                return effect;
+                return effect.merge(self.handle_nav_effect(ws_effect));
             }
             EditCommand::NavigateForward => {
                 let ws_effect = self.navigate_editor_forward();
-                self.handle_nav_effect(ws_effect);
-                return effect;
+                return effect.merge(self.handle_nav_effect(ws_effect));
             }
             _ => {}
         }
@@ -592,7 +588,7 @@ impl App {
         }
 
         let ws_effect = self.upgrade_active_editor_preview();
-        self.handle_nav_effect(ws_effect);
+        effect = effect.merge(self.handle_nav_effect(ws_effect));
 
         let outcome = self.editor_runtime.execute_source_command(&cmd);
         let dirty = self.active_tab_session().is_some_and(|tab| tab.document.dirty);
@@ -647,7 +643,7 @@ impl App {
         self.finish_runtime_edit(outcome)
     }
 
-    fn finish_runtime_edit(&mut self, outcome: EditorOutcome) -> AppEffect {
+    pub(crate) fn finish_runtime_edit(&mut self, outcome: EditorOutcome) -> AppEffect {
         self.sync_plugin_state();
         if outcome.shell_effect != AppEffect::NONE {
             self.ensure_wysiwyg_cursor_visible();
@@ -752,7 +748,7 @@ mod edit_tests {
         app_with_canvas_drag_tabs, cancel_request_count, document_texts, start_canvas_drag,
     };
     use crate::clipboard::TestDocumentClipboard;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use appkit_shell::edit_transaction::EditOutcome;
     use appkit_shell::editor_commands::edit_requires_reshape;
     use appkit_shell::input_mapper::EditCommand;
@@ -760,7 +756,7 @@ mod edit_tests {
     fn app_with_text(text: &str) -> App {
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec![text.into()], 40, 40.0),
+            DocumentFixture::new(vec![text.into()], 40, 40.0),
             Box::new(crate::plugins::editor::EditorPlugin::new()),
         );
         app.switch_workspace_for_test(0);
@@ -771,7 +767,7 @@ mod edit_tests {
     fn app_with_read_only_markdown(text: &str) -> App {
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec![text.into()], 40, 40.0),
+            DocumentFixture::new(vec![text.into()], 40, 40.0),
             Box::new(textora_markdown::view::MarkdownView::new()),
         );
         app.switch_workspace_for_test(0);
@@ -782,7 +778,7 @@ mod edit_tests {
     fn app_with_markdown_editor(text: &str) -> App {
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec![text.into()], 40, 40.0),
+            DocumentFixture::new(vec![text.into()], 40, 40.0),
             Box::new(textora_markdown::view::MarkdownEditorView::new()),
         );
         app.switch_workspace_for_test(0);
@@ -882,10 +878,11 @@ mod edit_tests {
     fn paste_is_an_independent_undo_entry_between_typing_runs() {
         let mut app = app_with_text("");
 
-        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("a".into()));
+        let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("a".into()));
         let mut clipboard = TestDocumentClipboard::with_plain("b");
-        app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
-        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("c".into()));
+        let _ = app
+            .dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+        let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("c".into()));
 
         assert_eq!(active_text(&app), "abc");
         dispatch_undo(&mut app);
@@ -901,7 +898,8 @@ mod edit_tests {
         let mut app = app_with_text("");
         let mut clipboard = TestDocumentClipboard::with_all_formats();
 
-        app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+        let _ = app
+            .dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
 
         assert_eq!(active_text(&app), "plain\ntext");
         assert_eq!(clipboard.plain_reads, 1);
@@ -913,13 +911,13 @@ mod edit_tests {
     fn markdown_leading_spaces_type_and_undo_through_the_editor_transaction_route() {
         let mut app = app_with_markdown_editor("正文");
         for _ in 0..4 {
-            app.dispatch_transactional_edit_for_test(EditCommand::InsertChar(" ".into()));
+            let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertChar(" ".into()));
         }
         let edited = active_text(&app);
         assert_eq!(edited.replace('\u{a0}', " "), "    正文");
         assert_eq!(active_cursor(&app), "\u{a0}".len() * 4);
 
-        app.dispatch_transactional_edit_for_test(EditCommand::Backspace);
+        let _ = app.dispatch_transactional_edit_for_test(EditCommand::Backspace);
         assert_eq!(active_text(&app).replace('\u{a0}', " "), "   正文");
         dispatch_undo(&mut app);
         assert_eq!(active_text(&app), edited);
@@ -933,7 +931,8 @@ mod edit_tests {
         let original = "旧段落";
         let mut app = app_with_markdown_editor(original);
         select_all_active_text(&mut app);
-        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("    新段落".into()));
+        let _ =
+            app.dispatch_transactional_edit_for_test(EditCommand::InsertText("    新段落".into()));
         let edited = active_text(&app);
         assert_eq!(edited.replace('\u{a0}', " "), "    新段落");
         assert_eq!(active_cursor(&app), edited.len());
@@ -946,7 +945,7 @@ mod edit_tests {
     #[test]
     fn source_editor_leading_spaces_remain_ascii() {
         let mut app = app_with_text("正文");
-        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("    ".into()));
+        let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("    ".into()));
         assert_eq!(active_text(&app), "    正文");
     }
 
@@ -957,7 +956,8 @@ mod edit_tests {
         let mut clipboard =
             TestDocumentClipboard::with_html("<p><strong>rich</strong></p>", "rich");
 
-        app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+        let _ = app
+            .dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
 
         let expected = if cfg!(feature = "markdown-rich") { "**rich**" } else { "rich" };
         assert_eq!(active_text(&app), expected);
@@ -1016,7 +1016,7 @@ mod edit_tests {
         let mut app = app_with_markdown_editor("");
         let mut clipboard = TestDocumentClipboard::with_all_formats();
 
-        app.dispatch_document_paste_with_clipboard_for_test(
+        let _ = app.dispatch_document_paste_with_clipboard_for_test(
             &EditCommand::PastePlainText,
             &mut clipboard,
         );
@@ -1103,7 +1103,7 @@ mod edit_tests {
             set_active_selection(&mut app, anchor, cursor);
             let mut clipboard = TestDocumentClipboard::with_plain("X");
 
-            app.dispatch_document_paste_with_clipboard_for_test(
+            let _ = app.dispatch_document_paste_with_clipboard_for_test(
                 &EditCommand::Paste,
                 &mut clipboard,
             );
@@ -1121,7 +1121,8 @@ mod edit_tests {
         let before = active_document_snapshot(&app);
         let mut clipboard = TestDocumentClipboard::empty();
 
-        app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+        let _ = app
+            .dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
 
         assert_eq!(active_document_snapshot(&app), before);
         assert_eq!(clipboard.plain_reads, 1);
@@ -1136,7 +1137,8 @@ mod edit_tests {
         let mut clipboard =
             TestDocumentClipboard::with_html("<p><strong>different</strong></p>", "plain");
 
-        app.dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
+        let _ = app
+            .dispatch_document_paste_with_clipboard_for_test(&EditCommand::Paste, &mut clipboard);
 
         assert_eq!(active_text(&app), "plain");
         let revision_after_paste = active_content_revision(&app);
@@ -1149,7 +1151,7 @@ mod edit_tests {
 
     fn execute_default_transaction_for_editor_test(
         command: &EditCommand,
-        document: &mut DocumentView,
+        document: &mut DocumentFixture,
     ) -> crate::edit_transaction::TransactionalEditOutcome {
         let intent = match command {
             EditCommand::InsertChar(text) | EditCommand::InsertText(text) => {
@@ -1169,7 +1171,7 @@ mod edit_tests {
 
     #[test]
     fn insert_char_outcome_executed() {
-        let mut dv = DocumentView::new(vec!["hello".to_string()], 40, 40.0);
+        let mut dv = DocumentFixture::new(vec!["hello".to_string()], 40, 40.0);
         let outcome = execute_default_transaction_for_editor_test(
             &EditCommand::InsertChar("x".into()),
             &mut dv,
@@ -1204,7 +1206,7 @@ mod edit_tests {
     #[cfg(feature = "markdown")]
     fn markdown_semantic_edit_wraps_the_selection_in_one_transaction() {
         let mut app = App::new(None);
-        let mut document = DocumentView::new(vec!["hello".to_owned()], 40, 40.0);
+        let mut document = DocumentFixture::new(vec!["hello".to_owned()], 40, 40.0);
         document.cursor_move_to_offset("hello".len());
         document.cursor_mut().selection_anchor = Some(0);
         app.push_entry_for_test(
@@ -1223,7 +1225,7 @@ mod edit_tests {
 
     #[test]
     fn backspace_outcome_executed() {
-        let mut dv = DocumentView::new(vec!["hello".to_string()], 40, 40.0);
+        let mut dv = DocumentFixture::new(vec!["hello".to_string()], 40, 40.0);
         dv.cursor_move_to_offset(5);
         let outcome = execute_default_transaction_for_editor_test(&EditCommand::Backspace, &mut dv);
         assert!(outcome.edit_outcome.executed, "Backspace should execute");
@@ -1231,7 +1233,7 @@ mod edit_tests {
 
     #[test]
     fn delete_forward_outcome_executed() {
-        let mut dv = DocumentView::new(vec!["hello".to_string()], 40, 40.0);
+        let mut dv = DocumentFixture::new(vec!["hello".to_string()], 40, 40.0);
         let outcome =
             execute_default_transaction_for_editor_test(&EditCommand::DeleteForward, &mut dv);
         assert!(outcome.edit_outcome.executed, "DeleteForward should execute");
@@ -1248,7 +1250,7 @@ mod edit_tests {
 
     #[test]
     fn insert_char_produces_dirty_lines() {
-        let mut dv = DocumentView::new(vec!["hello".to_string()], 40, 40.0);
+        let mut dv = DocumentFixture::new(vec!["hello".to_string()], 40, 40.0);
         let outcome = execute_default_transaction_for_editor_test(
             &EditCommand::InsertChar("x".into()),
             &mut dv,
@@ -1261,7 +1263,7 @@ mod edit_tests {
 
     #[test]
     fn same_line_insert_char_only_needs_redraw() {
-        let mut dv = DocumentView::new(vec!["hello".to_string()], 40, 40.0);
+        let mut dv = DocumentFixture::new(vec!["hello".to_string()], 40, 40.0);
         let outcome = execute_default_transaction_for_editor_test(
             &EditCommand::InsertChar("x".into()),
             &mut dv,
@@ -1275,7 +1277,7 @@ mod edit_tests {
 
     #[test]
     fn insert_newline_still_needs_reshape() {
-        let mut dv = DocumentView::new(vec!["hello".to_string()], 40, 40.0);
+        let mut dv = DocumentFixture::new(vec!["hello".to_string()], 40, 40.0);
         let outcome =
             execute_default_transaction_for_editor_test(&EditCommand::InsertNewline, &mut dv);
 
@@ -1376,11 +1378,11 @@ mod edit_tests {
         use crate::plugins::editor::EditorPlugin;
 
         let mut app = App::new(None);
-        let dv = DocumentView::new(vec![String::new()], 40, 40.0);
+        let dv = DocumentFixture::new(vec![String::new()], 40, 40.0);
         app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
         app.switch_workspace_for_test(0);
 
-        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("a".into()));
+        let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("a".into()));
         // The caret leaves and returns to the exact byte where typing ended.
         app.break_edit_merge_for_navigation(&EditCommand::MoveLeft);
         {
@@ -1396,7 +1398,7 @@ mod edit_tests {
             };
             tab.document.cursor_move_right();
         }
-        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("b".into()));
+        let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("b".into()));
 
         let Some(tab) = app.active_tab_session_mut() else {
             panic!("source editor tab should be active");
@@ -1425,7 +1427,7 @@ mod edit_tests {
             assert_eq!(cancel_request_count(&state.borrow()), 1);
             assert_eq!(document_texts(&app), ["abc", "def"]);
 
-            app.dispatch_keyboard_tab_switch(&command);
+            let _ = app.dispatch_keyboard_tab_switch(&command);
 
             assert_eq!(cancel_request_count(&state.borrow()), 1);
         }
@@ -1495,7 +1497,7 @@ mod edit_tests {
                                     active_cursor(&app),
                                     active_selection(&app),
                                 );
-                                app.dispatch_transactional_edit_for_test(command);
+                                let _ = app.dispatch_transactional_edit_for_test(command);
                                 let after = (
                                     active_text(&app),
                                     active_cursor(&app),
@@ -1520,9 +1522,9 @@ mod edit_tests {
                                     after
                                 );
                                 dispatch_undo(&mut app);
-                                app.dispatch_transactional_edit_for_test(EditCommand::InsertText(
-                                    "分支".into(),
-                                ));
+                                let _ = app.dispatch_transactional_edit_for_test(
+                                    EditCommand::InsertText("分支".into()),
+                                );
                                 let branch = (active_text(&app), active_cursor(&app));
                                 dispatch_redo(&mut app);
                                 assert_eq!(
@@ -1550,13 +1552,13 @@ mod edit_tests {
                 .expect("audit document exists")
                 .document
                 .cursor_move_to_offset(source.len());
-            app.dispatch_transactional_edit_for_test(EditCommand::InsertText("新".into()));
+            let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("新".into()));
             app.active_tab_session_mut()
                 .expect("audit document exists")
                 .document
                 .cursor_move_to_offset("---".len());
             for _ in 0..3 {
-                app.dispatch_transactional_edit_for_test(EditCommand::DeleteForward);
+                let _ = app.dispatch_transactional_edit_for_test(EditCommand::DeleteForward);
             }
             assert_eq!(active_text(&app), format!("{source}新"));
             dispatch_undo(&mut app);
@@ -1569,7 +1571,7 @@ mod edit_tests {
     #[cfg(feature = "markdown")]
     fn assert_editing_audit_history(app: &mut App, command: EditCommand) {
         let before = (active_text(app), active_cursor(app));
-        app.dispatch_transactional_edit_for_test(command);
+        let _ = app.dispatch_transactional_edit_for_test(command);
         let after = (active_text(app), active_cursor(app));
         if before == after {
             return;
@@ -1594,7 +1596,7 @@ mod edit_tests {
         let path = directory.path().join("audit.md");
         std::fs::write(&path, source)
             .expect("editing audit source must write without normalization");
-        let mut document = DocumentView::from_file(&path, 40, 40.0)
+        let mut document = DocumentFixture::from_file(&path, 40, 40.0)
             .expect("editing audit must use production loading");
         document.file_path = None;
         assert_eq!(document.full_text(), source);
@@ -1619,8 +1621,8 @@ mod edit_tests {
                     let source = format!("{bom}{}", source.replace('\n', newline));
                     let path = directory.path().join("editing-audit.md");
                     std::fs::write(&path, &source).expect("audit fixture must be written");
-                    let mut document =
-                        DocumentView::from_file(&path, 40, 40.0).expect("audit fixture must load");
+                    let mut document = DocumentFixture::from_file(&path, 40, 40.0)
+                        .expect("audit fixture must load");
                     document.save().expect("saving the disposable audit fixture must succeed");
                     assert_eq!(
                         std::fs::read(&path).expect("saved fixture must be readable"),
@@ -1628,7 +1630,7 @@ mod edit_tests {
                         "loading and saving must preserve the exact original source bytes"
                     );
                     document.save().expect("repeated saves must succeed");
-                    let mut reloaded = DocumentView::from_file(&path, 40, 40.0)
+                    let mut reloaded = DocumentFixture::from_file(&path, 40, 40.0)
                         .expect("saved fixture must reload");
                     reloaded.save().expect("reloaded fixture must save");
                     assert_eq!(

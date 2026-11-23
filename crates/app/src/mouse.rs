@@ -17,14 +17,15 @@ mod tests {
     fn hit_test(
         px: f32,
         py: f32,
-        dv: &DocumentView,
+        dv: &DocumentFixture,
         advance_cache: &[AdvanceCacheEntry],
         metrics: &UiMetrics,
         left_margin: f32,
         tab_bar_height: f32,
         line_index: &LineIndex,
     ) -> Option<(UniCharOffset, usize, usize)> {
-        let sub_line_offset = dv.sub_line_pixel_offset(metrics.line_height);
+        let sub_line_offset =
+            dv.presentation.display.viewport.sub_line_pixel_offset(metrics.line_height);
         hit_test_with_sub_line_offset(
             px,
             py,
@@ -42,43 +43,40 @@ mod tests {
         px: f32,
         py: f32,
         mouse: &mut MouseState,
-        dv: &mut DocumentView,
+        dv: &mut DocumentFixture,
         modifiers: ModifiersState,
         hit: Option<(UniCharOffset, usize, usize)>,
     ) -> bool {
-        let mut presentation = dv.take_presentation();
-        let handled = handle_mouse_input_with_cursor_state(
+        handle_mouse_input_with_cursor_state(
             state,
             px,
             py,
             mouse,
             &mut dv.model,
-            &mut presentation.cursor_render_state,
+            &mut dv.presentation.cursor_render_state,
             modifiers,
             hit,
-        );
-        dv.restore_presentation(presentation);
-        handled
+        )
     }
 
     fn handle_cursor_moved(
         _px: f32,
         _py: f32,
         mouse: &mut MouseState,
-        document: &mut DocumentView,
+        document: &mut DocumentFixture,
         hit: Option<(UniCharOffset, usize, usize)>,
     ) -> bool {
         move_selection(mouse, &mut document.model, hit)
     }
 
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use ui::settings::Settings;
 
-    fn make_dv(content: &str) -> DocumentView {
-        DocumentView::new(content.lines().map(|s| s.to_string()).collect(), 10, 10.0)
+    fn make_dv(content: &str) -> DocumentFixture {
+        DocumentFixture::new(content.lines().map(|s| s.to_string()).collect(), 10, 10.0)
     }
 
-    fn type_default_text(dv: &mut DocumentView, text: &str) {
+    fn type_default_text(dv: &mut DocumentFixture, text: &str) {
         let intent = ui::plugin::EditIntent::InsertText(text.to_owned());
         let request = crate::edit_transaction::build_edit_request(&dv.model, intent);
         let plan = crate::edit_transaction::default_edit_plan(&request, &dv.model);
@@ -86,7 +84,7 @@ mod tests {
             .expect("typing must execute in the mouse coalescing test");
     }
 
-    fn click(dv: &mut DocumentView, mouse: &mut MouseState, px: f32, offset: UniCharOffset) {
+    fn click(dv: &mut DocumentFixture, mouse: &mut MouseState, px: f32, offset: UniCharOffset) {
         let modifiers = winit::keyboard::ModifiersState::empty();
         for state in [winit::event::ElementState::Pressed, winit::event::ElementState::Released] {
             handle_mouse_input(state, px, 10.0, mouse, dv, modifiers, Some((offset, 0, 0)));
@@ -164,7 +162,8 @@ mod tests {
             hit_test(120.0, lh * 0.1, &dv, &cache, &metrics, 100.0, 0.0, &dv.line_index).unwrap();
         assert_eq!(r.0, UniCharOffset(1), "簇内右半段应 snap 到第二字符起点");
         // 关键：UniCharOffset 是字符级偏移，不会产生 mid-character 值
-        dv.set_cursor_offset_synced(dv.unichar_to_byte_offset(r.0)); // 不应 panic
+        let byte_offset = dv.unichar_to_byte_offset(r.0);
+        dv.set_cursor_offset_synced(byte_offset);
     }
 
     #[test]
@@ -416,7 +415,7 @@ mod tests {
         let dv = make_dv("hello");
         assert!(
             dv.presentation.cursor_render_state.click_hint.is_none(),
-            "new DocumentView should have click_hint=None"
+            "new DocumentFixture should have click_hint=None"
         );
     }
 

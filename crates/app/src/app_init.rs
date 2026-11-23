@@ -433,8 +433,10 @@ impl App {
         // Phase 2: shape viewport lines with main-thread shaper
         let mut pre_entries: std::collections::HashMap<usize, crate::snap_tree::DisplayLineEntry> =
             std::collections::HashMap::new();
-        let mut render_resources = self.editor_runtime.take_render_resources();
-        if let Some(text) = render_resources.text.as_mut() {
+        self.editor_runtime.with_render_resources(|_, resources| {
+            let Some(text) = resources.text.as_mut() else {
+                return;
+            };
             text.shaper.set_font_size(font_size);
             for (dl, line_str, off, len) in &viewport_line_data {
                 let shaped = match text.shaper.shape_fast(line_str) {
@@ -492,8 +494,7 @@ impl App {
                     );
                 }
             }
-        }
-        self.editor_runtime.restore_render_resources(render_resources);
+        });
 
         // Phase 3: build all entries and commit
         if let Some(mut tab) = self.tab_session_mut(tab_id) {
@@ -537,7 +538,7 @@ impl App {
 #[cfg(test)]
 mod settings_tests {
     use super::*;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
 
     #[test]
@@ -609,7 +610,7 @@ mod settings_tests {
         let mut app = App::new(None);
         app.settings.font_size = 31.0;
         app.settings.line_height = 44.0;
-        let dv = DocumentView::new(vec!["sentinel".into()], 10, 10.0);
+        let dv = DocumentFixture::new(vec!["sentinel".into()], 10, 10.0);
         app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
 
         app.init_display_map(0);

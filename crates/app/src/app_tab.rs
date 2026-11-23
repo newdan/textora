@@ -379,7 +379,7 @@ impl App {
     #[cfg(test)]
     pub(crate) fn push_entry_for_test(
         &mut self,
-        document: crate::document_view::DocumentView,
+        document: crate::document_fixture::DocumentFixture,
         plugin: Box<dyn ui::plugin::ViewPlugin>,
     ) -> TabId {
         let (document, presentation) = document.into_parts();
@@ -569,7 +569,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
     use shaping::Shaper;
     use ui::core::geom::Rect;
@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn active_is_reading_mode_tracks_preview_state() {
         let mut app = App::new(None);
-        let mut doc = DocumentView::new(vec!["hello".into()], 80, 10.0);
+        let mut doc = DocumentFixture::new(vec!["hello".into()], 80, 10.0);
         doc.file_path = Some(std::path::PathBuf::from("test.txt"));
         let tab_id = app.push_entry_for_test(doc, Box::new(EditorPlugin::new()));
         app.tab_runtime_mut(tab_id).expect("test tab runtime must exist").plugin =
@@ -630,7 +630,7 @@ mod tests {
 
         let mut app = App::new(None);
         let tab_id = app.push_entry_for_test(
-            DocumentView::new(vec!["canvas".into()], 80, 10.0),
+            DocumentFixture::new(vec!["canvas".into()], 80, 10.0),
             Box::new(CanvasPlugin),
         );
         app.switch_workspace_for_test(0);

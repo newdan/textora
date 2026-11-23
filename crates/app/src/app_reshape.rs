@@ -2,7 +2,7 @@
 //! Methods on `impl App`, extracted from app.rs.
 
 use crate::app::App;
-use appkit_shell::document_presentation::DocumentPresentation;
+use appkit_shell::document_presentation::SourceSpacingState;
 #[cfg(test)]
 use appkit_shell::reshape_worker::content_hash_for_layout;
 use std::sync::Arc;
@@ -26,16 +26,12 @@ fn document_is_markdown_source(document: &appkit_core::document::DocumentModel) 
         )
 }
 
-fn refresh_source_spacing_state(
-    tab: &appkit_shell::tab_session::TabSessionMut<'_>,
-    presentation: &mut DocumentPresentation,
-) {
+fn refresh_source_spacing_state(tab: &mut appkit_shell::tab_session::TabSessionMut<'_>) {
     let document = &*tab.document;
     let source_revision = document.content_revision();
     let is_markdown = document_is_markdown_source(document);
-    if presentation.source_spacing.source_revision == source_revision
-        && presentation.source_spacing.is_markdown == is_markdown
-    {
+    let spacing = tab.source_spacing();
+    if spacing.source_revision == source_revision && spacing.is_markdown == is_markdown {
         return;
     }
 
@@ -44,7 +40,12 @@ fn refresh_source_spacing_state(
     } else {
         Arc::default()
     };
-    update_source_spacing_state(presentation, source_revision, is_markdown, protected_ranges)
+    tab.set_source_spacing(SourceSpacingState {
+        protected_ranges,
+        semantic_version: SOURCE_SPACING_SEMANTIC_VERSION,
+        source_revision,
+        is_markdown,
+    });
 }
 
 #[cfg(feature = "markdown")]
@@ -70,18 +71,6 @@ fn markdown_protected_ranges(
     std::iter::once(0..source_length).collect()
 }
 
-fn update_source_spacing_state(
-    presentation: &mut DocumentPresentation,
-    source_revision: u64,
-    is_markdown: bool,
-    protected_ranges: Arc<[std::ops::Range<usize>]>,
-) {
-    presentation.source_spacing.protected_ranges = protected_ranges;
-    presentation.source_spacing.semantic_version = SOURCE_SPACING_SEMANTIC_VERSION;
-    presentation.source_spacing.source_revision = source_revision;
-    presentation.source_spacing.is_markdown = is_markdown;
-}
-
 impl App {
     pub(crate) fn refresh_active_source_spacing_state(&mut self) {
         let Some(tab_id) = self.active_tab_id() else {
@@ -90,9 +79,7 @@ impl App {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return;
         };
-        let mut presentation = tab.take_presentation();
-        refresh_source_spacing_state(&tab, &mut presentation);
-        tab.restore_presentation(presentation);
+        refresh_source_spacing_state(&mut tab);
     }
 
     pub(crate) fn invalidate_reshape(&mut self) {
@@ -104,11 +91,11 @@ impl App {
         self.settings.set_font_size(logical_font_size);
         self.editor_runtime.update_settings(self.settings.clone());
         let metrics = self.ui_metrics();
-        let mut render_resources = self.editor_runtime.take_render_resources();
-        if let Some(text) = render_resources.text.as_mut() {
-            text.shaper.set_font_size(metrics.font_size);
-        }
-        self.editor_runtime.restore_render_resources(render_resources);
+        self.editor_runtime.with_render_resources(|_, resources| {
+            if let Some(text) = resources.text.as_mut() {
+                text.shaper.set_font_size(metrics.font_size);
+            }
+        });
         let tab_ids = self.editor_tab_ids_in_order();
         for tab_id in tab_ids.iter().copied() {
             if let Some(mut tab) = self.tab_session_mut(tab_id) {
@@ -202,7 +189,7 @@ mod zoom_tests {
     #[test]
     fn apply_zoom_sets_font_size() {
         let mut app = App::new(None);
-        app.apply_zoom(20.0);
+        let _ = app.apply_zoom(20.0);
         assert_eq!(app.settings.font_size, 20.0);
         assert_eq!(app.editor_runtime.settings_snapshot().font_size, 20.0);
     }
@@ -232,9 +219,9 @@ mod zoom_tests {
     #[test]
     fn apply_zoom_clamped_does_not_panic() {
         let mut app = App::new(None);
-        app.apply_zoom(6.0);
-        app.apply_zoom(72.0);
-        app.apply_zoom(1000.0);
+        let _ = app.apply_zoom(6.0);
+        let _ = app.apply_zoom(72.0);
+        let _ = app.apply_zoom(1000.0);
     }
 
     // ── screen metrics tests ───────────────────────────────────────
@@ -255,7 +242,7 @@ mod zoom_tests {
     fn viewport_content_width_accounts_for_margins() {
         let mut app = App::new(None);
         app.settings.word_wrap = true;
-        let dv = crate::document_view::DocumentView::new(vec!["line".to_string()], 40, 40.0);
+        let dv = crate::document_fixture::DocumentFixture::new(vec!["line".to_string()], 40, 40.0);
         let vw = app.viewport_content_width(&dv);
         let left_margin = app.editor_left_margin(dv.line_count());
         let editor_rect = app.ui_shell.editor_rect();
@@ -288,7 +275,7 @@ mod zoom_tests {
         let mut measure = NoopMeasure;
         app.ui_shell.update_frame(screen, &app.current_theme, &mut measure, &inputs);
 
-        let dv = crate::document_view::DocumentView::new(vec!["line".to_string()], 40, 40.0);
+        let dv = crate::document_fixture::DocumentFixture::new(vec!["line".to_string()], 40, 40.0);
         let left_margin = app.editor_left_margin(dv.line_count());
         let expected = crate::render_pipeline::render_viewport_width(
             screen.w,
@@ -318,14 +305,14 @@ mod zoom_tests {
     fn zoom_in_increases_font_size() {
         let mut app = App::new(None);
         let orig = app.settings.font_size;
-        sim_zoom_in(&mut app);
+        let _ = sim_zoom_in(&mut app);
         assert_eq!(app.settings.font_size, orig + 1.0);
     }
 
     #[test]
     fn zoom_in_updates_line_height() {
         let mut app = App::new(None);
-        sim_zoom_in(&mut app);
+        let _ = sim_zoom_in(&mut app);
         // Zoom in makes font size 15.0 -> line height 15 * 1.618 = 24.27
         assert_eq!(app.settings.line_height, app.settings.font_size * 1.618);
     }
@@ -334,7 +321,7 @@ mod zoom_tests {
     fn zoom_out_decreases_font_size() {
         let mut app = App::new(None);
         let orig = app.settings.font_size;
-        sim_zoom_out(&mut app);
+        let _ = sim_zoom_out(&mut app);
         assert_eq!(app.settings.font_size, (orig - 1.0).max(6.0));
     }
 
@@ -342,17 +329,17 @@ mod zoom_tests {
     fn zoom_out_clamped_to_min_6() {
         let mut app = App::new(None);
         app.settings.font_size = 6.5;
-        sim_zoom_out(&mut app);
+        let _ = sim_zoom_out(&mut app);
         assert_eq!(app.settings.font_size, 6.0);
-        sim_zoom_out(&mut app);
+        let _ = sim_zoom_out(&mut app);
         assert_eq!(app.settings.font_size, 6.0);
     }
 
     #[test]
     fn zoom_reset_restores_default() {
         let mut app = App::new(None);
-        sim_zoom_in(&mut app);
-        sim_zoom_reset(&mut app);
+        let _ = sim_zoom_in(&mut app);
+        let _ = sim_zoom_reset(&mut app);
         assert_eq!(app.settings.font_size, 15.0);
         assert_eq!(app.settings.line_height, 24.27);
     }
@@ -376,7 +363,7 @@ mod zoom_tests {
         let mut app = App::new(None);
         // Add at least one document so views is non-empty
         app.push_entry_for_test(
-            crate::document_view::DocumentView::new(vec![String::new()], 40, 40.0),
+            crate::document_fixture::DocumentFixture::new(vec![String::new()], 40, 40.0),
             Box::new(EditorPlugin::new()),
         );
         let g = make_glyph();
@@ -398,7 +385,7 @@ mod zoom_tests {
             );
             assert!(!tab.display().render_cache.is_empty());
         }
-        sim_zoom_in(&mut app);
+        let _ = sim_zoom_in(&mut app);
         assert!(
             app.active_tab_session().unwrap().display().render_cache.is_empty(),
             "zoom_in should invalidate cache"
@@ -409,11 +396,11 @@ mod zoom_tests {
     fn zoom_increments_settings_version() {
         let mut app = App::new(None);
         let v1 = app.settings.version;
-        sim_zoom_in(&mut app);
+        let _ = sim_zoom_in(&mut app);
         assert_eq!(app.settings.version, v1 + 1);
-        sim_zoom_out(&mut app);
+        let _ = sim_zoom_out(&mut app);
         assert_eq!(app.settings.version, v1 + 2);
-        sim_zoom_reset(&mut app);
+        let _ = sim_zoom_reset(&mut app);
         assert_eq!(app.settings.version, v1 + 3);
     }
 
@@ -424,11 +411,11 @@ mod zoom_tests {
         let mut app = App::new(None);
         app.update_scale_factor(2.0);
 
-        app.apply_zoom(16.0);
+        let _ = app.apply_zoom(16.0);
         assert_eq!(app.settings.font_size, 16.0);
         assert_eq!(app.ui_metrics().font_size, 32.0);
 
-        app.apply_zoom(15.0);
+        let _ = app.apply_zoom(15.0);
         assert_eq!(app.settings.font_size, 15.0);
         assert_eq!(app.ui_metrics().font_size, 30.0);
     }
@@ -437,7 +424,7 @@ mod zoom_tests {
     fn zoom_out_clamps_logical_size_at_six() {
         let mut app = App::new(None);
         app.update_scale_factor(2.0);
-        app.apply_zoom(6.0);
+        let _ = app.apply_zoom(6.0);
         assert_eq!(app.settings.font_size, 6.0);
         assert_eq!(app.ui_metrics().font_size, 12.0);
     }
@@ -450,7 +437,7 @@ mod zoom_tests {
         app.update_scale_factor(2.0);
         let before = app.persisted_font_size();
 
-        app.apply_zoom(before + 1.0);
+        let _ = app.apply_zoom(before + 1.0);
 
         assert_eq!(app.persisted_font_size(), before + 1.0);
     }
@@ -463,7 +450,7 @@ mod zoom_tests {
         let mut app = App::new(None);
         let screen_h = 800.0;
         let before = app.visible_rows(screen_h);
-        sim_zoom_in(&mut app);
+        let _ = sim_zoom_in(&mut app);
         let after = app.visible_rows(screen_h);
         assert!(after < before, "zoom in should reduce visible_rows: {} -> {}", before, after);
     }
@@ -476,9 +463,9 @@ mod zoom_tests {
         app.settings.set_font_size(30.0);
         let screen_h = 800.0;
         let before = app.visible_rows(screen_h);
-        sim_zoom_out(&mut app);
-        sim_zoom_out(&mut app);
-        sim_zoom_out(&mut app);
+        let _ = sim_zoom_out(&mut app);
+        let _ = sim_zoom_out(&mut app);
+        let _ = sim_zoom_out(&mut app);
         let after = app.visible_rows(screen_h);
         assert!(after > before, "zoom out should increase visible_rows: {} -> {}", before, after);
     }
@@ -490,7 +477,7 @@ mod zoom_tests {
         let screen_h = 800.0;
         // Change font size significantly
         app.settings.set_font_size(30.0);
-        sim_zoom_reset(&mut app);
+        let _ = sim_zoom_reset(&mut app);
         // After reset: font_size=15, line_height=15*1.618=24.27
         let after = app.visible_rows(screen_h);
         let expected = ((screen_h
@@ -514,7 +501,7 @@ mod zoom_tests {
         // Create a document view directly (no GPU needed, test the viewport update path)
         let visible_rows = app.visible_rows(screen_h);
         let viewport_height = app.visible_height_lines(screen_h);
-        let mut dv = crate::document_view::DocumentView::new(
+        let mut dv = crate::document_fixture::DocumentFixture::new(
             vec!["line1".to_string(), "line2".to_string()],
             visible_rows,
             viewport_height,
@@ -526,7 +513,7 @@ mod zoom_tests {
         app.settings.set_font_size(new_size);
         let new_visible = app.visible_rows(screen_h);
         let new_height = app.visible_height_lines(screen_h);
-        dv.resize(new_visible, new_height);
+        dv.presentation.display.viewport.resize(new_visible, new_height);
         assert!(
             dv.presentation.display.viewport.visible_rows < old_visible,
             "zoom in should reduce viewport visible_rows: {} -> {}",
@@ -550,7 +537,7 @@ mod zoom_tests {
         app.settings.set_font_size(30.0);
         let visible_rows = app.visible_rows(screen_h);
         let viewport_height = app.visible_height_lines(screen_h);
-        let mut dv = crate::document_view::DocumentView::new(
+        let mut dv = crate::document_fixture::DocumentFixture::new(
             vec!["line1".to_string(), "line2".to_string()],
             visible_rows,
             viewport_height,
@@ -562,7 +549,7 @@ mod zoom_tests {
         app.settings.set_font_size(new_size);
         let new_visible = app.visible_rows(screen_h);
         let new_height = app.visible_height_lines(screen_h);
-        dv.resize(new_visible, new_height);
+        dv.presentation.display.viewport.resize(new_visible, new_height);
         assert!(
             dv.presentation.display.viewport.visible_rows > old_visible,
             "zoom out should increase viewport visible_rows: {} -> {}",

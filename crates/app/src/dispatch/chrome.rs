@@ -120,62 +120,67 @@ impl App {
 
     pub(crate) fn dispatch_settings_action(&mut self, action: SettingsDispatchAction) -> AppEffect {
         self.ui_shell.sidebar_set_open_menu(None);
-        match action {
+        let effect = match action {
             SettingsDispatchAction::SetViewMode(mode) => {
                 self.settings.set_view_mode(mode);
                 self.ui_shell.sidebar_set_hovered(None);
                 self.ui_shell.set_dragging_sidebar(false);
-                AppEffect::PERSIST_SETTINGS.merge(AppEffect::SYNC_WINDOW_CHROME)
+                AppEffect::SYNC_WINDOW_CHROME
             }
             SettingsDispatchAction::SetThemeMode(mode) => {
                 self.settings.set_theme_mode(mode);
                 self.rebuild_theme_state();
-                AppEffect::PERSIST_SETTINGS.merge(AppEffect::REDRAW)
+                AppEffect::REDRAW
             }
             SettingsDispatchAction::SetFontFamily(family) => {
                 self.settings.set_font_family(family);
-                self.editor_runtime.update_settings(self.settings.clone());
-                AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+                AppEffect::RESHAPE
             }
             SettingsDispatchAction::SetFontSize(size) => {
                 self.settings.set_font_size(size);
-                AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+                AppEffect::RESHAPE
             }
             SettingsDispatchAction::SetLineHeightRatio(ratio) => {
                 self.settings.set_line_height_ratio(ratio);
-                AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+                AppEffect::RESHAPE
             }
             SettingsDispatchAction::SetTabWidth(width) => {
                 self.settings.set_tab_width(width);
-                AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+                AppEffect::RESHAPE
             }
             SettingsDispatchAction::SetWordWrap(enabled) => self.apply_word_wrap(enabled),
             SettingsDispatchAction::SetMarkdownFirstLineIndent(enabled) => {
                 self.settings.set_markdown_first_line_indent(enabled);
-                AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+                AppEffect::RESHAPE
             }
             SettingsDispatchAction::SetTextSpacingMode(mode) => {
                 self.settings.set_text_spacing_mode(mode);
-                AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+                AppEffect::RESHAPE
             }
             SettingsDispatchAction::SetShowLineNumbers(enabled) => {
                 self.settings.set_show_line_numbers(enabled);
-                AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+                AppEffect::RESHAPE
             }
             SettingsDispatchAction::SetShowStatusBar(enabled) => {
                 self.settings.set_show_status_bar(enabled);
-                AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+                AppEffect::RESHAPE
             }
-            SettingsDispatchAction::ToggleLineNumbers => self.dispatch_settings_action(
-                SettingsDispatchAction::SetShowLineNumbers(!self.settings.show_line_numbers),
-            ),
+            SettingsDispatchAction::ToggleLineNumbers => {
+                return self.dispatch_settings_action(SettingsDispatchAction::SetShowLineNumbers(
+                    !self.settings.show_line_numbers,
+                ));
+            }
             SettingsDispatchAction::ToggleWordWrap => {
                 self.apply_word_wrap(!self.settings.word_wrap)
             }
-            SettingsDispatchAction::ToggleStatusBar => self.dispatch_settings_action(
-                SettingsDispatchAction::SetShowStatusBar(!self.settings.show_status_bar),
-            ),
-        }
+            SettingsDispatchAction::ToggleStatusBar => {
+                return self.dispatch_settings_action(SettingsDispatchAction::SetShowStatusBar(
+                    !self.settings.show_status_bar,
+                ));
+            }
+        };
+        self.editor_runtime.update_settings(self.settings.clone());
+        effect.merge(AppEffect::PERSIST_SETTINGS)
     }
 
     fn apply_word_wrap(&mut self, enabled: bool) -> AppEffect {
@@ -185,7 +190,7 @@ impl App {
                 tab.invalidate_render_cache_all();
             }
         }
-        AppEffect::PERSIST_SETTINGS.merge(AppEffect::RESHAPE)
+        AppEffect::RESHAPE
     }
 
     pub(crate) fn rebuild_theme_state(&mut self) {
@@ -290,8 +295,48 @@ mod tests {
     #[test]
     fn font_change_synchronizes_editor_runtime_settings() {
         let mut app = App::new(None);
-        app.dispatch_settings_action(SettingsDispatchAction::SetFontFamily("Helvetica".into()));
+        let effect =
+            app.dispatch_settings_action(SettingsDispatchAction::SetFontFamily("Helvetica".into()));
+        assert!(effect.reshape);
         assert_eq!(app.editor_runtime.settings_snapshot().font_family, "Helvetica");
+    }
+
+    #[test]
+    fn settings_actions_synchronize_runtime_before_returning_effects() {
+        let mut app = App::new(None);
+        let actions = [
+            SettingsDispatchAction::SetViewMode(ui::view_mode::ViewMode::Tabs),
+            SettingsDispatchAction::SetThemeMode(ui::settings::ThemeMode::Light),
+            SettingsDispatchAction::SetFontFamily("Helvetica".into()),
+            SettingsDispatchAction::SetFontSize(21.0),
+            SettingsDispatchAction::SetLineHeightRatio(1.75),
+            SettingsDispatchAction::SetTabWidth(8),
+            SettingsDispatchAction::ToggleWordWrap,
+            SettingsDispatchAction::SetMarkdownFirstLineIndent(true),
+            SettingsDispatchAction::SetTextSpacingMode(ui::typography::TextSpacingMode::Verbatim),
+            SettingsDispatchAction::ToggleLineNumbers,
+            SettingsDispatchAction::ToggleStatusBar,
+        ];
+        for action in actions {
+            assert!(app.dispatch_settings_action(action).persist_settings);
+            assert_runtime_settings_match(&app);
+        }
+    }
+
+    fn assert_runtime_settings_match(app: &App) {
+        let runtime = app.editor_runtime.settings_snapshot();
+        assert_eq!(runtime.version, app.settings.version);
+        assert_eq!(runtime.view_mode, app.settings.view_mode);
+        assert_eq!(runtime.theme_mode, app.settings.theme_mode);
+        assert_eq!(runtime.font_family, app.settings.font_family);
+        assert_eq!(runtime.font_size, app.settings.font_size);
+        assert_eq!(runtime.line_height, app.settings.line_height);
+        assert_eq!(runtime.tab_width, app.settings.tab_width);
+        assert_eq!(runtime.word_wrap, app.settings.word_wrap);
+        assert_eq!(runtime.markdown_first_line_indent, app.settings.markdown_first_line_indent);
+        assert_eq!(runtime.text_spacing_mode, app.settings.text_spacing_mode);
+        assert_eq!(runtime.show_line_numbers, app.settings.show_line_numbers);
+        assert_eq!(runtime.show_status_bar, app.settings.show_status_bar);
     }
 
     #[test]

@@ -3,7 +3,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::document_runtime::{
-    PendingNoteMove, PendingTitleUpdate, PendingTrashMove, initial_title_from_document,
+    DocumentCommand, PendingNoteMove, PendingTitleUpdate, PendingTrashMove,
+    initial_title_from_document,
 };
 use super::frame_runtime::{FontSystemPreparation, StartupMilestone};
 use super::{
@@ -337,6 +338,45 @@ fn encrypted_note_reopens_from_the_process_cache_without_another_password() {
         crate::state::EncryptedNoteUnlockState::Inactive
     ));
     assert!(app.document_runtime.unlocked_note_session(reopened_tab_id).is_some());
+}
+
+#[test]
+fn switching_workspaces_clears_cached_encrypted_note_sessions() {
+    let _encryption_test_guard = encryption_runtime_test_guard();
+    let old_workspace = tempfile::tempdir().expect("old workspace should exist");
+    let target_workspace = tempfile::tempdir().expect("target workspace should exist");
+    let mut app = app();
+    app.execute_workspace_command(WorkspaceCommand::OpenExisting {
+        root: old_workspace.path().to_path_buf(),
+    })
+    .expect("old workspace should open");
+    let path = old_workspace.path().join("encrypted.md");
+    let (identity, _) =
+        install_registered_note(&mut app, path.to_str().expect("fixture path should be UTF-8"), "");
+    let DocumentIdentity::Note(note_id) = identity else {
+        panic!("created encrypted note should have a workspace identity");
+    };
+    let password = textora_encryption::EncryptionPassword::new("workspace-cache-password".into())
+        .expect("fixture password should be valid");
+    let (serialized, session) = textora_encryption::create_encrypted_markdown(&password, b"")
+        .expect("fixture should create a valid note session")
+        .into_parts();
+    std::fs::write(&path, serialized).expect("fixture should write the encrypted note");
+    let selection = app.document_selection();
+    app.document_runtime.install_created_encrypted_note(
+        DocumentLoadRequest { identity, selection_generation: selection.generation },
+        LoadedDocument { path, contents: String::new(), disk_revision: None },
+        std::sync::Arc::new(session),
+        selection,
+    );
+    assert!(app.document_runtime.cached_unlocked_workspace_note_session(note_id).is_some());
+
+    app.dispatch_action(NotoraAction::WorkspaceTransitionConfirmed(
+        WorkspaceTransitionRequest::OpenExisting { root: target_workspace.path().to_path_buf() },
+    ));
+
+    assert!(app.document_runtime.tab_for(identity).is_none());
+    assert!(app.document_runtime.cached_unlocked_workspace_note_session(note_id).is_none());
 }
 
 fn active_editor_input_context() -> EditorInputContext {
@@ -3141,6 +3181,40 @@ fn pending_title_update_rejects_a_document_changed_after_its_save_started() {
     app.commit_editor_text("newer edit".to_owned());
 
     assert!(!app.pending_title_update_has_current_saved_document(tab_id, &pending_update));
+}
+
+#[test]
+fn redundant_autosave_dispatches_pending_title_update_for_saved_revision() {
+    let mut app = app();
+    let (identity, tab_id) = install_registered_note(&mut app, "note.md", "已保存正文");
+    let DocumentIdentity::Note(note_id) = identity else {
+        panic!("registered note should have a workspace identity");
+    };
+    let summary = app
+        .document_runtime
+        .editor_runtime
+        .document_summary(tab_id)
+        .expect("registered note should have a document summary");
+    assert!(!summary.dirty);
+    let content_revision = summary.content_revision;
+    let title_request = notora_core::UpdateNoteTitleRequest {
+        note_id,
+        expected_title_revision: 0,
+        title: "新标题".to_owned(),
+    };
+    app.document_runtime
+        .pending_title_updates
+        .insert(tab_id, PendingTitleUpdate { request: title_request.clone(), content_revision });
+
+    let outcome =
+        app.document_runtime.submit_autosave(AutoSaveRequest { tab_id, content_revision }, None);
+
+    assert!(matches!(
+        outcome.commands.as_slice(),
+        [DocumentCommand::ExecuteNote(notora_core::NoteCommand::UpdateTitle(request))]
+            if request == &title_request
+    ));
+    assert!(!app.document_runtime.pending_title_updates.contains_key(&tab_id));
 }
 
 #[test]

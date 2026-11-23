@@ -7,6 +7,7 @@ use render::GlyphVertex;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[derive(Default)]
 pub struct RenderResources {
     pub text: Option<TextState>,
     pub gpu: Option<GpuState>,

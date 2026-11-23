@@ -163,7 +163,7 @@ mod tests {
             .open_document_sender()
             .send(vec![PathBuf::from("/tmp/a.md"), PathBuf::from("/tmp/b.txt")])
             .expect("product receiver is alive");
-        ProductHost::drain_product_events(&mut product);
+        let _ = ProductHost::drain_product_events(&mut product);
 
         assert_eq!(
             product.drain_open_documents(),

@@ -130,7 +130,7 @@ mod tests {
         let paths = vec![PathBuf::from("/tmp/first.md"), PathBuf::from("/tmp/second.md")];
 
         dispatch_open_document_paths(&product.open_document_sender(), paths.clone());
-        ProductHost::drain_product_events(&mut product);
+        let _ = ProductHost::drain_product_events(&mut product);
 
         assert_eq!(product.drain_open_documents(), paths);
     }

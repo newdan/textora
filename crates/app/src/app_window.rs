@@ -581,7 +581,8 @@ impl App {
                 self.replace_editor_model(restored.workspace, restored.runtimes);
                 self.refresh_file_monitor_roots();
                 // Auto-scroll active tab into view after workspace restore
-                self.update_entry_layout();
+                let effect = self.update_entry_layout();
+                self.apply_effect(effect);
                 // Clear file_path so we don't double-open
                 self.file_path = None;
                 // Initialize display map for the active tab (needed for scroll_anchor restore)
@@ -606,7 +607,8 @@ impl App {
 
         // Ensure at least one document (untitled) when no file is opened
         if self.editor_is_empty() {
-            self.new_untitled_doc();
+            let effect = self.new_untitled_doc();
+            self.apply_effect(effect);
         }
         eprintln!("[startup] init_window total: {:?}", _t0.elapsed());
         Ok(())
@@ -616,7 +618,7 @@ impl App {
 #[cfg(test)]
 mod build_shell_inputs_tests {
     use super::App;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
 
     use ui::plugin::ViewPlugin;
     use ui::sidebar::Visibility;
@@ -780,7 +782,7 @@ mod build_shell_inputs_tests {
     fn canvas_view_does_not_reserve_legacy_scrollbar() {
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec!["canvas".to_string()], 10, 10.0),
+            DocumentFixture::new(vec!["canvas".to_string()], 10, 10.0),
             Box::new(CanvasPlugin),
         );
         app.switch_workspace_for_test(0);
@@ -1186,13 +1188,13 @@ mod update_frame_skip_tests {
 #[cfg(feature = "markdown")]
 mod wake_time_tests {
     use super::App;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
 
     #[test]
     fn preview_mode_skips_cursor_blink_wake() {
         let mut app = App::new(None);
-        let mut doc = DocumentView::new(vec!["hello".into()], 80, 10.0);
+        let mut doc = DocumentFixture::new(vec!["hello".into()], 80, 10.0);
         doc.file_path = Some(std::path::PathBuf::from("test.txt"));
         app.push_entry_for_test(doc, Box::new(EditorPlugin::new()));
         app.switch_active_plugin();
@@ -1215,7 +1217,7 @@ mod wake_time_tests {
     fn editor_mode_schedules_cursor_blink_wake() {
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec!["hello".into()], 80, 10.0),
+            DocumentFixture::new(vec!["hello".into()], 80, 10.0),
             Box::new(EditorPlugin::new()),
         );
         app.editor_runtime.set_window_focus(true);
@@ -1252,7 +1254,7 @@ mod wake_time_tests {
     fn unfocused_window_skips_blink_wake() {
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec!["hello".into()], 80, 10.0),
+            DocumentFixture::new(vec!["hello".into()], 80, 10.0),
             Box::new(EditorPlugin::new()),
         );
         app.editor_runtime.set_window_focus(false);

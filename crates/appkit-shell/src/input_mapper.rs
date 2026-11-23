@@ -18,13 +18,6 @@ pub use appkit_core::edit_command::EditCommand;
 /// Ime::Commit is the authoritative insertion path during composition.
 /// Returns `None` if the key combination is not bound to any command.
 pub fn key_to_command(key: &Key, mods: ModifiersState) -> Option<EditCommand> {
-    eprintln!(
-        "[key_to_command] key={key:?} ctrl={} super={} alt={} shift={}",
-        mods.control_key(),
-        mods.super_key(),
-        mods.alt_key(),
-        mods.shift_key()
-    );
     let ctrl = mods.control_key();
     let super_ = mods.super_key();
     let alt = mods.alt_key();

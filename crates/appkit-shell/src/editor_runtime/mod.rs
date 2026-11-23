@@ -682,14 +682,24 @@ impl EditorRuntime {
         self.theme = theme;
     }
 
-    #[doc(hidden)]
-    pub fn take_render_resources(&mut self) -> RenderResources {
-        self.render_session.take_render_resources()
+    /// Runs a render operation with the frame resources and restores them on scope exit.
+    ///
+    /// The operation cannot open another render resource scope on the same editor.
+    pub fn with_render_resources<Output>(
+        &mut self,
+        render: impl FnOnce(&mut Self, &mut RenderResources) -> Output,
+    ) -> Output {
+        Self::with_render_resources_for(self, |editor| editor, render)
     }
 
-    #[doc(hidden)]
-    pub fn restore_render_resources(&mut self, resources: RenderResources) {
-        self.render_session.restore_render_resources(resources);
+    /// Also grants access to product state when its render code needs the whole owner.
+    /// `editor` must select the same editor field throughout the operation.
+    pub fn with_render_resources_for<Owner, Output>(
+        owner: &mut Owner,
+        editor: fn(&mut Owner) -> &mut Self,
+        render: impl FnOnce(&mut Owner, &mut RenderResources) -> Output,
+    ) -> Output {
+        render_session::with_render_resources(owner, editor, render)
     }
 
     pub fn clear_frame_cluster_pool(&mut self) {
@@ -702,10 +712,6 @@ impl EditorRuntime {
 
     pub fn render_frame_count(&self) -> u32 {
         self.render_session.render_frame_count()
-    }
-
-    pub fn note_reshape_result_arrived(&mut self, arrived_at: std::time::Instant) -> u128 {
-        self.render_session.note_result_arrived(arrived_at)
     }
 
     pub fn request_resize(&mut self, width: u32, height: u32) -> ResizeOutcome {
@@ -865,6 +871,16 @@ impl EditorRuntime {
     pub fn edit_active_document(&mut self, intent: ui::plugin::EditIntent) -> EditorOutcome {
         self.input_session.set_preferred_x(None);
         self.model_session.edit_active_document(intent, self.editor_line_height())
+    }
+
+    /// Applies a document-level transaction independently of the active view's editing mode.
+    pub fn apply_active_document_edit_transaction(
+        &mut self,
+        transaction: ui::plugin::EditTransaction,
+    ) -> EditorOutcome {
+        self.input_session.set_preferred_x(None);
+        self.model_session
+            .apply_active_document_edit_transaction(transaction, self.editor_line_height())
     }
 
     /// Applies a source-editor command after product shortcuts and view-specific navigation.
@@ -1862,7 +1878,7 @@ mod tests {
         }
     }
 
-    fn runtime_with_clean_tab() -> EditorRuntime {
+    pub(super) fn runtime_with_clean_tab() -> EditorRuntime {
         let mut registry = ui::plugin::PluginRegistry::new();
         registry.register(Box::new(EditorPluginFactory));
         let view_routes = ViewRouteTable::new(
@@ -2216,19 +2232,19 @@ mod tests {
     #[test]
     fn active_document_uses_the_shared_editor_surface_in_a_product_frame() {
         let mut runtime = runtime_with_clean_tab();
-        let mut resources = runtime.take_render_resources();
         let mut frame = runtime.begin_frame().expect("headless frame should begin");
 
         let painted = runtime
-            .paint_active_editor(
-                &mut frame,
-                &mut resources,
-                ui::Rect::new(240.0, 32.0, 640.0, 480.0),
-            )
+            .with_render_resources(|editor, resources| {
+                editor.paint_active_editor(
+                    &mut frame,
+                    resources,
+                    ui::Rect::new(240.0, 32.0, 640.0, 480.0),
+                )
+            })
             .expect("active editor should accept a product-owned rect");
 
         assert!(matches!(painted, EditorSurfacePaint::Document { .. }));
-        runtime.restore_render_resources(resources);
     }
 
     #[test]
@@ -2238,13 +2254,14 @@ mod tests {
             EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
         let _ = runtime.commit_text(focused_context, "\nsecond line".to_owned());
         let editor_rect = ui::Rect::new(240.0, 32.0, 640.0, 480.0);
-        let mut resources = runtime.take_render_resources();
-        assert!(resources.text.is_none());
-        assert!(resources.gpu.is_none());
         let mut frame = runtime.begin_frame().expect("headless frame should begin");
 
         runtime
-            .paint_active_editor(&mut frame, &mut resources, editor_rect)
+            .with_render_resources(|editor, resources| {
+                assert!(resources.text.is_none());
+                assert!(resources.gpu.is_none());
+                editor.paint_active_editor(&mut frame, resources, editor_rect)
+            })
             .expect("plain-text editor should measure its viewport before resources are ready");
 
         let tab_id = runtime.active_tab_id().expect("first TXT tab should stay active");
@@ -2256,7 +2273,6 @@ mod tests {
             None,
             "a short first TXT document must not expose a transient scrollbar"
         );
-        runtime.restore_render_resources(resources);
     }
 
     #[test]
@@ -2274,13 +2290,14 @@ mod tests {
             OpenDisposition::Persistent,
         );
         let editor_rect = ui::Rect::new(240.0, 32.0, 640.0, 480.0);
-        let mut resources = runtime.take_render_resources();
-        assert!(resources.text.is_none());
-        assert!(resources.gpu.is_none());
         let mut frame = runtime.begin_frame().expect("second TXT frame should begin");
 
         runtime
-            .paint_active_editor(&mut frame, &mut resources, editor_rect)
+            .with_render_resources(|editor, resources| {
+                assert!(resources.text.is_none());
+                assert!(resources.gpu.is_none());
+                editor.paint_active_editor(&mut frame, resources, editor_rect)
+            })
             .expect("second TXT should synchronize its viewport without render resources");
 
         let scrollbar = runtime
@@ -2288,7 +2305,6 @@ mod tests {
             .and_then(|input| input.vertical)
             .expect("overflowing second TXT document should expose a vertical scrollbar");
         assert_eq!(scrollbar.total_display_rows, 101);
-        runtime.restore_render_resources(resources);
     }
 
     #[test]
@@ -2899,10 +2915,11 @@ mod tests {
             }),
         );
         let editor_rect = ui::Rect::new(100.0, 200.0, 640.0, 480.0);
-        let mut resources = runtime.take_render_resources();
         let mut frame = runtime.begin_frame().expect("headless frame should begin");
         runtime
-            .paint_active_editor(&mut frame, &mut resources, editor_rect)
+            .with_render_resources(|editor, resources| {
+                editor.paint_active_editor(&mut frame, resources, editor_rect)
+            })
             .expect("headless plugin frame should record its painted bounds");
 
         let ime_rect = runtime
@@ -2938,10 +2955,11 @@ mod tests {
             .tab_session(tab_id)
             .expect("active plain-text tab should remain available")
             .sub_line_pixel_offset(metrics.line_height);
-        let mut resources = runtime.take_render_resources();
         let mut frame = runtime.begin_frame().expect("headless frame should begin");
         runtime
-            .paint_active_editor(&mut frame, &mut resources, editor_rect)
+            .with_render_resources(|editor, resources| {
+                editor.paint_active_editor(&mut frame, resources, editor_rect)
+            })
             .expect("headless plain-text frame should record its painted bounds");
         runtime.plain_text_preedit_advance_px = PREEDIT_ADVANCE_PX;
 

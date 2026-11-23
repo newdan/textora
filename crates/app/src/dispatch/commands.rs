@@ -340,11 +340,12 @@ mod recent_file_tests {
     use appkit_core::file_history::FileHistoryEntry;
 
     use super::App;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
 
     #[cfg(feature = "markdown")]
     fn app_with_markdown_editor(source: &str) -> App {
-        let document = DocumentView::new(source.split('\n').map(str::to_owned).collect(), 80, 15.0);
+        let document =
+            DocumentFixture::new(source.split('\n').map(str::to_owned).collect(), 80, 15.0);
         let mut app = App::new(None);
         app.push_entry_for_test(
             document,
@@ -414,9 +415,9 @@ mod recent_file_tests {
         std::fs::write(&path, "first\nsecond\nthird")
             .expect("recent-file fixture should be writable");
         let mut app = App::new(None);
-        app.open_file(&path).expect("fixture file should open");
+        let _ = app.open_file(&path).expect("fixture file should open");
         let existing_id = app.active_tab_id().expect("fixture file should have a tab id");
-        app.new_untitled_doc();
+        let _ = app.new_untitled_doc();
         let tab_count_before_reopen = app.editor_tab_count();
         app.file_history.entries = vec![history_entry(&path, 1, 3, 2, 4.25)];
         std::fs::remove_file(&path)
@@ -452,7 +453,7 @@ mod recent_file_tests {
         let path = directory.path().join("table-picker.md");
         std::fs::write(&path, "existing text").expect("table-picker fixture should be writable");
         let mut app = App::new(None);
-        app.open_file(&path).expect("Markdown fixture should open");
+        let _ = app.open_file(&path).expect("Markdown fixture should open");
         let generation_before =
             app.active_tab_session().expect("Markdown tab should be active").document.generation();
 
@@ -555,7 +556,7 @@ mod recent_file_tests {
 mod tests {
     use super::*;
     use crate::canvas_viewport::CanvasViewportAction;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
 
     struct CanvasCommandPlugin;
 
@@ -582,7 +583,7 @@ mod tests {
 
     fn app_with_prepared_canvas_viewport() -> App {
         let mut app = App::new(None);
-        let document = DocumentView::new(vec!["canvas".to_string()], 80, 10.0);
+        let document = DocumentFixture::new(vec!["canvas".to_string()], 80, 10.0);
         app.push_entry_for_test(document, Box::new(CanvasCommandPlugin));
         app.switch_workspace_for_test(0);
 
@@ -610,7 +611,7 @@ mod tests {
             .snapshot()
             .expect("prepared canvas viewport must retain a snapshot");
         let font_size_before = app.settings.font_size;
-        app.apply_canvas_viewport_action(CanvasViewportAction::ZoomBy {
+        let _ = app.apply_canvas_viewport_action(CanvasViewportAction::ZoomBy {
             factor: 1.25,
             screen_anchor: ui::canvas::CanvasPoint::new(500.0, 400.0),
         });

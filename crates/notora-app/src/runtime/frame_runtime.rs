@@ -4,8 +4,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use appkit_shell::document_presentation::SourceSpacingState;
 use appkit_shell::editor_runtime::{
-    EditorSurfacePaint, EmptyFrameTarget, RenderError, SurfaceFrameOptions, WindowCornerClip,
+    EditorFrame, EditorRuntime, EditorSurfacePaint, EmptyFrameTarget, RenderError, RenderResources,
+    SurfaceFrameOptions, WindowCornerClip,
 };
 use ui::Widget;
 use ui::document_search_bar::{
@@ -33,14 +35,13 @@ const MARKDOWN_PLUGIN_ID: &str = ui::plugin::PLUGIN_MARKDOWN_EDITOR;
 const MARKDOWN_FILE_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
 const SOURCE_SPACING_SEMANTIC_VERSION: u64 = 1;
 
-fn refresh_source_spacing_state(editor: &mut appkit_shell::editor_runtime::EditorRuntime) {
+fn refresh_source_spacing_state(editor: &mut EditorRuntime) {
     let Some(tab_id) = editor.active_tab_id() else {
         return;
     };
     let Some(mut tab) = editor.tab_session_mut(tab_id) else {
         return;
     };
-    let mut presentation = tab.take_presentation();
     let is_markdown = tab.plugin_name() == MARKDOWN_PLUGIN_ID
         || tab
             .document
@@ -56,14 +57,12 @@ fn refresh_source_spacing_state(editor: &mut appkit_shell::editor_runtime::Edito
             },
         );
     let source_revision = tab.document.content_revision();
-    if presentation.source_spacing.source_revision == source_revision
-        && presentation.source_spacing.is_markdown == is_markdown
-    {
-        tab.restore_presentation(presentation);
+    let spacing = tab.source_spacing();
+    if spacing.source_revision == source_revision && spacing.is_markdown == is_markdown {
         return;
     }
 
-    presentation.source_spacing.protected_ranges = if is_markdown {
+    let protected_ranges = if is_markdown {
         tab.source_spacing_protected_ranges().unwrap_or_else(|| {
             let parsed = textora_markdown::parser::parse_markdown(&tab.document.full_text());
             textora_markdown::typography::extract_prose_ranges(&parsed)
@@ -75,10 +74,12 @@ fn refresh_source_spacing_state(editor: &mut appkit_shell::editor_runtime::Edito
     } else {
         Arc::default()
     };
-    presentation.source_spacing.semantic_version = SOURCE_SPACING_SEMANTIC_VERSION;
-    presentation.source_spacing.source_revision = source_revision;
-    presentation.source_spacing.is_markdown = is_markdown;
-    tab.restore_presentation(presentation);
+    tab.set_source_spacing(SourceSpacingState {
+        protected_ranges,
+        semantic_version: SOURCE_SPACING_SEMANTIC_VERSION,
+        source_revision,
+        is_markdown,
+    });
 }
 
 #[derive(Debug)]
@@ -422,11 +423,11 @@ impl FrameRuntime {
     pub(super) fn render_frame(
         &mut self,
         document_runtime: &mut DocumentRuntime,
-        input: FrameInput<'_>,
+        mut input: FrameInput<'_>,
     ) -> Result<EditorSurfacePaint, RenderError> {
         let mut model =
             NotoraRenderModel::from_state_and_settings(input.state, input.product_settings);
-        model.settings_overlay.persistence = input.persistence_view;
+        model.settings_overlay.persistence = std::mem::take(&mut input.persistence_view);
         model.editor_pane = if model.encrypted_note_unlock.is_some() {
             EditorPaneState::EncryptedUnlock
         } else if input.editor_is_active {
@@ -442,41 +443,35 @@ impl FrameRuntime {
             model.editor_chrome = crate::editor_pane::EditorPaneInput::default();
         }
         refresh_source_spacing_state(document_runtime.editor_mut());
-        let mut frame = document_runtime.editor_mut().begin_frame()?;
-        let mut render_resources = document_runtime.editor_mut().take_render_resources();
-        if let Some(text) = render_resources.text.as_mut() {
+        let editor = document_runtime.editor_mut();
+        let editor_surface = editor.with_render_resources(|editor, resources| {
+            self.render_editor_frame(editor, resources, input, &model)
+        })?;
+        editor.mark_frame_presented();
+        Ok(editor_surface)
+    }
+
+    fn render_editor_frame(
+        &mut self,
+        editor: &mut EditorRuntime,
+        resources: &mut RenderResources,
+        input: FrameInput<'_>,
+        model: &NotoraRenderModel,
+    ) -> Result<EditorSurfacePaint, RenderError> {
+        let mut frame = editor.begin_frame()?;
+        if let Some(text) = resources.text.as_mut() {
             text.begin_frame();
         }
-        frame.with_layout_context(|context| {
-            self.document_search_bar.set_rect(self.document_search_rect, context);
-        });
-        let frame_state = super::window_runtime::frame_state(document_runtime.editor().window());
-        self.window_frame.set_input(
-            ui::window_frame::WindowFrameInput {
-                title: super::PRODUCT_WINDOW_TITLE.to_owned(),
-                state: frame_state,
-                navigation_toggle: if self.navigation_toggle_available(input.state.layout.overlay) {
-                    ui::window_frame::WindowFrameNavigationToggle::Enabled
-                } else {
-                    ui::window_frame::WindowFrameNavigationToggle::Disabled
-                },
-            },
-            ui::Rect::new(0.0, 0.0, input.window_width_px, input.window_height_px),
-            input.layout.dpi,
-        );
-        frame.with_underlay_paint_context(|context| self.window_frame.paint_title(context));
+        let frame_state = super::window_runtime::frame_state(editor.window());
+        self.paint_frame_underlay(&mut frame, &input, frame_state);
         let editor_surface = if input.editor_is_active {
-            document_runtime.editor_mut().paint_active_editor(
-                &mut frame,
-                &mut render_resources,
-                input.layout.editor_body_rect,
-            )?
+            editor.paint_active_editor(&mut frame, resources, input.layout.editor_body_rect)?
         } else {
             EditorSurfacePaint::Empty
         };
         let editor_scrollbars_input = (input.editor_is_active
             && input.state.layout.overlay == crate::OverlayState::None)
-            .then(|| document_runtime.editor().active_editor_scrollbars_input())
+            .then(|| editor.active_editor_scrollbars_input())
             .flatten();
         frame.with_layout_context(|context| {
             self.shell.set_canvas_scrollbars_input(
@@ -487,18 +482,18 @@ impl FrameRuntime {
         });
         let search_bar = (input.state.layout.overlay == crate::OverlayState::None)
             .then_some(&self.document_search_bar);
-        self.shell.render_with_document_search(&mut frame, input.layout, &model, search_bar)?;
+        self.shell.render_with_document_search(&mut frame, input.layout, model, search_bar)?;
         self.shell.synchronize_focus(input.state.layout.focus_target, Instant::now());
         frame.with_paint_context(|context| self.window_frame.paint_border(context));
         let mut vertices = Vec::new();
         frame.drain_into(
             ui::Screen::new(input.window_width_px, input.window_height_px),
-            &mut render_resources,
+            resources,
             &mut vertices,
         );
         let window_corner_radius = (frame_state == ui::window_frame::WindowFrameState::Restored)
             .then_some(ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * input.layout.dpi);
-        if let Err(error) = render_resources.submit_surface_frame(
+        if let Err(error) = resources.submit_surface_frame(
             &vertices,
             SurfaceFrameOptions {
                 background: self.theme.application_theme().editor_surface,
@@ -510,9 +505,32 @@ impl FrameRuntime {
             eprintln!("[window] 无法同步合成窗口圆角：{error}");
         }
         let _ = frame.present()?;
-        document_runtime.editor_mut().restore_render_resources(render_resources);
-        document_runtime.editor_mut().mark_frame_presented();
         Ok(editor_surface)
+    }
+
+    fn paint_frame_underlay(
+        &mut self,
+        frame: &mut EditorFrame,
+        input: &FrameInput<'_>,
+        state: ui::window_frame::WindowFrameState,
+    ) {
+        frame.with_layout_context(|context| {
+            self.document_search_bar.set_rect(self.document_search_rect, context);
+        });
+        self.window_frame.set_input(
+            ui::window_frame::WindowFrameInput {
+                title: super::PRODUCT_WINDOW_TITLE.to_owned(),
+                state,
+                navigation_toggle: if self.navigation_toggle_available(input.state.layout.overlay) {
+                    ui::window_frame::WindowFrameNavigationToggle::Enabled
+                } else {
+                    ui::window_frame::WindowFrameNavigationToggle::Disabled
+                },
+            },
+            ui::Rect::new(0.0, 0.0, input.window_width_px, input.window_height_px),
+            input.layout.dpi,
+        );
+        frame.with_underlay_paint_context(|context| self.window_frame.paint_title(context));
     }
 
     pub(super) fn update_focused_ime_cursor_area(
@@ -636,6 +654,45 @@ mod chrome_tests {
     use super::*;
 
     #[test]
+    fn invalid_editor_rect_preserves_frame_resources_for_retry() {
+        const CACHED_DOCUMENT_OFFSET: usize = 42;
+
+        let mut app = super::super::tests::app();
+        super::super::tests::install_registered_note(&mut app, "/frame-retry.md", "# Retry");
+        app.document_runtime.editor_mut().with_render_resources(|_, resources| {
+            resources.frame_cache.first_line.doc_offset = CACHED_DOCUMENT_OFFSET;
+        });
+        let valid_layout = app.shell_layout();
+        let mut invalid_layout = valid_layout;
+        invalid_layout.editor_body_rect.w = f32::NAN;
+        let frame_input = |layout| FrameInput {
+            state: app.action_runtime.state(),
+            product_settings: app.persistence_runtime.product_settings(),
+            persistence_view: app.persistence_runtime.persistence_view(),
+            layout,
+            window_width_px: 1200.0,
+            window_height_px: 800.0,
+            editor_is_active: true,
+        };
+
+        assert!(matches!(
+            app.frame_runtime.render_frame(&mut app.document_runtime, frame_input(invalid_layout)),
+            Err(RenderError::InvalidEditorRect)
+        ));
+        assert!(!app.document_runtime.editor().first_frame_presented());
+        let preserved_offset = app
+            .document_runtime
+            .editor_mut()
+            .with_render_resources(|_, resources| resources.frame_cache.first_line.doc_offset);
+        assert_eq!(preserved_offset, CACHED_DOCUMENT_OFFSET);
+
+        app.frame_runtime
+            .render_frame(&mut app.document_runtime, frame_input(valid_layout))
+            .expect("a valid frame should render after an invalid editor rect");
+        assert!(app.document_runtime.editor().first_frame_presented());
+    }
+
+    #[test]
     fn wide_editor_does_not_duplicate_header_delete_in_toolbar() {
         let layout = ShellLayout {
             dpi: 1.0,
@@ -676,22 +733,18 @@ mod spacing_tests {
             .expect("untitled tab should exist")
             .replace_plugin(Box::new(appkit_shell::editor_plugin::EditorPlugin::new()));
         super::refresh_source_spacing_state(editor);
-        let mut tab = editor.tab_session_mut(tab_id).expect("source tab should exist");
+        let tab = editor.tab_session(tab_id).expect("source tab should exist");
         assert!(tab.document.file_path.is_none());
         assert_eq!(tab.document.full_text(), source);
-        let presentation = tab.take_presentation();
+        let source_spacing = tab.source_spacing();
         let code_start = source.find('`').expect("fixture has inline code");
-        assert!(presentation.source_spacing.is_markdown);
+        assert!(source_spacing.is_markdown);
         assert!(
-            presentation
-                .source_spacing
+            source_spacing
                 .protected_ranges
                 .iter()
                 .any(|range| { range.start <= code_start && range.end >= source.len() })
         );
-        assert!(
-            !presentation.source_spacing.protected_ranges.iter().any(|range| range.contains(&0))
-        );
-        tab.restore_presentation(presentation);
+        assert!(!source_spacing.protected_ranges.iter().any(|range| range.contains(&0)));
     }
 }

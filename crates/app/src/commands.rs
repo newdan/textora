@@ -1,54 +1,33 @@
 //! Product tests for the shared source-editor commands.
 
-use crate::document_view::DocumentView;
-use crate::edit_transaction::DocumentModelMut;
+use crate::document_fixture::DocumentFixture;
 use appkit_shell::input_mapper::EditCommand;
 use ui::core::Clipboard;
 use ui::render_geom::AdvanceCacheEntry;
 
 pub(crate) use appkit_shell::edit_transaction::EditOutcome;
-use appkit_shell::editor_commands::{
-    execute_edit_command_with_clipboard as execute_edit_command_v2_with_presentation_and_clipboard,
-    execute_edit_command_with_system_clipboard,
-};
+use appkit_shell::editor_commands::execute_edit_command_with_clipboard as execute_edit_command_v2_with_presentation_and_clipboard;
+pub(crate) use appkit_shell::editor_commands::execute_edit_command_with_system_clipboard as execute_edit_command_v2_with_presentation;
 
 pub(crate) fn execute_edit_command_v2(
     cmd: &EditCommand,
-    dv: &mut DocumentView,
+    dv: &mut DocumentFixture,
     advance_cache: &[AdvanceCacheEntry],
 ) -> EditOutcome {
-    let mut presentation = dv.take_presentation();
+    let presentation = &mut dv.presentation;
     let page_step_rows = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
-    let outcome = execute_edit_command_v2_with_presentation(
+    execute_edit_command_v2_with_presentation(
         cmd,
-        dv,
+        &mut dv.model,
         advance_cache,
         &mut presentation.cursor_render_state,
-        page_step_rows,
-    );
-    dv.restore_presentation(presentation);
-    outcome
-}
-
-pub(crate) fn execute_edit_command_v2_with_presentation(
-    cmd: &EditCommand,
-    dv: &mut impl DocumentModelMut,
-    advance_cache: &[AdvanceCacheEntry],
-    cursor_render_state: &mut crate::cursor_motion::CursorRenderState,
-    page_step_rows: usize,
-) -> EditOutcome {
-    execute_edit_command_with_system_clipboard(
-        cmd,
-        dv.document_model_mut(),
-        advance_cache,
-        cursor_render_state,
         page_step_rows,
     )
 }
 
 pub(crate) fn execute_edit_command(
     command: &EditCommand,
-    document: &mut DocumentView,
+    document: &mut DocumentFixture,
     advance_cache: &[AdvanceCacheEntry],
 ) -> bool {
     execute_edit_command_v2(command, document, advance_cache).executed
@@ -81,32 +60,28 @@ mod command_tests {
 
     fn execute_with_clipboard(
         command: &EditCommand,
-        document: &mut DocumentView,
+        document: &mut DocumentFixture,
         clipboard: &mut dyn Clipboard,
     ) -> EditOutcome {
-        let mut presentation = document.take_presentation();
+        let presentation = &mut document.presentation;
         let page_step_rows = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
-        let outcome = execute_edit_command_v2_with_presentation_and_clipboard(
+        execute_edit_command_v2_with_presentation_and_clipboard(
             command,
             &mut document.model,
             &[],
             &mut presentation.cursor_render_state,
             page_step_rows,
             clipboard,
-        );
-        document.restore_presentation(presentation);
-        outcome
+        )
     }
 
-    const TEST_LINE_HEIGHT: f32 = 24.27;
-
-    fn make_dv(content: &str) -> DocumentView {
+    fn make_dv(content: &str) -> DocumentFixture {
         let lines: Vec<String> = if content.is_empty() {
             vec![]
         } else {
             content.split('\n').map(String::from).collect()
         };
-        DocumentView::new(lines, 20, 10.0)
+        DocumentFixture::new(lines, 20, 10.0)
     }
 
     // ── Cursor movement ──────────────────────────────────────────────
@@ -164,7 +139,7 @@ mod command_tests {
         let mut dv = make_dv("hello");
         dv.cursor_move_to_offset(1);
         assert!(execute_edit_command(&EditCommand::Backspace, &mut dv, &[]));
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT)[0], "ello");
+        assert_eq!(dv.document_lines()[0], "ello");
         assert_eq!(dv.cursor().offset, ByteIndex(0));
     }
 
@@ -172,7 +147,7 @@ mod command_tests {
     fn delete_forward_deletes_grapheme() {
         let mut dv = make_dv("hello");
         assert!(execute_edit_command(&EditCommand::DeleteForward, &mut dv, &[]));
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT)[0], "ello");
+        assert_eq!(dv.document_lines()[0], "ello");
     }
 
     #[test]
@@ -180,7 +155,7 @@ mod command_tests {
         let mut dv = make_dv("hello");
         dv.cursor_move_to_offset(5);
         assert!(execute_edit_command(&EditCommand::InsertChar("X".into()), &mut dv, &[]));
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT)[0], "helloX");
+        assert_eq!(dv.document_lines()[0], "helloX");
     }
 
     #[test]
@@ -188,7 +163,7 @@ mod command_tests {
         let mut dv = make_dv("helloworld");
         dv.cursor_move_to_offset(5);
         assert!(execute_edit_command(&EditCommand::InsertNewline, &mut dv, &[]));
-        let vis = dv.visible_lines_with_line_height(TEST_LINE_HEIGHT);
+        let vis = dv.document_lines();
         assert_eq!(vis[0], "hello");
         assert_eq!(vis[1], "world");
     }
@@ -199,22 +174,22 @@ mod command_tests {
     fn undo_redo() {
         let mut dv = make_dv("hello");
         execute_edit_command(&EditCommand::InsertChar("X".into()), &mut dv, &[]);
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT)[0], "Xhello");
+        assert_eq!(dv.document_lines()[0], "Xhello");
 
         execute_edit_command(&EditCommand::Undo, &mut dv, &[]);
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT)[0], "hello");
+        assert_eq!(dv.document_lines()[0], "hello");
 
         execute_edit_command(&EditCommand::Redo, &mut dv, &[]);
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT)[0], "Xhello");
+        assert_eq!(dv.document_lines()[0], "Xhello");
     }
 
     // ── PageUp/PageDown ──────────────────────────────────────────────
 
     /// Helper: create 100-line doc with visible_rows=10.
     /// Each line "line N" (N=0..99).  Lines 0-9 are 6 bytes each → 7 bytes/line with \n.
-    fn make_100_line_dv() -> DocumentView {
+    fn make_100_line_dv() -> DocumentFixture {
         let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
-        DocumentView::new(lines, 10, 10.0)
+        DocumentFixture::new(lines, 10, 10.0)
     }
 
     #[test]
@@ -252,7 +227,7 @@ mod command_tests {
     fn page_down_at_bottom_clamps() {
         // 12-line doc, visible_rows=10 → page_size=9
         let lines: Vec<String> = (0..12).map(|i| format!("line {i}")).collect();
-        let mut dv = DocumentView::new(lines, 10, 10.0);
+        let mut dv = DocumentFixture::new(lines, 10, 10.0);
         // First PageDown: line 0 → line 9
         execute_edit_command(&EditCommand::PageDown, &mut dv, &[]);
         assert_eq!(dv.cursor_line(), 9);
@@ -283,7 +258,7 @@ mod command_tests {
 
     #[test]
     fn move_up_basic() {
-        let mut dv = DocumentView::new(vec!["line0".to_string(), "line1".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["line0".to_string(), "line1".to_string()], 10, 10.0);
         // cursor at start of line1 (offset 6)
         dv.cursor_move_to_offset(6);
         assert!(execute_edit_command(&EditCommand::MoveUp, &mut dv, &[]));
@@ -293,7 +268,7 @@ mod command_tests {
 
     #[test]
     fn move_down_basic() {
-        let mut dv = DocumentView::new(vec!["line0".to_string(), "line1".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["line0".to_string(), "line1".to_string()], 10, 10.0);
         assert_eq!(dv.cursor().offset, ByteIndex(0));
         assert!(execute_edit_command(&EditCommand::MoveDown, &mut dv, &[]));
         // should be on line1 now
@@ -380,7 +355,7 @@ mod command_tests {
     fn end_with_word_wrap_goes_to_visual_line_end() {
         // "abcdefghij" = 10 chars, simulated wrap at byte 5 → "abcde" + "fghij"
         use ui::render_geom::AdvanceCacheEntry;
-        let mut dv = DocumentView::new(vec!["abcdefghij".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcdefghij".to_string()], 10, 10.0);
         dv.cursor_move_to_offset(2);
         let ac = vec![
             AdvanceCacheEntry {
@@ -434,7 +409,7 @@ mod command_tests {
     #[test]
     fn extend_to_line_end_with_word_wrap() {
         use ui::render_geom::AdvanceCacheEntry;
-        let mut dv = DocumentView::new(vec!["abcdefghij".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcdefghij".to_string()], 10, 10.0);
         dv.cursor_move_to_offset(2);
         let ac = vec![
             AdvanceCacheEntry {
@@ -463,7 +438,7 @@ mod command_tests {
 
     #[test]
     fn home_on_empty_line() {
-        let mut dv = DocumentView::new(vec!["".to_string(), "hello".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["".to_string(), "hello".to_string()], 10, 10.0);
         // Cursor on empty line 0
         assert!(execute_edit_command(&EditCommand::MoveToLineStart, &mut dv, &[]));
         assert_eq!(dv.cursor().offset, ByteIndex(0), "Home on empty line should stay at 0");
@@ -486,7 +461,7 @@ mod command_tests {
     fn page_down_with_word_wrap_moves_by_display_rows() {
         // Line "abcdefghij" (10 chars) wraps at 5 → 2 display rows
         // With visible_rows=4, page_size=3
-        let mut dv = DocumentView::new(vec!["abcde".to_string(); 20], 4, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcde".to_string(); 20], 4, 10.0);
         // PageDown should move by 3 lines (visible_rows-1)
         assert!(execute_edit_command(&EditCommand::PageDown, &mut dv, &[]));
         assert_eq!(dv.cursor_line(), 3, "PageDown should move by visible_rows-1 lines");
@@ -516,10 +491,10 @@ mod command_tests {
         let mut dv = make_dv("hello");
         dv.cursor_move_to_offset(5);
         assert!(execute_edit_command(&EditCommand::Tab, &mut dv, &[]));
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT)[0], "hello    ");
+        assert_eq!(dv.document_lines()[0], "hello    ");
     }
 
-    // ── Commands that don't modify DocumentView ──────────────────────
+    // ── Commands that don't modify DocumentFixture ──────────────────────
 
     #[test]
     fn escape_returns_false() {
@@ -560,7 +535,7 @@ mod command_tests {
         let outcome = execute_with_clipboard(&EditCommand::PastePlainText, &mut dv, &mut clipboard);
 
         assert!(outcome.executed);
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT), vec!["plain"]);
+        assert_eq!(dv.document_lines(), vec!["plain"]);
     }
 
     #[test]
@@ -598,7 +573,7 @@ mod command_tests {
         assert_eq!(dv.cursor().offset, ByteIndex(0));
         assert!(execute_edit_command(&EditCommand::Backspace, &mut dv, &[]));
         assert_eq!(dv.cursor().offset, ByteIndex(0));
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT)[0], "hello");
+        assert_eq!(dv.document_lines()[0], "hello");
     }
 
     #[test]
@@ -614,7 +589,7 @@ mod command_tests {
         assert_eq!(dv.cursor().offset, ByteIndex(4), "Cursor should move backward after deletion");
         assert_eq!(dv.cursor().selection_anchor, None, "Anchor should be cleared");
         assert_eq!(
-            dv.visible_lines_with_line_height(TEST_LINE_HEIGHT)[0],
+            dv.document_lines()[0],
             "hell world",
             "Character before cursor should be deleted"
         );
@@ -629,7 +604,7 @@ mod command_tests {
     }
     #[test]
     fn delete_forward_at_eof_command_noop() {
-        let mut dv = DocumentView::new(vec!["hi".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["hi".to_string()], 10, 10.0);
         dv.cursor_move_to_offset(2); // at EOF
         let before_len = dv.buffer_len();
         assert!(execute_edit_command(&EditCommand::DeleteForward, &mut dv, &[]));
@@ -647,7 +622,7 @@ mod command_tests {
         let after_emoji = 1 + emoji.len();
         dv.cursor_move_to_offset(after_emoji);
         assert!(execute_edit_command(&EditCommand::Backspace, &mut dv, &[]));
-        let vis = dv.visible_lines_with_line_height(TEST_LINE_HEIGHT);
+        let vis = dv.document_lines();
         assert_eq!(vis[0], "xy");
     }
 
@@ -656,7 +631,7 @@ mod command_tests {
         let mut dv = make_dv("");
         assert!(execute_edit_command(&EditCommand::InsertChar("世".into()), &mut dv, &[]));
         assert!(execute_edit_command(&EditCommand::InsertChar("界".into()), &mut dv, &[]));
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT)[0], "世界");
+        assert_eq!(dv.document_lines()[0], "世界");
         assert_eq!(dv.cursor().offset, ByteIndex(6));
     }
 
@@ -723,7 +698,7 @@ mod command_tests {
     fn home_end_multisegment_visual_line() {
         // Simulate a long doc line wrapped into 3 visual segments at bytes 0..5, 5..10, 10..15
         use ui::render_geom::AdvanceCacheEntry;
-        let mut dv = DocumentView::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
         let ac = vec![
             AdvanceCacheEntry {
                 doc_line: 0,
@@ -762,7 +737,7 @@ mod command_tests {
     #[test]
     fn home_first_segment_goes_to_doc_start() {
         use ui::render_geom::AdvanceCacheEntry;
-        let mut dv = DocumentView::new(vec!["hello world".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["hello world".to_string()], 10, 10.0);
         let ac = vec![
             AdvanceCacheEntry {
                 doc_line: 0,
@@ -789,7 +764,7 @@ mod command_tests {
     #[test]
     fn end_last_segment_goes_to_doc_end() {
         use ui::render_geom::AdvanceCacheEntry;
-        let mut dv = DocumentView::new(vec!["hello world".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["hello world".to_string()], 10, 10.0);
         let ac = vec![
             AdvanceCacheEntry {
                 doc_line: 0,
@@ -816,7 +791,7 @@ mod command_tests {
     #[test]
     fn shift_home_end_multisegment() {
         use ui::render_geom::AdvanceCacheEntry;
-        let mut dv = DocumentView::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
         let ac = vec![
             AdvanceCacheEntry {
                 doc_line: 0,
@@ -849,7 +824,7 @@ mod command_tests {
     #[test]
     fn home_end_fallback_when_cache_empty() {
         // advance_cache empty → falls back to doc-line behavior
-        let mut dv = DocumentView::new(vec!["hello world".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["hello world".to_string()], 10, 10.0);
         dv.cursor_move_to_offset(3);
         execute_edit_command(&EditCommand::MoveToLineEnd, &mut dv, &[]);
         assert_eq!(dv.cursor().offset, ByteIndex(11), "End with empty cache → doc line end");
@@ -864,7 +839,7 @@ mod command_tests {
         // previous line because cursor_visual_line_bounds matched the
         // previous entry (local_offset <= vl_end with <=).
         use ui::render_geom::AdvanceCacheEntry;
-        let mut dv = DocumentView::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
         // 3 visual segments: bytes 0..5, 5..10, 10..16
         let ac = vec![
             AdvanceCacheEntry {
@@ -910,7 +885,7 @@ mod command_tests {
         // Verify that pressing Home enough times still reaches doc start
         // (the toggle between indent/start should still work).
         use ui::render_geom::AdvanceCacheEntry;
-        let mut dv = DocumentView::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
         let ac = vec![
             AdvanceCacheEntry {
                 doc_line: 0,
@@ -945,7 +920,7 @@ mod command_tests {
     fn indent_home_in_visual_line() {
         use ui::render_geom::AdvanceCacheEntry;
         // "    hello world" — indented. Visual line 1: "    hello ", VL2: "world"
-        let mut dv = DocumentView::new(vec!["    hello world".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["    hello world".to_string()], 10, 10.0);
         let ac = vec![
             AdvanceCacheEntry {
                 doc_line: 0,
@@ -1033,7 +1008,7 @@ mod command_tests {
     #[test]
     fn end_multi_cluster_nonlast_vl() {
         // Simulate real shaper: each VL has 5 per-char clusters
-        let mut dv = DocumentView::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
         let ac = vec![
             make_realistic_entry(0, 0, 5, 7.8),
             make_realistic_entry(0, 5, 5, 7.8),
@@ -1055,7 +1030,7 @@ mod command_tests {
         // Half-open: byte 5 belongs to VL1 (start of wrapped portion).
         // End goes to VL1's end (byte 10). For mouse clicks, click_hint
         // ensures the correct VL; for keyboard, End follows half-open semantics.
-        let mut dv = DocumentView::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
         let ac = vec![
             make_realistic_entry(0, 0, 5, 7.8),
             make_realistic_entry(0, 5, 5, 7.8),
@@ -1076,7 +1051,7 @@ mod command_tests {
     fn end_last_vl_with_newline_like_boundary() {
         // Simulate where last VL vl_end might be before line_len
         // (e.g., trailing newline excluded by shaper).
-        let mut dv = DocumentView::new(vec!["abcde".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcde".to_string()], 10, 10.0);
         let ac = vec![make_realistic_entry(0, 0, 5, 7.8)];
         dv.cursor_move_to_offset(2);
         execute_edit_command(&EditCommand::MoveToLineEnd, &mut dv, &ac);
@@ -1092,7 +1067,7 @@ mod command_tests {
     fn end_last_vl_multi_line_doc_newline_boundary() {
         // Two lines: "hello" + newline + "world"
         // Line 0: "hello" (5 bytes content), line_len=5 (newline NOT included)
-        let mut dv = DocumentView::new(vec!["hello".to_string(), "world".to_string()], 20, 20.0);
+        let mut dv = DocumentFixture::new(vec!["hello".to_string(), "world".to_string()], 20, 20.0);
         let ac = vec![make_realistic_entry(0, 0, 5, 7.8), make_realistic_entry(1, 0, 5, 7.8)];
         dv.cursor_move_to_offset(2); // line 0
         execute_edit_command(&EditCommand::MoveToLineEnd, &mut dv, &ac);
@@ -1111,7 +1086,7 @@ mod command_tests {
         // Bug: ExtendToLineEnd does NOT have is_last_vl_of_doc check.
         // For non-last VLs, it always does newline check -> target = vl_end.
         // This puts cursor at exclusive end = start of next VL.
-        let mut dv = DocumentView::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["abcdefghijklmnop".to_string()], 10, 10.0);
         let ac = vec![
             make_realistic_entry(0, 0, 5, 7.8),
             make_realistic_entry(0, 5, 5, 7.8),
@@ -1149,7 +1124,7 @@ mod command_tests {
     fn end_cjk_nonlast_vl() {
         // "关于广东省" = 5 chars, 15 bytes
         // VL0: 3 chars [0,9), VL1: 2 chars [9,15)
-        let mut dv = DocumentView::new(vec!["关于广东省".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["关于广东省".to_string()], 10, 10.0);
         let ac = vec![make_cjk_entry(0, 0, 3, 20.0), make_cjk_entry(0, 9, 2, 20.0)];
         dv.cursor_move_to_offset(3);
         execute_edit_command(&EditCommand::MoveToLineEnd, &mut dv, &ac);
@@ -1161,7 +1136,7 @@ mod command_tests {
     fn end_cjk_second_vl_is_last() {
         // "关于广东省珠海市" = 8 chars, 24 bytes
         // VL0: 4 chars [0,12), VL1: 4 chars [12,24)
-        let mut dv = DocumentView::new(vec!["关于广东省珠海市".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["关于广东省珠海市".to_string()], 10, 10.0);
         let ac = vec![make_cjk_entry(0, 0, 4, 18.0), make_cjk_entry(0, 12, 4, 18.0)];
         dv.cursor_move_to_offset(15);
         execute_edit_command(&EditCommand::MoveToLineEnd, &mut dv, &ac);
@@ -1177,7 +1152,7 @@ mod command_tests {
         // Half-open: byte 12 belongs to VL1 (start of wrapped CJK portion).
         // End goes to VL1's end (byte 24). Previous inclusive-end rule kept
         // cursor at VL0's end (byte 12); half-open correctly places it on VL1.
-        let mut dv = DocumentView::new(vec!["关于广东省珠海市".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["关于广东省珠海市".to_string()], 10, 10.0);
         let ac = vec![make_cjk_entry(0, 0, 4, 18.0), make_cjk_entry(0, 12, 4, 18.0)];
         dv.cursor_move_to_offset(12);
         execute_edit_command(&EditCommand::MoveToLineEnd, &mut dv, &ac);
@@ -1187,25 +1162,13 @@ mod command_tests {
 
     #[test]
     fn end_cjk_mid_char_byte_offset() {
-        let mut dv = DocumentView::new(vec!["关于广东省".to_string()], 10, 10.0);
+        let mut dv = DocumentFixture::new(vec!["关于广东省".to_string()], 10, 10.0);
         let ac = vec![make_cjk_entry(0, 0, 3, 20.0), make_cjk_entry(0, 9, 2, 20.0)];
         dv.cursor_move_to_offset(4);
         execute_edit_command(&EditCommand::MoveToLineEnd, &mut dv, &ac);
         assert_eq!(dv.cursor().offset, ByteIndex(9), "End should go to vl_end (9)");
     }
 
-    #[test]
-    fn document_view_cursor_render_helpers_manage_click_hint_and_page_step() {
-        let mut dv = make_dv("hello\nworld");
-        dv.presentation.display.viewport.visible_rows = 5;
-
-        dv.set_click_hint(textora_core::types::UniCharOffset(3), 1);
-        assert_eq!(dv.click_hint(), Some((textora_core::types::UniCharOffset(3), 1)));
-
-        dv.clear_click_hint();
-        assert!(dv.click_hint().is_none());
-        assert_eq!(dv.page_step_rows(), 4);
-    }
     // ── Enter / Backspace / rebuild: consecutive-newline scanning ──
     //
     // These cover both rescan_from (incremental) and rebuild_from (full)
@@ -1216,7 +1179,7 @@ mod command_tests {
     #[test]
     fn enter_on_space_line_preserves_next() {
         // --- cursor at end of space-line (after the space, at the LF) ---
-        let mut dv = DocumentView::new(
+        let mut dv = DocumentFixture::new(
             [
                 "line1",
                 "line2",
@@ -1235,21 +1198,21 @@ mod command_tests {
         let body_end: usize = [6, 6, 6, 6, 15].iter().sum(); // bytes before " \n"
         dv.cursor_move_to_offset(body_end + 1);
         execute_edit_command(&EditCommand::InsertNewline, &mut dv, &[]);
-        let vis = dv.visible_lines_with_line_height(TEST_LINE_HEIGHT);
+        let vis = dv.document_lines();
         assert_eq!(vis.len(), 8);
         assert_eq!(vis[5], " ");
         assert_eq!(vis[6], "");
         assert!(vis[7].starts_with(" /Users/"), "slash eaten: {:?}", vis[7]);
 
         // --- cursor at start of space-line (before the space) ---
-        let mut dv = DocumentView::new(
+        let mut dv = DocumentFixture::new(
             ["line1", " ", " /Users/foo"].iter().map(|s| s.to_string()).collect(),
             60,
             10.0,
         );
         dv.cursor_move_to_offset(6); // after "line1\n"
         execute_edit_command(&EditCommand::InsertNewline, &mut dv, &[]);
-        let vis = dv.visible_lines_with_line_height(TEST_LINE_HEIGHT);
+        let vis = dv.document_lines();
         assert_eq!(vis[0], "line1");
         assert_eq!(vis[1], "");
         assert_eq!(vis[2], " ");
@@ -1262,7 +1225,7 @@ mod command_tests {
         let mut dv = make_dv("hello world");
         dv.cursor_move_to_offset(5);
         execute_edit_command(&EditCommand::InsertNewline, &mut dv, &[]);
-        let vis = dv.visible_lines_with_line_height(TEST_LINE_HEIGHT);
+        let vis = dv.document_lines();
         assert_eq!(vis[0], "hello");
         assert_eq!(vis[1], " world");
     }
@@ -1279,17 +1242,17 @@ b",
         for _ in 0..2 {
             execute_edit_command(&EditCommand::InsertNewline, &mut dv, &[]);
         }
-        let vis = dv.visible_lines_with_line_height(TEST_LINE_HEIGHT);
+        let vis = dv.document_lines();
         assert_eq!(vis, &["a", "", "", "b"]);
 
         // Triple Enter at end of a single-space line
         let mut dv =
-            DocumentView::new(["x", " ", "y"].iter().map(|s| s.to_string()).collect(), 10, 10.0);
+            DocumentFixture::new(["x", " ", "y"].iter().map(|s| s.to_string()).collect(), 10, 10.0);
         dv.cursor_move_to_offset(3); // after "x\n "
         for _ in 0..3 {
             execute_edit_command(&EditCommand::InsertNewline, &mut dv, &[]);
         }
-        let vis = dv.visible_lines_with_line_height(TEST_LINE_HEIGHT);
+        let vis = dv.document_lines();
         assert_eq!(vis, &["x", " ", "", "", "", "y"]);
 
         // Enter at offset 0
@@ -1299,7 +1262,7 @@ second",
         );
         dv.cursor_move_to_offset(0);
         execute_edit_command(&EditCommand::InsertNewline, &mut dv, &[]);
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT), &["", "first", "second"]);
+        assert_eq!(dv.document_lines(), &["", "first", "second"]);
     }
 
     /// Backspace across line boundaries must preserve content.
@@ -1312,27 +1275,30 @@ world",
         );
         dv.cursor_move_to_offset(6);
         execute_edit_command(&EditCommand::Backspace, &mut dv, &[]);
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT), &["helloworld"]);
+        assert_eq!(dv.document_lines(), &["helloworld"]);
 
         // Backspace across consecutive empty lines
-        let mut dv =
-            DocumentView::new(["a", "", "", "b"].iter().map(|s| s.to_string()).collect(), 10, 10.0);
+        let mut dv = DocumentFixture::new(
+            ["a", "", "", "b"].iter().map(|s| s.to_string()).collect(),
+            10,
+            10.0,
+        );
         dv.cursor_move_to_offset(4); // "a\n\n\n|b"
         execute_edit_command(&EditCommand::Backspace, &mut dv, &[]);
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT), &["a", "", "b"]);
+        assert_eq!(dv.document_lines(), &["a", "", "b"]);
     }
 
     /// Full rebuild (rebuild_from) preserves consecutive empty lines.
     #[test]
     fn rebuild_preserves_empty_lines() {
-        let dv = DocumentView::new(
+        let dv = DocumentFixture::new(
             ["a", "", "", "", "b"].iter().map(|s| s.to_string()).collect(),
             10,
             10.0,
         );
         let rebuilt = LineIndex::rebuild_from(&dv.tb);
         assert_eq!(rebuilt.line_count(), 5);
-        assert_eq!(dv.visible_lines_with_line_height(TEST_LINE_HEIGHT), &["a", "", "", "", "b"]);
+        assert_eq!(dv.document_lines(), &["a", "", "", "", "b"]);
     }
 
     /// Enter at end of a non-empty line that has an empty line right after.
@@ -1340,7 +1306,7 @@ world",
     #[test]
     fn enter_at_end_of_line_before_empty_line() {
         // Simulates: line 8 "/Users/...", line 9 "", line 10 " "
-        let mut dv = DocumentView::new(
+        let mut dv = DocumentFixture::new(
             vec!["/Users/foo/bar".to_string(), "".to_string(), " ".to_string()],
             10,
             10.0,
@@ -1349,7 +1315,7 @@ world",
         dv.cursor_move_to_offset(15); // "/Users/foo/bar\n" = 15 bytes
         let old = dv.line_count();
         execute_edit_command(&EditCommand::InsertNewline, &mut dv, &[]);
-        let vis = dv.visible_lines_with_line_height(TEST_LINE_HEIGHT);
+        let vis = dv.document_lines();
         // Should now have 4 lines: "/Users/foo/bar", "", "", " "
         assert_eq!(dv.line_count(), old + 1, "line count should increase by 1");
         assert_eq!(vis[0], "/Users/foo/bar");

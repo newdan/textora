@@ -4025,6 +4025,7 @@ dependencies = [
  "similar",
  "smallvec",
  "stdext",
+ "syn",
  "tempfile",
  "textora-appkit-core",
  "textora-appkit-shell",

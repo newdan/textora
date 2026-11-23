@@ -9,9 +9,9 @@ use textora_core::document::ReadableDocument;
 
 use crate::app::App;
 use appkit_shell::editor_runtime::{
-    EditorFrame, EditorPaintStyle, EmptyFrameTarget, PluginContentTarget, PreeditAdvanceMeasure,
-    RenderResources, SearchHighlightStyle, SurfaceFrameOptions, TextSurfaceLayout,
-    WindowCornerClip,
+    EditorFrame, EditorPaintStyle, EditorRuntime, EmptyFrameTarget, PluginContentTarget,
+    PreeditAdvanceMeasure, RenderResources, SearchHighlightStyle, SurfaceFrameOptions,
+    TextSurfaceLayout, WindowCornerClip,
 };
 use ui::canvas::CanvasViewportSnapshot;
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_NOVEL_VIEW};
@@ -200,7 +200,7 @@ mod tests {
     use super::{
         App, active_mindmap_style_input, needs_redraw_after_render, plugin_selection_pull_is_safe,
     };
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::tab_runtime::TabRuntime;
     use ui::canvas::CanvasPoint;
     use ui::plugin::{
@@ -336,7 +336,7 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec!["canvas".to_string()], 10, 10.0),
+            DocumentFixture::new(vec!["canvas".to_string()], 10, 10.0),
             Box::new(CanvasSequencePlugin { events: Rc::clone(&events) }),
         );
         app.switch_workspace_for_test(0);
@@ -358,7 +358,7 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec!["canvas".to_string()], 10, 10.0),
+            DocumentFixture::new(vec!["canvas".to_string()], 10, 10.0),
             Box::new(CanvasSequencePlugin { events }),
         );
         app.switch_workspace_for_test(0);
@@ -410,7 +410,7 @@ mod tests {
         let mut app = App::new(None);
         let source = "synchronized canvas source";
         app.push_entry_for_test(
-            DocumentView::new(vec![source.to_string()], 10, 10.0),
+            DocumentFixture::new(vec![source.to_string()], 10, 10.0),
             Box::new(SourceSynchronizedCanvasPlugin { state: Rc::clone(&state) }),
         );
         app.switch_workspace_for_test(0);
@@ -430,7 +430,7 @@ mod tests {
         let state = Rc::new(RefCell::new(SourceSynchronizedCanvasState::new(200.0)));
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec!["canvas source".to_string()], 10, 10.0),
+            DocumentFixture::new(vec!["canvas source".to_string()], 10, 10.0),
             Box::new(SourceSynchronizedCanvasPlugin { state: Rc::clone(&state) }),
         );
         app.switch_workspace_for_test(0);
@@ -507,7 +507,7 @@ mod tests {
         name: &'static str,
         selection: ui::theme::MindmapThemeSelection,
     ) -> ThemeQueryEntry {
-        let document = DocumentView::new(vec!["# Root".into()], 80, 10.0);
+        let document = DocumentFixture::new(vec!["# Root".into()], 80, 10.0);
         let (document, presentation) = document.into_parts();
         ThemeQueryEntry {
             id: TabIdAllocator::new().allocate(),
@@ -848,11 +848,15 @@ impl App {
 
     pub(crate) fn render(&mut self) -> Option<()> {
         let mut frame = self.editor_runtime.begin_frame().ok()?;
-        let mut render_resources = self.editor_runtime.take_render_resources();
-        let result = self.render_with_runtime_resources(&mut render_resources, &mut frame);
-        let _frame_outcome = frame.present();
-        self.editor_runtime.restore_render_resources(render_resources);
-        result
+        EditorRuntime::with_render_resources_for(
+            self,
+            |app| &mut app.editor_runtime,
+            |app, resources| {
+                let result = app.render_with_runtime_resources(resources, &mut frame);
+                let _frame_outcome = frame.present();
+                result
+            },
+        )
     }
 
     fn render_with_runtime_resources(
@@ -882,8 +886,7 @@ impl App {
         let mut perf_editor_search_us = 0;
         let mut perf_editor_cursor_us = 0;
         let sync_plugin_state_started_at = Instant::now();
-        let mut text_state = resources.text.take();
-        let normal_canvas_frame = if let Some(text) = text_state.as_mut() {
+        let normal_canvas_frame = if let Some(text) = resources.text.as_mut() {
             let frame = self.run_normal_canvas_frame(&mut text.shaper);
             if frame.is_none() {
                 self.update_shell_layout(&mut text.shaper);
@@ -895,7 +898,6 @@ impl App {
             None
         };
         let perf_sync_prepare_us = sync_plugin_state_started_at.elapsed().as_micros();
-        resources.text = text_state;
 
         let content_top = self.content_top_offset();
 
@@ -1600,14 +1602,14 @@ impl App {
 #[cfg(test)]
 mod toc_left_offset_tests {
     use super::*;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
 
     #[test]
     fn toc_left_offset_returns_zero_when_toc_hidden() {
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec!["# Hello".into()], 80, 10.0),
+            DocumentFixture::new(vec!["# Hello".into()], 80, 10.0),
             Box::new(EditorPlugin::new()),
         );
         app.switch_workspace_for_test(0);
@@ -1619,7 +1621,7 @@ mod toc_left_offset_tests {
     fn toc_left_offset_returns_only_gap_when_toc_visible() {
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec!["# Hello".into()], 80, 10.0),
+            DocumentFixture::new(vec!["# Hello".into()], 80, 10.0),
             Box::new(EditorPlugin::new()),
         );
         app.switch_workspace_for_test(0);

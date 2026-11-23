@@ -241,12 +241,11 @@ impl App {
 
     pub(crate) fn viewport_content_width(
         &self,
-        document: &impl crate::edit_transaction::DocumentModelRef,
+        document: &appkit_core::document::DocumentModel,
     ) -> f32 {
         let metrics = self.ui_metrics();
         let left_margin = self.toc_left_offset()
-            + self
-                .editor_left_margin_with_metrics(document.document_model().line_count(), &metrics);
+            + self.editor_left_margin_with_metrics(document.line_count(), &metrics);
         let editor_rect = self.ui_shell.editor_rect();
         let editor_right = editor_rect.x + editor_rect.w;
         let physical_w = editor_right - left_margin;
@@ -386,7 +385,7 @@ mod open_document_sender_tests {
         app.open_document_sender()
             .send(open_document_paths.clone())
             .expect("new application owns the product open-document receiver");
-        ProductHost::drain_product_events(&mut app.product);
+        let _ = ProductHost::drain_product_events(&mut app.product);
 
         assert_eq!(app.product.drain_open_documents(), open_document_paths);
     }
@@ -449,18 +448,18 @@ impl App {
 #[cfg(test)]
 mod geometry_metrics_tests {
     use super::App;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
 
     #[test]
     fn app_geometry_uses_metrics_snapshot() {
         let mut app = App::new(None);
         app.push_entry_for_test(
-            DocumentView::new(vec!["first".into()], 80, 10.0),
+            DocumentFixture::new(vec!["first".into()], 80, 10.0),
             Box::new(EditorPlugin::new()),
         );
         app.push_entry_for_test(
-            DocumentView::new(vec!["second".into()], 80, 10.0),
+            DocumentFixture::new(vec!["second".into()], 80, 10.0),
             Box::new(EditorPlugin::new()),
         );
         app.switch_workspace_for_test(0);
@@ -481,7 +480,7 @@ mod geometry_metrics_tests {
 #[cfg(test)]
 mod file_monitor_root_tests {
     use super::App;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
 
     use std::path::PathBuf;
@@ -489,11 +488,11 @@ mod file_monitor_root_tests {
     #[test]
     fn file_monitor_roots_cover_all_open_file_parents_once() {
         let mut app = App::new(None);
-        let mut first = DocumentView::new(vec!["first".into()], 10, 10.0);
+        let mut first = DocumentFixture::new(vec!["first".into()], 10, 10.0);
         first.file_path = Some(PathBuf::from("/library/notes/first.md"));
-        let mut second = DocumentView::new(vec!["second".into()], 10, 10.0);
+        let mut second = DocumentFixture::new(vec!["second".into()], 10, 10.0);
         second.file_path = Some(PathBuf::from("/library/notes/second.md"));
-        let mut third = DocumentView::new(vec!["third".into()], 10, 10.0);
+        let mut third = DocumentFixture::new(vec!["third".into()], 10, 10.0);
         third.file_path = Some(PathBuf::from("/library/archive/third.md"));
         app.push_entry_for_test(first, Box::new(EditorPlugin::new()));
         app.push_entry_for_test(second, Box::new(EditorPlugin::new()));

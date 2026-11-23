@@ -3,8 +3,6 @@
 use crate::app::App;
 use crate::app_effect::AppEffect;
 #[cfg(test)]
-use crate::document_view::DocumentView;
-#[cfg(test)]
 use appkit_shell::editor_runtime::apply_target_to_document;
 pub(crate) use appkit_shell::editor_runtime::{
     apply_edit_hit_target, query_visual_caret_hit, set_wysiwyg_cursor_and_selection,
@@ -33,7 +31,7 @@ impl App {
 #[cfg(test)]
 pub(crate) mod semantic_test_support {
     use crate::app::App;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -175,7 +173,7 @@ pub(crate) mod semantic_test_support {
         state: Rc<RefCell<SemanticPluginState>>,
     ) -> App {
         let mut app = App::new(None);
-        let document = DocumentView::new(vec![text.to_string()], 80, 10.0);
+        let document = DocumentFixture::new(vec![text.to_string()], 80, 10.0);
         app.push_entry_for_test(document, Box::new(SemanticTestPlugin::new(state)));
         app.switch_workspace_for_test(0);
         app
@@ -186,12 +184,12 @@ pub(crate) mod semantic_test_support {
 mod tests {
     use crate::app::App;
     use crate::commands::execute_edit_command_v2;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use appkit_shell::input_mapper::EditCommand;
 
     #[test]
     fn replace_range_empty_moves_insert_point_without_selecting_text() {
-        let mut doc = DocumentView::new(vec!["# hello world".to_string()], 80, 10.0);
+        let mut doc = DocumentFixture::new(vec!["# hello world".to_string()], 80, 10.0);
         doc.cursor_move_to_offset(4);
 
         let outcome = execute_edit_command_v2(
@@ -207,7 +205,7 @@ mod tests {
             "ReplaceRange must not leave a selection anchor"
         );
         assert_eq!(
-            doc.visible_lines_with_line_height(24.0),
+            doc.document_lines(),
             &["# hello world", "next"],
             "inserted text should land at range.start, not the old cursor"
         );
@@ -217,8 +215,11 @@ mod tests {
     #[cfg(feature = "markdown")]
     fn markdown_augmented_insert_text_preserves_empty_separator_blocks() {
         let mut app = App::new(None);
-        let mut doc =
-            DocumentView::new("para1\n\npara2".split('\n').map(str::to_string).collect(), 80, 10.0);
+        let mut doc = DocumentFixture::new(
+            "para1\n\npara2".split('\n').map(str::to_string).collect(),
+            80,
+            10.0,
+        );
         doc.cursor_move_to_offset(6);
         app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
         app.switch_workspace_for_test(0);
@@ -240,14 +241,17 @@ mod tests {
     #[cfg(feature = "markdown")]
     fn transactional_augmented_edit_leaves_no_selection_anchor() {
         let mut app = App::new(None);
-        let mut doc =
-            DocumentView::new("para1\n\npara2".split('\n').map(str::to_string).collect(), 80, 10.0);
+        let mut doc = DocumentFixture::new(
+            "para1\n\npara2".split('\n').map(str::to_string).collect(),
+            80,
+            10.0,
+        );
         doc.cursor_move_to_offset(6);
         app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
         app.switch_workspace_for_test(0);
         app.sync_plugin_state();
 
-        app.dispatch_transactional_edit_for_test(EditCommand::InsertText("中".into()));
+        let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("中".into()));
 
         let doc = &app.active_tab_session().expect("active entry").document;
         assert!(
@@ -261,6 +265,7 @@ mod tests {
 #[cfg(test)]
 mod semantic_target_tests {
     use super::*;
+    use appkit_core::document::DocumentModel;
     use ui::plugin::EditHitTarget;
 
     #[test]
@@ -295,10 +300,10 @@ mod semantic_target_tests {
 
     #[test]
     fn text_target_clears_selection_and_places_caret() {
-        let mut doc = DocumentView::new(vec!["abcdef".into()], 80, 10.0);
+        let mut doc = DocumentModel::from_lines(&["abcdef".into()]);
 
         apply_target_to_document(
-            &mut doc.model,
+            &mut doc,
             EditHitTarget::TextCaret { byte_offset: 3, selection_scope: None },
         );
 
@@ -308,23 +313,20 @@ mod semantic_target_tests {
 
     #[test]
     fn source_object_target_selects_exact_source_range() {
-        let mut doc = DocumentView::new(vec!["abcdef".into()], 80, 10.0);
+        let mut doc = DocumentModel::from_lines(&["abcdef".into()]);
 
-        apply_target_to_document(
-            &mut doc.model,
-            EditHitTarget::SourceObject { source_range: 1..5 },
-        );
+        apply_target_to_document(&mut doc, EditHitTarget::SourceObject { source_range: 1..5 });
 
         assert_eq!(doc.selection_range(), Some((1, 5)));
     }
 
     #[test]
     fn clear_focus_moves_cursor_outside_titles_and_clears_selection() {
-        let mut doc = DocumentView::new(vec!["abcdef".into()], 80, 10.0);
+        let mut doc = DocumentModel::from_lines(&["abcdef".into()]);
         doc.cursor_move_to_offset(3);
         doc.cursor_mut().selection_anchor = Some(1);
 
-        apply_target_to_document(&mut doc.model, EditHitTarget::ClearFocus);
+        apply_target_to_document(&mut doc, EditHitTarget::ClearFocus);
 
         assert_eq!(doc.cursor_offset().to_usize(), doc.buffer_len());
         assert!(doc.cursor().selection_anchor.is_none());
@@ -332,14 +334,14 @@ mod semantic_target_tests {
 
     #[test]
     fn source_object_target_rejects_invalid_byte_and_grapheme_boundaries() {
-        let mut doc = DocumentView::new(vec!["a👍🏼b".into()], 80, 10.0);
+        let mut doc = DocumentModel::from_lines(&["a👍🏼b".into()]);
         let invalid_ranges = [2..9, 1..5, std::ops::Range { start: 9, end: 1 }, 0..usize::MAX];
 
         for source_range in invalid_ranges {
             doc.cursor_move_to_offset(0);
             doc.cursor_mut().selection_anchor = None;
 
-            apply_target_to_document(&mut doc.model, EditHitTarget::SourceObject { source_range });
+            apply_target_to_document(&mut doc, EditHitTarget::SourceObject { source_range });
 
             assert_eq!(doc.cursor_offset().to_usize(), 0);
             assert!(doc.cursor().selection_anchor.is_none());

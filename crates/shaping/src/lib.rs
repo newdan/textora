@@ -1,4 +1,4 @@
-//! edit+ text shaping: cosmic-text wrapper.
+//! textora text shaping: cosmic-text wrapper.
 //!
 //! Converts text into positioned glyph clusters for rendering.
 
@@ -68,7 +68,7 @@ const MAX_CACHE_SIZE: usize = 4096;
 /// Maps grapheme strings to their pixel advance widths.
 /// Uses a linked hash map for O(1) LRU eviction when at capacity.
 pub struct GraphemeAdvanceCache {
-    cache: LruCache<(String, u32, u32), f32>,
+    cache: LruCache<(String, u32, u64), f32>,
     hits: u64,
     misses: u64,
 }
@@ -78,7 +78,7 @@ impl GraphemeAdvanceCache {
     }
     /// Look up the advance for a grapheme. Returns `Some(advance)` on cache hit.
     /// Moves the entry to the front of the LRU list on hit.
-    pub fn get(&mut self, grapheme: &str, font_size: f32, attrs_hash: u32) -> Option<f32> {
+    pub fn get(&mut self, grapheme: &str, font_size: f32, attrs_hash: u64) -> Option<f32> {
         let key = (grapheme.to_string(), (font_size * 64.0).round() as u32, attrs_hash);
         if let Some(&advance) = self.cache.get(&key) {
             self.hits += 1;
@@ -90,7 +90,7 @@ impl GraphemeAdvanceCache {
     }
     /// Insert a grapheme advance into the cache.
     /// Evicts the least-recently-used entry if at capacity.
-    pub fn insert(&mut self, grapheme: String, font_size: f32, attrs_hash: u32, advance: f32) {
+    pub fn insert(&mut self, grapheme: String, font_size: f32, attrs_hash: u64, advance: f32) {
         self.cache.insert((grapheme, (font_size * 64.0).round() as u32, attrs_hash), advance);
     }
     /// Cache hit rate (0.0 to 1.0).
@@ -125,7 +125,7 @@ impl std::fmt::Debug for GraphemeAdvanceCache {
 /// Wraps cosmic-text to shape text into positioned glyph clusters.
 pub struct Shaper {
     font_family: Option<String>,
-    attrs_hash: u32,
+    attrs_hash: u64,
     font_system: Arc<Mutex<FontSystem>>,
     font_size: f32,
     line_height: f32,
@@ -139,11 +139,12 @@ pub struct Shaper {
     /// Cached monospace column width (ASCII advance) keyed by font_size bits.
     col_width_cache: Option<(u32, f32)>,
 }
-fn compute_attrs_hash(family: &str) -> u32 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    family.hash(&mut hasher);
-    hasher.finish() as u32
+fn compute_attrs_hash(family: Option<&str>, weight: Weight, style: Style) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    (family, weight, style).hash(&mut hasher);
+    hasher.finish()
 }
 impl Shaper {
     /// Create a new shaper with system fonts.
@@ -154,7 +155,7 @@ impl Shaper {
         let font_system = Arc::new(Mutex::new(font_system));
         Ok(Self {
             font_family: None,
-            attrs_hash: compute_attrs_hash(""),
+            attrs_hash: compute_attrs_hash(None, Weight::NORMAL, Style::Normal),
             font_system,
             font_size: 14.0,
             line_height: 20.0,
@@ -173,7 +174,7 @@ impl Shaper {
     /// Avoids the expensive `FontSystem::new()` call — use this when
     /// multiple Shaper instances should share one font database.
     pub fn from_font_system(font_system: FontSystem, font_size: f32, font_family: &str) -> Self {
-        let attrs_hash = compute_attrs_hash(font_family);
+        let attrs_hash = compute_attrs_hash(Some(font_family), Weight::NORMAL, Style::Normal);
         let mut font_system = font_system;
         let metrics = Metrics::new(font_size, font_size * 1.4);
         let buffer = Buffer::new(&mut font_system, metrics);
@@ -203,7 +204,7 @@ impl Shaper {
         font_size: f32,
         font_family: &str,
     ) -> Self {
-        let attrs_hash = compute_attrs_hash(font_family);
+        let attrs_hash = compute_attrs_hash(Some(font_family), Weight::NORMAL, Style::Normal);
         let metrics = Metrics::new(font_size, font_size * 1.4);
         let buffer = Buffer::new(&mut font_system.lock().unwrap(), metrics);
         Self {
@@ -231,13 +232,12 @@ impl Shaper {
 
     /// Set the font family and update attrs_hash.
     pub fn with_font_family(mut self, family: &str) -> Self {
-        self.font_family = Some(family.to_string());
-        self.attrs_hash = compute_attrs_hash(family);
+        self.set_font_family(Some(family));
         self
     }
 
     /// Get the current attrs_hash for cache key purposes.
-    pub fn attrs_hash(&self) -> u32 {
+    pub fn attrs_hash(&self) -> u64 {
         self.attrs_hash
     }
 
@@ -253,15 +253,9 @@ impl Shaper {
 
     /// Set the font family.
     pub fn set_font_family(&mut self, family: Option<&str>) {
-        let hash = match family {
-            Some(f) => compute_attrs_hash(f),
-            None => compute_attrs_hash(""),
-        };
-        let new_family = family.map(|s| s.to_string());
-        if self.font_family != new_family || self.attrs_hash != hash {
-            self.font_family = new_family;
-            self.attrs_hash = hash;
-            self.col_width_cache = None;
+        if self.font_family.as_deref() != family {
+            self.font_family = family.map(str::to_owned);
+            self.refresh_font_cache_key();
         }
     }
 
@@ -278,7 +272,10 @@ impl Shaper {
 
     /// Set the font weight (e.g. `Weight::BOLD` for bold text).
     pub fn set_font_weight(&mut self, weight: Weight) {
-        self.font_weight = weight;
+        if self.font_weight != weight {
+            self.font_weight = weight;
+            self.refresh_font_cache_key();
+        }
     }
 
     /// Get the current font style.
@@ -288,7 +285,16 @@ impl Shaper {
 
     /// Set the font style (e.g. `Style::Italic` for italic text).
     pub fn set_font_style(&mut self, style: Style) {
-        self.font_style = style;
+        if self.font_style != style {
+            self.font_style = style;
+            self.refresh_font_cache_key();
+        }
+    }
+
+    fn refresh_font_cache_key(&mut self) {
+        self.attrs_hash =
+            compute_attrs_hash(self.font_family.as_deref(), self.font_weight, self.font_style);
+        self.col_width_cache = None;
     }
 
     /// Measure and cache the monospace column width (advance of 'a').
@@ -796,6 +802,33 @@ mod tests {
         assert_eq!(cache.get("a", 14.0, 2), None, "different attrs_hash should miss");
         // Same attrs_hash should hit
         assert_eq!(cache.get("a", 14.0, 1), Some(8.0), "same attrs_hash should hit");
+    }
+
+    #[test]
+    fn changing_font_attributes_invalidates_cached_grapheme_and_column_width() {
+        with_shaper(|mut shaper| {
+            const GRAPHEME: &str = "a";
+            const CACHED_WIDTH: f32 = 1000.0;
+            let font_size = shaper.font_size();
+            let base_hash = shaper.attrs_hash();
+            shaper.cache_mut().insert(GRAPHEME.into(), font_size, base_hash, CACHED_WIDTH);
+            assert_eq!(shaper.col_width(), CACHED_WIDTH);
+
+            shaper.set_font_weight(Weight::BOLD);
+            let bold_hash = shaper.attrs_hash();
+            assert_ne!(base_hash, bold_hash);
+            assert_eq!(shaper.col_width(), shaper.shape(GRAPHEME).expect("bold shape").width);
+            assert_ne!(shaper.grapheme_advance(GRAPHEME).expect("bold advance"), CACHED_WIDTH);
+
+            shaper.set_font_style(Style::Italic);
+            assert_ne!(bold_hash, shaper.attrs_hash());
+            assert_eq!(shaper.col_width(), shaper.shape(GRAPHEME).expect("italic shape").width);
+
+            shaper.set_font_weight(Weight::NORMAL);
+            shaper.set_font_style(Style::Normal);
+            assert_eq!(shaper.attrs_hash(), base_hash);
+            assert_eq!(shaper.col_width(), CACHED_WIDTH);
+        });
     }
     // ── Shaper tests (need fonts) ──────────────────────────────────────────
     fn with_shaper(f: impl FnOnce(Shaper)) {

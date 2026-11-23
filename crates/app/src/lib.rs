@@ -1,4 +1,4 @@
-//! edit+ application crate.
+//! textora application crate.
 //!
 //! Provides the winit + wgpu application lifecycle.
 
@@ -80,13 +80,11 @@ pub(crate) use appkit_shell::cursor_motion;
 pub(crate) use appkit_shell::display_line_map;
 pub(crate) use appkit_shell::document_presentation;
 #[cfg(test)]
-mod document_view;
+mod document_fixture;
 pub(crate) mod edit_transaction;
 mod editor_host;
 #[cfg(test)]
 mod external_change_tests;
-#[cfg(test)]
-pub(crate) use appkit_core::external_document_change;
 pub(crate) use appkit_shell::gpu;
 mod library_file_monitor;
 mod library_registry;

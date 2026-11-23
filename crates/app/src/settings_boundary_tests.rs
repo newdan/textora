@@ -1,5 +1,86 @@
-fn production_part(source: &str) -> &str {
-    source.split("#[cfg(test)]").next().unwrap_or(source)
+use syn::visit::{self, Visit};
+
+const LOGICAL_DIMENSIONS: &[&str] =
+    &["font_size", "line_height", "status_bar_height", "gutter_padding", "toc_width"];
+
+fn is_test_only(attributes: &[syn::Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.path().is_ident("cfg")
+            && attribute.parse_args::<syn::Ident>().is_ok_and(|condition| condition == "test")
+    })
+}
+
+#[derive(Default)]
+struct LogicalDimensionAccesses(Vec<String>);
+
+impl<'ast> Visit<'ast> for LogicalDimensionAccesses {
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        if !is_test_only(&module.attrs) {
+            visit::visit_item_mod(self, module);
+        }
+    }
+
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        if !is_test_only(&function.attrs) {
+            visit::visit_item_fn(self, function);
+        }
+    }
+
+    fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
+        if !is_test_only(&implementation.attrs) {
+            visit::visit_item_impl(self, implementation);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, method: &'ast syn::ImplItemFn) {
+        if !is_test_only(&method.attrs) {
+            visit::visit_impl_item_fn(self, method);
+        }
+    }
+
+    fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+        if let syn::Member::Named(dimension) = &field.member
+            && LOGICAL_DIMENSIONS.iter().any(|name| dimension == name)
+            && let syn::Expr::Field(settings) = field.base.as_ref()
+            && matches!(&settings.member, syn::Member::Named(name) if name == "settings")
+            && matches!(settings.base.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self"))
+        {
+            self.0.push(dimension.to_string());
+        }
+        visit::visit_expr_field(self, field);
+    }
+}
+
+fn production_logical_dimension_accesses(source: &str) -> Vec<String> {
+    let file = syn::parse_file(source).expect("settings boundary must inspect valid Rust source");
+    let mut accesses = LogicalDimensionAccesses::default();
+    accesses.visit_file(&file);
+    accesses.0
+}
+
+#[test]
+fn settings_check_finds_production_access_after_test_items() {
+    let source = r#"
+        #[cfg(test)]
+        use crate::test_fixture;
+
+        #[cfg(test)]
+        mod tests {
+            impl App { fn fixture(&self) { let _ = self.settings.line_height; } }
+        }
+
+        impl App {
+            #[cfg(test)]
+            fn fixture(&self) { let _ = self.settings.status_bar_height; }
+
+            fn render(&self) {
+                let _ = self . settings . font_size;
+                let _ = "self.settings.gutter_padding";
+            }
+        }
+    "#;
+
+    assert_eq!(production_logical_dimension_accesses(source), ["font_size"]);
 }
 
 #[test]
@@ -19,16 +100,8 @@ fn physical_consumers_do_not_read_logical_dimensions_directly() {
         ("dispatch/mouse.rs", include_str!("dispatch/mouse.rs")),
     ];
     for (path, source) in consumers {
-        let production = production_part(source);
-        for field in
-            ["font_size", "line_height", "status_bar_height", "gutter_padding", "toc_width"]
-        {
-            let forbidden = format!("self.settings.{field}");
-            assert!(
-                !production.contains(&forbidden),
-                "{path}: found {forbidden} in production code"
-            );
-        }
+        let accesses = production_logical_dimension_accesses(source);
+        assert!(accesses.is_empty(), "{path}: reads logical dimensions directly: {accesses:?}");
     }
 }
 

@@ -568,27 +568,24 @@ fn shape_text_surface(
         preedit_advance_px,
         preedit_cursor_col: tab.document.cursor_column(),
     };
-    let mut advance_cache = tab.take_advance_cache();
-    let mut presentation = tab.take_presentation();
     let mut tree_dirty = false;
-    let vertices = crate::render_pipeline::shape_visible_lines(
-        metrics,
-        settings.text_spacing_mode,
-        settings.version,
-        &context,
-        tab.document,
-        &mut presentation,
-        text,
-        gpu,
-        &mut advance_cache,
-        &mut resources.frame_cache.cluster_pool,
-        &mut resources.frame_cache.first_line,
-        &mut resources.frame_cache.last_line,
-        &mut tree_dirty,
-        settings.word_wrap,
-    );
-    tab.restore_presentation(presentation);
-    tab.restore_advance_cache(advance_cache);
+    let vertices = tab.with_presentation(|document, presentation| {
+        crate::render_pipeline::shape_visible_lines(
+            metrics,
+            settings.text_spacing_mode,
+            settings.version,
+            &context,
+            document,
+            presentation,
+            text,
+            gpu,
+            &mut resources.frame_cache.cluster_pool,
+            &mut resources.frame_cache.first_line,
+            &mut resources.frame_cache.last_line,
+            &mut tree_dirty,
+            settings.word_wrap,
+        )
+    });
     Some(ShapedTextSurface { vertices, tree_dirty, preedit_advance_px })
 }
 

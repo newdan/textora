@@ -195,7 +195,6 @@ mod tests {
         let app_sources = [
             include_str!("commands.rs"),
             include_str!("dispatch/editor.rs"),
-            include_str!("document_view/selection.rs"),
             include_str!("workspace_product.rs"),
         ];
         let shell_clipboard_source = include_str!("../../appkit-shell/src/clipboard.rs");

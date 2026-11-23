@@ -122,28 +122,26 @@ impl<S: BlockSource> PreviewEngine<S> {
     pub(in crate::view) fn collect_headings(&mut self) {
         self.headings.clear();
         let Some(ref lazy) = self.lazy else { return };
+        let mut scanned_headings = lazy.source.headings().iter();
         for bi in 0..lazy.estimated_heights.len() {
-            let doc_idx = match lazy.laid_to_doc(bi) {
-                Some(i) => i,
-                None => continue,
+            let Some(block) = lazy.laid_to_doc(bi).and_then(|idx| lazy.source.blocks().get(idx))
+            else {
+                continue;
             };
-            let kind = match lazy.source.blocks().get(doc_idx) {
-                Some(b) => &b.kind,
-                None => continue,
+            let crate::builder::BlockKind::Heading { level } = block.kind else {
+                continue;
             };
-            if let crate::builder::BlockKind::Heading { level } = kind {
-                if *level > self.toc_max_depth {
-                    continue;
-                }
-                // Get heading text from source blocks' headings or from materialized block.
-                let text = if let Some(src_block) = lazy.source.blocks().get(doc_idx) {
-                    src_block.text_lines.first().cloned().unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                let y = lazy.estimated_positions[bi] + lazy.y_delta.get(bi).copied().unwrap_or(0.0);
-                self.headings.push(HeadingEntry { text, level: *level, y_offset: y });
+            let scanned_heading = scanned_headings.next();
+            if level > self.toc_max_depth {
+                continue;
             }
+            let text = scanned_heading
+                .map(|heading| &heading.text)
+                .or_else(|| block.text_lines.first())
+                .cloned()
+                .unwrap_or_default();
+            let y = lazy.estimated_positions[bi] + lazy.y_delta.get(bi).copied().unwrap_or(0.0);
+            self.headings.push(HeadingEntry { text, level, y_offset: y });
         }
     }
 

@@ -1,8 +1,101 @@
 //! Search panel: query handling, match finding, scroll-to-match.
 //! Methods on `impl App`, extracted from app.rs.
 
+use std::ops::Range;
+
 use crate::app::App;
+use crate::app_effect::AppEffect;
+use appkit_shell::editor_runtime::EditorNotification;
+use textora_core::types::ByteIndex;
+use textora_core::unicode::{CursorNav, grapheme_start_indices};
+use ui::plugin::EditTransaction;
 use ui::search_bar::SearchBarAction;
+
+pub(crate) enum SearchReplaceScope {
+    ActiveMatch,
+    AllMatches,
+}
+
+fn search_replacement_transaction(
+    source: &str,
+    source_generation: u32,
+    matches: &[Range<usize>],
+    replacement: &str,
+) -> Option<(EditTransaction, usize)> {
+    let first_match = matches.first()?;
+    let mut updated_source = String::with_capacity(source.len());
+    let mut offset = 0;
+    for range in matches {
+        updated_source.push_str(source.get(offset..range.start)?);
+        updated_source.push_str(replacement);
+        offset = range.end;
+    }
+    let suffix = source.get(offset..)?;
+    updated_source.push_str(suffix);
+
+    let (original_span, updated_span) =
+        common_grapheme_spans(source, &updated_source, first_match.start, suffix.len());
+    let inserted_end = first_match.start + replacement.len();
+    let caret = CursorNav::new(&updated_source).goto_byte(ByteIndex(inserted_end)).offset;
+    let transaction = EditTransaction::replace(
+        source_generation,
+        original_span,
+        updated_source[updated_span].to_owned(),
+        caret.to_usize(),
+    );
+    Some((transaction, inserted_end))
+}
+
+fn grapheme_boundaries(text: &str) -> impl Iterator<Item = usize> + '_ {
+    grapheme_start_indices(text).map(|(_, byte)| byte).chain(std::iter::once(text.len()))
+}
+
+/// Undo locates edits by grapheme position, so both versions need the same start boundary.
+/// Including any joined clusters at the end also keeps the replacement relative to the same suffix.
+fn common_grapheme_spans(
+    original: &str,
+    updated: &str,
+    match_start: usize,
+    suffix_len: usize,
+) -> (Range<usize>, Range<usize>) {
+    let mut original_boundaries = grapheme_boundaries(original).peekable();
+    let mut updated_boundaries = grapheme_boundaries(updated).peekable();
+    let mut original_start = 0;
+    while let Some(boundary) = original_boundaries.next_if(|boundary| *boundary <= match_start) {
+        original_start = boundary;
+    }
+    let mut start = 0;
+    while let Some(boundary) = updated_boundaries.next_if(|boundary| *boundary <= original_start) {
+        start = boundary;
+    }
+
+    let original_suffix_start = original.len() - suffix_len;
+    let updated_suffix_start = updated.len() - suffix_len;
+    let original_suffix_boundaries =
+        original_boundaries.filter_map(|boundary| boundary.checked_sub(original_suffix_start));
+    let updated_suffix_boundaries = std::iter::once(start)
+        .chain(updated_boundaries)
+        .filter_map(|boundary| boundary.checked_sub(updated_suffix_start));
+    let extend_suffix = first_shared_offset(original_suffix_boundaries, updated_suffix_boundaries)
+        .unwrap_or(suffix_len);
+    (start..original_suffix_start + extend_suffix, start..updated_suffix_start + extend_suffix)
+}
+
+fn first_shared_offset(
+    original: impl Iterator<Item = usize>,
+    mut updated: impl Iterator<Item = usize>,
+) -> Option<usize> {
+    let mut updated_offset = updated.next()?;
+    for offset in original {
+        while updated_offset < offset {
+            updated_offset = updated.next()?;
+        }
+        if updated_offset == offset {
+            return Some(offset);
+        }
+    }
+    None
+}
 
 impl App {
     /// Apply a SearchBarAction to the active document's search state.
@@ -113,30 +206,34 @@ impl App {
                 matches.extend(search_fn(query_bytes, chunk1));
             }
 
-            // Search across the gap
+            // Search across the gap without overlapping a match in either chunk.
+            let mut second_chunk_start = 0;
             if !chunk1.is_empty() && !chunk2.is_empty() && query_bytes.len() > 1 {
                 let cross_len = query_bytes.len() - 1;
-                let take1 = cross_len.min(chunk1.len());
-                let take2 = cross_len.min(chunk2.len());
+                let cross_start = chunk1
+                    .len()
+                    .saturating_sub(cross_len)
+                    .max(matches.last().map_or(0, |range| range.end));
+                let second_prefix = &chunk2[..cross_len.min(chunk2.len())];
+                let mut cross_buf =
+                    Vec::with_capacity(chunk1.len() - cross_start + second_prefix.len());
+                cross_buf.extend_from_slice(&chunk1[cross_start..]);
+                cross_buf.extend_from_slice(second_prefix);
 
-                let mut cross_buf = Vec::with_capacity(take1 + take2);
-                cross_buf.extend_from_slice(&chunk1[chunk1.len() - take1..]);
-                cross_buf.extend_from_slice(&chunk2[..take2]);
-
-                let cross_matches = search_fn(query_bytes, &cross_buf);
-                for m in cross_matches {
-                    let start_in_doc = chunk1.len() - take1 + m.start;
-                    matches.push(start_in_doc..start_in_doc + query_bytes.len());
+                if let Some(range) = search_fn(query_bytes, &cross_buf).into_iter().next() {
+                    let match_end = cross_start + range.end;
+                    matches.push(cross_start + range.start..match_end);
+                    second_chunk_start = match_end - chunk1.len();
                 }
             }
 
             // Search second chunk
-            if !chunk2.is_empty() {
-                let m2 = search_fn(query_bytes, chunk2);
-                for m in m2 {
-                    matches.push(m.start + chunk1.len()..m.end + chunk1.len());
-                }
-            }
+            let second_chunk_offset = chunk1.len() + second_chunk_start;
+            matches.extend(
+                search_fn(query_bytes, &chunk2[second_chunk_start..]).into_iter().map(|range| {
+                    range.start + second_chunk_offset..range.end + second_chunk_offset
+                }),
+            );
 
             let generation = tab.document.tb.gap_buffer().generation();
             tab.search_state_mut().update_matches(matches, generation);
@@ -151,59 +248,62 @@ impl App {
         }
     }
 
-    /// Replace the current active match with the replace_query text.
-    /// After replacement, re-searches to update match list.
-    pub(crate) fn perform_replace(&mut self) {
-        let cursor_after = if let Some(tab) = self.active_tab_session_mut() {
-            let Some(range) = tab.search_state().active_match() else {
-                return;
-            };
-            let replacement =
-                crate::search_escape::parse_escapes(&tab.search_state().replace_query);
-            let after = range.start + replacement.len();
-            tab.document.tb.replace_range(range, replacement.as_bytes());
-            tab.document.dirty = true;
-            Some(after)
-        } else {
-            None
+    pub(crate) fn replace_search_matches(&mut self, scope: SearchReplaceScope) -> AppEffect {
+        let Some(tab) = self.active_tab_session() else {
+            return AppEffect::NONE;
         };
-        // Re-search to update matches after the edit
-        self.perform_search_for_active_doc();
-        // Jump to the first match at or after the replacement position
-        let lh = self.ui_metrics().line_height;
-        if let (Some(after), Some(mut tab)) = (cursor_after, self.active_tab_session_mut())
-            && let Some(idx) = tab.search_state().matches.iter().position(|r| r.start >= after)
-        {
-            tab.search_state_mut().active_match_idx = idx;
-            let range = tab.search_state().matches[idx].clone();
-            tab.document.set_cursor_offset_synced(range.start);
-            tab.document.cursor_mut().selection_anchor = Some(range.start);
-            tab.document.set_cursor_offset_synced(range.end);
-            tab.ensure_cursor_visible(lh);
+        let search = tab.search_state();
+        if search.is_stale(tab.document.generation()) {
+            self.perform_search_for_active_doc();
+            return AppEffect::REDRAW;
         }
+
+        let matches = match scope {
+            SearchReplaceScope::ActiveMatch => {
+                search.matches.get(search.active_match_idx).map_or(&[][..], std::slice::from_ref)
+            }
+            SearchReplaceScope::AllMatches => search.matches.as_slice(),
+        };
+        if matches.is_empty() {
+            return AppEffect::NONE;
+        }
+        let replacement = crate::search_escape::parse_escapes(&search.replace_query);
+        let Some((transaction, inserted_end)) = search_replacement_transaction(
+            &tab.document.full_text(),
+            search.buffer_generation,
+            matches,
+            &replacement,
+        ) else {
+            return AppEffect::NONE;
+        };
+        let outcome = self.editor_runtime.apply_active_document_edit_transaction(transaction);
+        if !outcome
+            .notifications
+            .iter()
+            .any(|notification| matches!(notification, EditorNotification::ContentChanged { .. }))
+        {
+            return outcome.shell_effect;
+        }
+        self.reveal_match_after_replace(scope, inserted_end);
+        let preview_upgrade = self.upgrade_active_editor_preview();
+        self.finish_runtime_edit(outcome).merge(self.handle_nav_effect(preview_upgrade))
     }
 
-    /// Replace all matches with the replace_query text.
-    pub(crate) fn perform_replace_all(&mut self) {
-        if let Some(tab) = self.active_tab_session_mut() {
-            let count = tab.search_state().matches.len();
-            if count == 0 {
-                return;
-            }
-            let replacement =
-                crate::search_escape::parse_escapes(&tab.search_state().replace_query);
-            let replacement_bytes = replacement.as_bytes();
-            let matches: Vec<_> = tab.search_state().matches.clone();
-
-            // Replace in reverse order to preserve offsets
-            tab.document.tb.edit_begin_grouping();
-            for range in matches.into_iter().rev() {
-                tab.document.tb.replace_range(range, replacement_bytes);
-            }
-            tab.document.tb.edit_end_grouping();
-            tab.document.dirty = true;
-        }
-        // Re-search to update matches
+    fn reveal_match_after_replace(&mut self, scope: SearchReplaceScope, cursor_after: usize) {
         self.perform_search_for_active_doc();
+        if let Some(mut tab) = self.active_tab_session_mut()
+            && !tab.search_state().matches.is_empty()
+        {
+            tab.search_state_mut().active_match_idx = match scope {
+                SearchReplaceScope::ActiveMatch => tab
+                    .search_state()
+                    .matches
+                    .iter()
+                    .position(|range| range.start >= cursor_after)
+                    .unwrap_or(0),
+                SearchReplaceScope::AllMatches => 0,
+            };
+            self.scroll_to_active_match();
+        }
     }
 }

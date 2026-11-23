@@ -1,4 +1,4 @@
-//! edit+ render: glyph atlas and wgpu rendering pipeline.
+//! textora render: glyph atlas and wgpu rendering pipeline.
 //!
 //! Manages a glyph texture atlas and renders shaped text.
 

@@ -1,18 +1,19 @@
 //! 窗口、GPU、文本资源和 resize 时序的共享会话。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
-use crate::editor_runtime::RenderResources;
+use crate::editor_runtime::{EditorRuntime, RenderResources};
 use crate::frame_cache::FrameCache;
 use crate::gpu::{self, GpuError};
 use crate::render_state::{GpuState, TextState};
 
 const RESIZE_THROTTLE: Duration = Duration::from_millis(16);
+static EMPTY_FRAME_CACHE: LazyLock<FrameCache> = LazyLock::new(FrameCache::new);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResizeResult {
@@ -27,10 +28,9 @@ pub(crate) struct RenderSession {
         std::thread::JoinHandle<Result<crate::gpu::PreparedGpuDevice, crate::gpu::GpuError>>,
     >,
     window: Option<Arc<Window>>,
-    gpu: Option<GpuState>,
-    text: Option<TextState>,
+    // None while a render scope owns the resources.
+    resources: Option<RenderResources>,
     surface_size: Option<PhysicalSize<u32>>,
-    frame_cache: FrameCache,
     scale_factor: f64,
     pending_resize: Option<PhysicalSize<u32>>,
     last_resize_handled: Instant,
@@ -38,7 +38,6 @@ pub(crate) struct RenderSession {
     redraw_requested: bool,
     first_frame_presented: bool,
     last_render_time: Instant,
-    last_result_time: Instant,
     render_frame_count: u32,
 }
 
@@ -47,10 +46,8 @@ impl RenderSession {
         Self {
             gpu_preparation: None,
             window: None,
-            gpu: None,
-            text: None,
+            resources: Some(RenderResources::default()),
             surface_size: None,
-            frame_cache: FrameCache::new(),
             scale_factor: 1.0,
             pending_resize: None,
             last_resize_handled: Instant::now(),
@@ -58,13 +55,14 @@ impl RenderSession {
             redraw_requested: false,
             first_frame_presented: false,
             last_render_time: Instant::now(),
-            last_result_time: Instant::now(),
             render_frame_count: 0,
         }
     }
 
     pub(crate) fn start_gpu_preparation(&mut self) -> std::io::Result<()> {
-        if self.gpu_preparation.is_some() || self.gpu.is_some() {
+        if self.gpu_preparation.is_some()
+            || self.resources.as_ref().is_none_or(|resources| resources.gpu.is_some())
+        {
             return Ok(());
         }
         self.gpu_preparation = Some(
@@ -132,8 +130,9 @@ impl RenderSession {
         self.scale_factor = scale_factor;
         self.update_surface_size(size);
         self.window = Some(window);
-        self.gpu = Some(gpu);
-        self.text = Some(text);
+        let resources = self.resources.get_or_insert_with(RenderResources::default);
+        resources.gpu = Some(gpu);
+        resources.text = Some(text);
         self.redraw_requested = true;
         self.first_frame_presented = false;
         eprintln!(
@@ -163,6 +162,10 @@ impl RenderSession {
     }
 
     pub(crate) fn flush_pending_resize(&mut self) -> ResizeResult {
+        if self.resources.is_none() && self.pending_resize.is_some() {
+            return ResizeResult::Deferred;
+        }
+
         let Some(size) = self.pending_resize.take() else {
             return ResizeResult::NotReady;
         };
@@ -170,7 +173,7 @@ impl RenderSession {
             return ResizeResult::NotReady;
         }
 
-        let Some(gpu) = self.gpu.as_mut() else {
+        let Some(gpu) = self.resources.as_mut().and_then(|resources| resources.gpu.as_mut()) else {
             return ResizeResult::NotReady;
         };
         let width_changed = gpu.ctx.config.width != size.width;
@@ -233,26 +236,14 @@ impl RenderSession {
         self.surface_size = Some(size);
     }
 
-    pub(crate) fn take_render_resources(&mut self) -> RenderResources {
-        RenderResources {
-            text: self.text.take(),
-            gpu: self.gpu.take(),
-            frame_cache: std::mem::take(&mut self.frame_cache),
+    pub(crate) fn clear_frame_cluster_pool(&mut self) {
+        if let Some(resources) = self.resources.as_mut() {
+            resources.frame_cache.cluster_pool.clear();
         }
     }
 
-    pub(crate) fn restore_render_resources(&mut self, resources: RenderResources) {
-        self.text = resources.text;
-        self.gpu = resources.gpu;
-        self.frame_cache = resources.frame_cache;
-    }
-
-    pub(crate) fn clear_frame_cluster_pool(&mut self) {
-        self.frame_cache.cluster_pool.clear();
-    }
-
     pub(crate) fn frame_cache(&self) -> &FrameCache {
-        &self.frame_cache
+        self.resources.as_ref().map_or(&EMPTY_FRAME_CACHE, |resources| &resources.frame_cache)
     }
 
     pub(crate) fn note_render_started(&mut self, started_at: Instant) -> u128 {
@@ -266,21 +257,46 @@ impl RenderSession {
         self.render_frame_count
     }
 
-    pub(crate) fn note_result_arrived(&mut self, arrived_at: Instant) -> u128 {
-        let interval = arrived_at.duration_since(self.last_result_time).as_micros();
-        self.last_result_time = arrived_at;
-        interval
-    }
-
     pub(crate) fn shutdown(&mut self) {
-        self.text = None;
-        self.gpu = None;
+        let resources = self.resources.get_or_insert_with(RenderResources::default);
+        resources.text = None;
+        resources.gpu = None;
         self.window = None;
         self.surface_size = None;
         self.pending_resize = None;
         self.redraw_requested = false;
         self.first_frame_presented = false;
     }
+}
+
+struct RenderResourcesScope<'a, Owner> {
+    owner: &'a mut Owner,
+    editor: fn(&mut Owner) -> &mut EditorRuntime,
+    resources: RenderResources,
+}
+
+impl<Owner> Drop for RenderResourcesScope<'_, Owner> {
+    fn drop(&mut self) {
+        let session = &mut (self.editor)(self.owner).render_session;
+        // A shutdown or resume during the scope replaces the resource slot.
+        if session.resources.is_none() {
+            session.resources = Some(std::mem::take(&mut self.resources));
+        }
+    }
+}
+
+pub(super) fn with_render_resources<Owner, Output>(
+    owner: &mut Owner,
+    editor: fn(&mut Owner) -> &mut EditorRuntime,
+    render: impl FnOnce(&mut Owner, &mut RenderResources) -> Output,
+) -> Output {
+    let resources = editor(owner)
+        .render_session
+        .resources
+        .take()
+        .expect("render resources can only be borrowed by one scope at a time");
+    let mut scope = RenderResourcesScope { owner, editor, resources };
+    render(scope.owner, &mut scope.resources)
 }
 
 impl Default for RenderSession {
@@ -321,13 +337,54 @@ mod tests {
     }
 
     #[test]
-    fn surface_size_survives_temporary_render_resource_take() {
-        let mut session = RenderSession::new();
-        let expected_size = PhysicalSize::new(1600, 1200);
-        session.update_surface_size(expected_size);
+    fn render_scope_preserves_resources_and_surface_size_during_unwind() {
+        const CACHED_DOCUMENT_OFFSET: usize = 42;
 
-        let _resources = session.take_render_resources();
+        let mut editor = super::super::tests::runtime_with_clean_tab();
+        let surface_size = PhysicalSize::new(1600, 1200);
+        editor.render_session.update_surface_size(surface_size);
 
-        assert_eq!(session.surface_size(), Some(expected_size));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            editor.with_render_resources(|editor, resources| {
+                assert_eq!(editor.render_session.surface_size(), Some(surface_size));
+                resources.frame_cache.first_line.doc_offset = CACHED_DOCUMENT_OFFSET;
+                panic!("simulate an interrupted render");
+            });
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(editor.render_session.surface_size(), Some(surface_size));
+        assert_eq!(
+            editor.render_session.frame_cache().first_line.doc_offset,
+            CACHED_DOCUMENT_OFFSET
+        );
+    }
+
+    #[test]
+    fn render_scope_defers_resize_until_resources_return() {
+        let mut editor = super::super::tests::runtime_with_clean_tab();
+        let size = PhysicalSize::new(1600, 1200);
+
+        editor.with_render_resources(|editor, _| {
+            assert_eq!(editor.render_session.resize_now(size), ResizeResult::Deferred);
+        });
+
+        assert_eq!(editor.render_session.pending_resize, Some(size));
+    }
+
+    #[test]
+    fn render_scope_does_not_restore_resources_after_shutdown() {
+        const CACHED_DOCUMENT_OFFSET: usize = 42;
+        let mut editor = super::super::tests::runtime_with_clean_tab();
+
+        editor.with_render_resources(|editor, resources| {
+            resources.frame_cache.first_line.doc_offset = CACHED_DOCUMENT_OFFSET;
+            editor.shutdown();
+        });
+
+        assert_eq!(
+            editor.render_session.frame_cache().first_line.doc_offset,
+            FrameCache::default().first_line.doc_offset
+        );
     }
 }

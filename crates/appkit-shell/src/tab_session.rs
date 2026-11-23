@@ -16,7 +16,7 @@ use ui::theme::Theme;
 
 use crate::cursor_motion::CursorRenderState;
 use crate::display_state::DisplayState;
-use crate::document_presentation::DocumentPresentation;
+use crate::document_presentation::{DocumentPresentation, SourceSpacingState};
 use crate::tab_runtime::TabRuntime;
 
 fn document_line_text(document: &DocumentModel, line: usize) -> Cow<'_, str> {
@@ -386,6 +386,10 @@ impl<'a> TabSession<'a> {
         &self.presentation().display
     }
 
+    pub fn source_spacing(&self) -> &SourceSpacingState {
+        &self.presentation().source_spacing
+    }
+
     pub fn search_state(&self) -> &appkit_core::document::SearchState {
         &self.presentation().search_state
     }
@@ -614,17 +618,19 @@ impl<'a> TabSessionMut<'a> {
         &mut self.runtime.presentation
     }
 
-    pub fn take_presentation(&mut self) -> DocumentPresentation {
-        let visible_rows = self.runtime.presentation.display.viewport.visible_rows;
-        let viewport_height = self.runtime.presentation.display.viewport.viewport_height;
-        std::mem::replace(
-            &mut self.runtime.presentation,
-            DocumentPresentation::new(visible_rows, viewport_height),
-        )
+    pub fn with_presentation<Output>(
+        &mut self,
+        operation: impl FnOnce(&mut DocumentModel, &mut DocumentPresentation) -> Output,
+    ) -> Output {
+        operation(self.document, &mut self.runtime.presentation)
     }
 
-    pub fn restore_presentation(&mut self, presentation: DocumentPresentation) {
-        self.runtime.presentation = presentation;
+    pub fn source_spacing(&self) -> &SourceSpacingState {
+        &self.presentation().source_spacing
+    }
+
+    pub fn set_source_spacing(&mut self, source_spacing: SourceSpacingState) {
+        self.presentation_mut().source_spacing = source_spacing;
     }
 
     pub fn display(&self) -> &DisplayState {
@@ -753,17 +759,6 @@ impl<'a> TabSessionMut<'a> {
             .visible_doc_range_from_anchor(&self.display().display_map, line_height)
     }
 
-    pub fn take_advance_cache(&mut self) -> Vec<ui::render_geom::AdvanceCacheEntry> {
-        std::mem::take(&mut self.runtime.presentation.display.advance_cache)
-    }
-
-    pub fn restore_advance_cache(
-        &mut self,
-        advance_cache: Vec<ui::render_geom::AdvanceCacheEntry>,
-    ) {
-        self.runtime.presentation.display.advance_cache = advance_cache;
-    }
-
     pub fn clear_advance_cache(&mut self) {
         self.display_mut().advance_cache.clear();
     }
@@ -873,17 +868,34 @@ impl<'a> TabSessionMut<'a> {
         self.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
     }
 
-    pub fn move_cursor_visual(
+    pub(crate) fn move_cursor_visual(
         &mut self,
         delta: isize,
-        context: crate::cursor_motion::CursorContext<'_>,
+        display_map: &crate::display_line_map::DisplayLineMap,
+        frame_cache: &crate::frame_cache::FrameCache,
+        dpi_scale: f32,
     ) {
-        if let Some(offset) =
-            crate::cursor_motion::move_cursor_visual(delta, context, self.document)
-        {
-            self.document.set_cursor_offset_synced(offset.to_usize());
-        }
-        self.cursor_render_state_mut().cursor_blink_instant = std::time::Instant::now();
+        self.with_presentation(|document, presentation| {
+            let viewport = &presentation.display.viewport;
+            let cursor = &mut presentation.cursor_render_state;
+            let context = crate::cursor_motion::CursorContext {
+                display_map,
+                cursor_visual_line: cursor.cursor_visual_line,
+                advance_cache: &presentation.display.advance_cache,
+                first_line: &frame_cache.first_line,
+                last_line: &frame_cache.last_line,
+                visible_rows: viewport.visible_rows,
+                first_visible_row: viewport.first_visible_row(),
+                scroll_top: viewport.scroll_top,
+                sticky_x: cursor.sticky_x,
+                dpi_scale,
+            };
+            if let Some(offset) = crate::cursor_motion::move_cursor_visual(delta, context, document)
+            {
+                document.set_cursor_offset_synced(offset.to_usize());
+            }
+            cursor.cursor_blink_instant = std::time::Instant::now();
+        });
     }
 
     pub fn needs_source_update(&self, generation: u32) -> bool {
@@ -1110,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn mutable_session_takes_advance_cache_from_runtime_presentation() {
+    fn presentation_scope_keeps_advance_cache_on_error() {
         fn cache_entry(doc_line: usize) -> ui::render_geom::AdvanceCacheEntry {
             ui::render_geom::AdvanceCacheEntry {
                 doc_line,
@@ -1125,13 +1137,16 @@ mod tests {
         let mut runtime = TabRuntime::new(Box::new(EditorPlugin::new()));
         runtime.presentation.display.advance_cache = vec![cache_entry(2), cache_entry(3)];
 
-        {
-            let mut session = TabSessionMut::new(id, &mut document, &mut runtime);
-            let cache = session.take_advance_cache();
-
+        let mut session = TabSessionMut::new(id, &mut document, &mut runtime);
+        let result: Result<(), ()> = session.with_presentation(|_, presentation| {
+            let cache = &mut presentation.display.advance_cache;
             assert_eq!(cache.len(), 2);
-            assert!(session.runtime.presentation.display.advance_cache.is_empty());
-        }
+            cache.push(cache_entry(4));
+            Err(())
+        });
+
+        assert_eq!(result, Err(()));
+        assert_eq!(session.display().advance_cache.len(), 3);
     }
 
     #[test]

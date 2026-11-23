@@ -803,7 +803,7 @@ impl App {
 #[cfg(test)]
 pub(crate) mod canvas_drag_test_support {
     use crate::app::App;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -886,7 +886,7 @@ pub(crate) mod canvas_drag_test_support {
         let state = Rc::new(RefCell::new(CanvasDragState::default()));
         let mut app = App::new(None);
         for text in ["abc", "def"] {
-            let document = DocumentView::new(vec![text.to_string()], 80, 10.0);
+            let document = DocumentFixture::new(vec![text.to_string()], 80, 10.0);
             app.push_entry_for_test(document, Box::new(CanvasDragPlugin { state: state.clone() }));
         }
         app.switch_workspace_for_test(0);
@@ -895,13 +895,13 @@ pub(crate) mod canvas_drag_test_support {
 
     pub(crate) fn start_canvas_drag(app: &mut App) {
         let bounds = app.plugin_render_bounds();
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 4.0,
             bounds.y + 4.0,
             None,
         );
-        app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
     }
 
     pub(crate) fn cancel_request_count(state: &CanvasDragState) -> usize {
@@ -926,14 +926,14 @@ mod tests {
         app_with_canvas_drag_tabs, cancel_request_count, document_texts, start_canvas_drag,
     };
     use super::*;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
 
     use std::cell::RefCell;
     use std::rc::Rc;
 
     fn app_with_focused_search(replace: bool) -> App {
         let mut app = App::new(None);
-        let document = DocumentView::new(vec!["正文保持原样".to_owned()], 80, 10.0);
+        let document = DocumentFixture::new(vec!["正文保持原样".to_owned()], 80, 10.0);
         app.push_entry_for_test(document, Box::new(WysiwygBoundsPlugin));
         app.switch_workspace_for_test(0);
         app.active_tab_session_mut()
@@ -1124,7 +1124,7 @@ mod tests {
         let state = Rc::new(MindmapStyleDispatchState::default());
         let plugin = MindmapStyleDispatchPlugin { name, mode, state: state.clone() };
         let mut app = App::new(None);
-        let document = DocumentView::new(vec!["root".to_owned()], 80, 10.0);
+        let document = DocumentFixture::new(vec!["root".to_owned()], 80, 10.0);
         app.push_entry_for_test(document, Box::new(plugin));
         app.switch_workspace_for_test(0);
         state.synchronized_sources.borrow_mut().clear();
@@ -1168,7 +1168,7 @@ mod tests {
         );
         let second_state = Rc::new(MindmapStyleDispatchState::default());
         let second_tab_id = app.push_entry_for_test(
-            DocumentView::new(vec!["root".to_owned()], 80, 10.0),
+            DocumentFixture::new(vec!["root".to_owned()], 80, 10.0),
             Box::new(MindmapStyleDispatchPlugin {
                 name: ui::plugin::PLUGIN_MINDMAP,
                 mode: MindmapThemePlanMode::Current("warm-night"),
@@ -1246,7 +1246,7 @@ mod tests {
         std::fs::write(&path, "existing paragraph")
             .expect("table-picker fixture should be writable");
         let mut app = App::new(None);
-        app.open_file(&path).expect("Markdown fixture should open");
+        let _ = app.open_file(&path).expect("Markdown fixture should open");
         let generation_before =
             app.active_tab_session().expect("Markdown tab should be active").document.generation();
         let mut picker = ui::table_picker::TablePickerWidget::new();
@@ -1292,7 +1292,7 @@ mod tests {
         let original = "| first | second |\n| --- | --- |\n| left | right |";
         std::fs::write(&path, original).expect("table-structure fixture should be writable");
         let mut app = App::new(None);
-        app.open_file(&path).expect("Markdown fixture should open");
+        let _ = app.open_file(&path).expect("Markdown fixture should open");
         let generation_before =
             app.active_tab_session().expect("Markdown tab should be active").document.generation();
         let cursor_byte = original.find("right").expect("clicked second-column cell exists");
@@ -1314,12 +1314,12 @@ mod tests {
         assert_eq!(active.document.generation(), generation_before + 1);
         assert!(effect.redraw);
 
-        app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Undo);
+        let _ = app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Undo);
         assert_eq!(
             app.active_tab_session().expect("Markdown tab remains").document.full_text(),
             original
         );
-        app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Redo);
+        let _ = app.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::Redo);
         assert_eq!(
             app.active_tab_session().expect("Markdown tab remains").document.full_text(),
             expected
@@ -1331,7 +1331,7 @@ mod tests {
         std::fs::write(&save.path, save.serialized_contents)
             .expect("prepared Markdown save should write to disk");
         let mut reopened_app = App::new(None);
-        reopened_app.open_file(&path).expect("saved Markdown file should reopen");
+        let _ = reopened_app.open_file(&path).expect("saved Markdown file should reopen");
         let reopened = reopened_app
             .active_tab_session()
             .expect("reopened Markdown tab should be active")
@@ -1354,7 +1354,7 @@ mod tests {
         std::fs::write(&path, "existing paragraph")
             .expect("table-picker fixture should be writable");
         let mut app = App::new(None);
-        app.open_file(&path).expect("Markdown fixture should open");
+        let _ = app.open_file(&path).expect("Markdown fixture should open");
         let generation_before =
             app.active_tab_session().expect("Markdown tab should be active").document.generation();
         let source_before = app
@@ -1457,7 +1457,7 @@ mod tests {
         );
         let second_state = Rc::new(MindmapStyleDispatchState::default());
         app.push_entry_for_test(
-            DocumentView::new(vec!["root".to_owned()], 80, 10.0),
+            DocumentFixture::new(vec!["root".to_owned()], 80, 10.0),
             Box::new(MindmapStyleDispatchPlugin {
                 name: ui::plugin::PLUGIN_MINDMAP,
                 mode: MindmapThemePlanMode::Current("warm-night"),
@@ -1562,7 +1562,7 @@ mod tests {
 
     fn app_with_prepared_canvas_viewport() -> App {
         let mut app = App::new(None);
-        let document = DocumentView::new(vec!["canvas".to_string()], 80, 10.0);
+        let document = DocumentFixture::new(vec!["canvas".to_string()], 80, 10.0);
         app.push_entry_for_test(document, Box::new(CanvasViewportRouterPlugin));
         app.switch_workspace_for_test(0);
         let tab = app.active_tab_session_mut().expect("test canvas tab must be active");
@@ -1652,7 +1652,7 @@ mod tests {
     #[test]
     fn canvas_viewport_actions_are_noops_without_a_canvas_snapshot() {
         let mut app = App::new(None);
-        let document = DocumentView::new(vec!["canvas".to_string()], 80, 10.0);
+        let document = DocumentFixture::new(vec!["canvas".to_string()], 80, 10.0);
         app.push_entry_for_test(document, Box::new(CanvasViewportRouterPlugin));
         app.switch_workspace_for_test(0);
 
@@ -1697,7 +1697,7 @@ mod tests {
     #[test]
     fn wysiwyg_initial_plugin_bounds_do_not_depend_on_cached_shell_layout() {
         let mut app = App::new(None);
-        let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+        let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
         app.push_entry_for_test(doc, Box::new(WysiwygBoundsPlugin));
         app.switch_workspace_for_test(0);
 
@@ -1716,7 +1716,7 @@ mod tests {
     fn wysiwyg_plugin_bounds_account_for_sidebar_during_first_shell_frame() {
         let mut app = App::new(None);
         app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
-        let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+        let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
         app.push_entry_for_test(doc, Box::new(WysiwygBoundsPlugin));
         app.switch_workspace_for_test(0);
 
@@ -1751,7 +1751,7 @@ mod tests {
         assert_eq!(cancel_request_count(&state.borrow()), 1);
         assert_eq!(document_texts(&app), ["abc", "def"]);
 
-        app.dispatch_tab_switch(app.editor_tab_id_at(0).unwrap());
+        let _ = app.dispatch_tab_switch(app.editor_tab_id_at(0).unwrap());
 
         assert_eq!(cancel_request_count(&state.borrow()), 1);
     }

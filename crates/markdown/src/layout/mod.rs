@@ -47,8 +47,8 @@ pub trait BlockSource {
     /// 返回顶层文档 block 树，供树遍历使用（build_flat_lines、line_byte_offsets 等）。
     fn blocks(&self) -> &[crate::builder::BlockNode];
 
-    /// 返回文档级标题列表（用于 ToC）。
-    /// MarkdownDoc 暂返回空切片；标题由 view 层从 laid-out blocks 收集。
+    /// 若标题预先提取，按标题块在文档中的原始顺序返回完整列表。
+    /// MarkdownDoc 返回空切片，直接从标题块的文本收集目录。
     fn headings(&self) -> &[HeadingEntry];
 }
 

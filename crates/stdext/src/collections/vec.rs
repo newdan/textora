@@ -12,7 +12,6 @@ use std::{fmt, slice};
 use crate::alloc::Allocator;
 #[cfg(debug_assertions)]
 use crate::alloc::GlobalAllocator;
-use crate::simd::memset;
 
 /// Similar to slices in Go, this slice has an additional capacity field.
 /// It allows you to push more elements into the slice beyond its length,
@@ -325,12 +324,8 @@ impl<'a, T: Copy> BVec<'a, T> {
         }
 
         self.reserve(alloc, total_copies);
-
-        unsafe {
-            let dst = slice::from_raw_parts_mut(self.spare_mut_ptr(), total_copies);
-            self.len += total_copies; // Increment first, to turn memset() into a tail call
-            memset(dst, MaybeUninit::new(value));
-        }
+        self.spare_capacity_mut()[..total_copies].fill(MaybeUninit::new(value));
+        self.len += total_copies;
     }
 
     /// Appends all elements from a slice. It's basically a `memcpy`-append.
@@ -677,3 +672,26 @@ impl<'a, T> ExactSizeIterator for IntoIter<'a, T> {
 }
 
 impl<'a, T> FusedIterator for IntoIter<'a, T> {}
+
+#[cfg(test)]
+mod tests {
+    use super::BVec;
+    use crate::alloc::GlobalAllocator;
+
+    #[test]
+    fn push_repeat_preserves_the_prefix_and_initializes_the_spare_capacity() {
+        const REPEAT_COUNT: usize = 33;
+        let prefix = 7_u32;
+        let repeated = 0x1234_5678_u32;
+        let mut values = BVec::empty();
+        values.push(&GlobalAllocator, prefix);
+
+        values.push_repeat(&GlobalAllocator, repeated, 0);
+        assert_eq!(values.as_slice(), &[prefix]);
+
+        values.push_repeat(&GlobalAllocator, repeated, REPEAT_COUNT);
+        let values = values.into_std_vec();
+        assert_eq!(values[0], prefix);
+        assert_eq!(&values[1..], &[repeated; REPEAT_COUNT]);
+    }
+}

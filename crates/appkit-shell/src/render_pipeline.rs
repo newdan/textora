@@ -337,7 +337,6 @@ pub fn shape_visible_lines(
     presentation: &mut DocumentPresentation,
     text: &mut TextState,
     gpu: &GpuState,
-    advance_cache: &mut Vec<AdvanceCacheEntry>,
     cluster_pool: &mut Vec<Vec<(usize, f32, u32)>>,
     first_line: &mut LineCache,
     last_line: &mut LineCache,
@@ -390,7 +389,7 @@ pub fn shape_visible_lines(
     let sub_line_offset = viewport_state.sub_line_offset;
 
     // Drain cluster Vecs into pool for reuse, then clear advance cache
-    for entry in advance_cache.drain(..) {
+    for entry in presentation.display.advance_cache.drain(..) {
         if !entry.clusters.is_empty() {
             cluster_pool.push(entry.clusters);
         }
@@ -480,7 +479,7 @@ pub fn shape_visible_lines(
                     sub_line_offset,
                 );
             }
-            advance_cache.push(AdvanceCacheEntry {
+            presentation.display.advance_cache.push(AdvanceCacheEntry {
                 doc_line: doc_line_idx,
                 vl_byte_start: 0,
                 vl_grapheme_start: 0,
@@ -528,7 +527,7 @@ pub fn shape_visible_lines(
                     sub_line_offset,
                 );
             }
-            advance_cache.push(AdvanceCacheEntry {
+            presentation.display.advance_cache.push(AdvanceCacheEntry {
                 doc_line: doc_line_idx,
                 vl_byte_start: 0,
                 vl_grapheme_start: 0,
@@ -698,7 +697,7 @@ pub fn shape_visible_lines(
                         }
                     }
                 }
-                advance_cache.extend(build_cached_advance_cache_entries(
+                presentation.display.advance_cache.extend(build_cached_advance_cache_entries(
                     &cached,
                     doc_line_idx,
                     relative_skip,
@@ -882,7 +881,7 @@ pub fn shape_visible_lines(
             visual_line_counter += vl_count;
 
             // Advance cache placeholder so indices stay aligned
-            advance_cache.push(AdvanceCacheEntry {
+            presentation.display.advance_cache.push(AdvanceCacheEntry {
                 doc_line: doc_line_idx_miss,
                 vl_byte_start: 0,
                 vl_grapheme_start: 0,
@@ -1053,7 +1052,7 @@ pub fn shape_visible_lines(
                     sub_line_offset,
                 );
             }
-            advance_cache.push(AdvanceCacheEntry {
+            presentation.display.advance_cache.push(AdvanceCacheEntry {
                 doc_line: doc_line_idx,
                 vl_byte_start: 0,
                 vl_grapheme_start: 0,
@@ -1315,7 +1314,7 @@ pub fn shape_visible_lines(
             cluster_pool,
             ctx.left_margin,
         );
-        advance_cache.extend(entries);
+        presentation.display.advance_cache.extend(entries);
 
         // Render line number in gutter (first VL of each doc line)
         let doc_line_idx = range.start + i;

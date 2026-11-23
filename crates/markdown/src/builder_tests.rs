@@ -587,26 +587,30 @@ fn novel_scan_paragraph_split_by_end_chars() {
 }
 
 #[test]
-fn novel_scan_matches_build_from_novel_doc() {
-    // 验证 scan() 产生的 block kinds 与 byte ranges 和 build_from_novel_doc 一致
-    let text =
-        "《小说》\n\n第1章 序\n\n这是第一节内容。\n还有更多。\n\n第2章 开篇\n\n第二节的内容！";
-    let ns = NovelStructure::scan(&textora_core::document::StringDocView::new(text));
-    let md = MarkdownDoc::build_from_novel_doc(&textora_core::document::StringDocView::new(text));
-
-    let ns_kinds: Vec<&BlockKind> = ns.blocks().iter().map(|b| &b.kind).collect();
-    let md_kinds: Vec<&BlockKind> = md.blocks.iter().map(|b| &b.kind).collect();
-    assert_eq!(
-        ns_kinds, md_kinds,
-        "scan() and build_from_novel_doc must produce identical block kinds"
+fn novel_scan_classifies_blocks_and_preserves_source_ranges() {
+    let title = "《小说》";
+    let first_chapter = "第1章 序";
+    let first_paragraph = "这是第一节内容。\n";
+    let continuation = "还有更多。\n";
+    let second_chapter = "第2章 开篇";
+    let second_paragraph = "第二节的内容！";
+    let source = format!(
+        "{title}\n\n{first_chapter}\n\n{first_paragraph}{continuation}\n{second_chapter}\n\n{second_paragraph}"
     );
-
-    let ns_ranges: Vec<_> = ns.blocks().iter().map(|b| b.block_range.clone()).collect();
-    let md_ranges: Vec<_> = md.blocks.iter().map(|b| b.block_range.clone()).collect();
-    assert_eq!(
-        ns_ranges, md_ranges,
-        "scan() and build_from_novel_doc must produce identical block ranges"
-    );
+    let scanned = novel_scan(&source);
+    let expected = [
+        (BlockKind::Heading { level: 1 }, title),
+        (BlockKind::Heading { level: 2 }, first_chapter),
+        (BlockKind::Paragraph, first_paragraph),
+        (BlockKind::Paragraph, continuation),
+        (BlockKind::Heading { level: 2 }, second_chapter),
+        (BlockKind::Paragraph, second_paragraph),
+    ];
+    assert_eq!(scanned.blocks().len(), expected.len());
+    for (block, (kind, text)) in scanned.blocks().iter().zip(expected) {
+        assert_eq!(block.kind, kind);
+        assert_eq!(&source[block.block_range.clone()], text);
+    }
 }
 
 #[test]

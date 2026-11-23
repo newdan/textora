@@ -996,7 +996,7 @@ fn translate_sidebar_action(
 mod tests {
     use super::*;
     use crate::app::App;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::sync_settings_types::SyncSettingsInput;
     use crate::textora_settings_overlay::TextoraSettingsOverlay;
     use crate::workspace::ViewportDimensions;
@@ -1015,7 +1015,7 @@ mod tests {
         let source = "| head | other |\n| --- | --- |\n| one | two |\n| three | four |\n\noutside";
         std::fs::write(&path, source).expect("Markdown fixture should be writable");
         let mut app = App::new(None);
-        app.open_file(&path).expect("Markdown fixture should open");
+        let _ = app.open_file(&path).expect("Markdown fixture should open");
 
         let first_cell = source.find("one").expect("first table cell should exist");
         let next_cell = source.find("two").expect("next table cell should exist");
@@ -1274,7 +1274,7 @@ mod tests {
     ) -> (App, Rc<RefCell<Option<EditHitTarget>>>) {
         let target = Rc::new(RefCell::new(target));
         let mut app = App::new(None);
-        let doc = DocumentView::new(vec!["abc".to_string()], 80, 10.0);
+        let doc = DocumentFixture::new(vec!["abc".to_string()], 80, 10.0);
         app.push_entry_for_test(doc, Box::new(MmapCursorTestPlugin { target: target.clone() }));
         app.switch_workspace_for_test(0);
         (app, target)

@@ -65,6 +65,7 @@ cc = "1"
 bytemuck = "1"
 tempfile = "3"
 criterion = { workspace = true }
+syn = { version = "2", features = ["full", "visit"] }
 
 [[bench]]
 name = "tab_bench"

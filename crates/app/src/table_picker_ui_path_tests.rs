@@ -82,7 +82,7 @@ fn open_markdown_app(source: &str) -> (App, tempfile::TempDir) {
     let path = directory.path().join("table-ui-path.md");
     std::fs::write(&path, source).expect("Markdown fixture should be writable");
     let mut app = App::new(None);
-    app.open_file(&path).expect("Markdown fixture should open");
+    let _ = app.open_file(&path).expect("Markdown fixture should open");
     (app, directory)
 }
 

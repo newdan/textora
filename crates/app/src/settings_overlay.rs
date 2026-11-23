@@ -217,8 +217,8 @@ mod tests {
     #[test]
     fn opening_preferences_creates_one_modal_settings_overlay() {
         let mut app = App::new(None);
-        app.open_settings_overlay();
-        app.open_settings_overlay();
+        let _ = app.open_settings_overlay();
+        let _ = app.open_settings_overlay();
 
         assert_eq!(app.ui_shell.overlays_count(), 1);
         assert!(app.ui_shell.active_overlay_is_modal());
@@ -237,7 +237,9 @@ mod tests {
     #[test]
     fn failed_persistence_keeps_runtime_value_and_exposes_retry() {
         let mut app = App::new(None);
-        app.dispatch_settings_view_action(ui::settings_view::SettingsViewAction::SetFontSize(20.0));
+        let _ = app.dispatch_settings_view_action(
+            ui::settings_view::SettingsViewAction::SetFontSize(20.0),
+        );
         app.record_settings_persistence_result(Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "permission denied",

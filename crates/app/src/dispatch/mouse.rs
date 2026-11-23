@@ -540,7 +540,7 @@ mod tests {
     use crate::dispatch::wysiwyg::semantic_test_support::{
         RecordedSyncMessage, SemanticPluginState, SemanticQueryResponse, app_with_semantic_plugin,
     };
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -725,7 +725,7 @@ mod tests {
 
     fn app_with_canvas_drag_plugin(text: &str, state: Rc<RefCell<CanvasDragTestState>>) -> App {
         let mut app = App::new(None);
-        let document = DocumentView::new(vec![text.to_string()], 80, 10.0);
+        let document = DocumentFixture::new(vec![text.to_string()], 80, 10.0);
         app.push_entry_for_test(
             document,
             Box::new(CanvasDragTestPlugin { state, plugin_name: "canvas_drag_test" }),
@@ -736,7 +736,7 @@ mod tests {
 
     fn app_with_mindmap_drag_plugin(text: &str, state: Rc<RefCell<CanvasDragTestState>>) -> App {
         let mut app = App::new(None);
-        let document = DocumentView::new(vec![text.to_string()], 80, 10.0);
+        let document = DocumentFixture::new(vec![text.to_string()], 80, 10.0);
         app.push_entry_for_test(
             document,
             Box::new(CanvasDragTestPlugin { state, plugin_name: ui::plugin::PLUGIN_MINDMAP }),
@@ -750,7 +750,7 @@ mod tests {
         state: Rc<RefCell<CanvasControlTestState>>,
     ) -> App {
         let mut app = App::new(None);
-        let document = DocumentView::new(vec![text.to_string()], 80, 10.0);
+        let document = DocumentFixture::new(vec![text.to_string()], 80, 10.0);
         app.push_entry_for_test(document, Box::new(CanvasControlTestPlugin { state }));
         app.switch_workspace_for_test(0);
         app
@@ -788,7 +788,7 @@ mod tests {
         let mut app = app_with_canvas_control_plugin("abc", state.clone());
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 4.0,
             bounds.y + 4.0,
@@ -832,7 +832,7 @@ mod tests {
         let child_range = tree.root.children[0].children[0].subtree_source_range.clone();
 
         let mut app = App::new(None);
-        let document = DocumentView::new(source.lines().map(str::to_owned).collect(), 80, 10.0);
+        let document = DocumentFixture::new(source.lines().map(str::to_owned).collect(), 80, 10.0);
         app.push_entry_for_test(
             document,
             Box::new(textora_mindmap::mindmap_view::MindmapView::new()),
@@ -872,7 +872,7 @@ mod tests {
         assert!(!root_control_seen, "root must not expose a collapse control");
 
         let (control_x, control_y) = parent_control_point.expect("parent control point");
-        app.dispatch_editor_mouse_input(ElementState::Pressed, control_x, control_y, None);
+        let _ = app.dispatch_editor_mouse_input(ElementState::Pressed, control_x, control_y, None);
         let collapsed_source = active_text(&app);
         assert!(collapsed_source.contains("collapsed = true"));
 
@@ -929,17 +929,17 @@ mod tests {
         entry.document.cursor_move_to_offset(2);
         entry.document.cursor_mut().selection_anchor = Some(1);
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 4.0,
             bounds.y + 4.0,
             None,
         );
-        app.dispatch_editor_cursor_moved(bounds.x + 6.0, bounds.y + 6.0, None);
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 6.0, bounds.y + 6.0, None);
         assert!(state.borrow().requests.is_empty());
 
-        app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Released,
             bounds.x + 20.0,
             bounds.y + 20.0,
@@ -961,13 +961,13 @@ mod tests {
         let mut app = app_with_mindmap_drag_plugin("abc", state.clone());
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 4.0,
             bounds.y + 4.0,
             None,
         );
-        app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
 
         assert_eq!(state.borrow().request_count(CanvasDragPhase::Start), 1);
     }
@@ -982,7 +982,7 @@ mod tests {
         let mut app = app_with_canvas_drag_plugin("abc", state);
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 4.0,
             bounds.y + 4.0,
@@ -999,13 +999,13 @@ mod tests {
         let mut app = app_with_canvas_drag_plugin("abc", state);
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 4.0,
             bounds.y + 4.0,
             None,
         );
-        app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
         let release_effect = app.dispatch_editor_mouse_input(
             ElementState::Released,
             bounds.x + 20.0,
@@ -1025,14 +1025,14 @@ mod tests {
         let mut app = app_with_canvas_drag_plugin("abc", state.clone());
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 4.0,
             bounds.y + 4.0,
             None,
         );
-        app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
-        app.cancel_canvas_drag();
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
+        let _ = app.cancel_canvas_drag();
 
         assert_eq!(active_text(&app), "abc");
         assert_eq!(state.borrow().request_count(CanvasDragPhase::Cancel), 1);
@@ -1053,19 +1053,19 @@ mod tests {
         let mut app = app_with_canvas_drag_plugin("abc", state.clone());
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 4.0,
             bounds.y + 4.0,
             None,
         );
-        app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
         assert_eq!(active_text(&app), "abc");
 
-        app.dispatch_editor_cursor_moved(bounds.x + 30.0, bounds.y + 30.0, None);
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 30.0, bounds.y + 30.0, None);
         assert_eq!(active_text(&app), "abc");
 
-        app.cancel_canvas_drag();
+        let _ = app.cancel_canvas_drag();
 
         assert_eq!(active_text(&app), "abc");
         let state = state.borrow();
@@ -1082,14 +1082,14 @@ mod tests {
         let mut app = app_with_canvas_drag_plugin("abc", state);
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 4.0,
             bounds.y + 4.0,
             None,
         );
-        app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Released,
             bounds.x + 20.0,
             bounds.y + 20.0,
@@ -1106,14 +1106,14 @@ mod tests {
         let mut app = app_with_canvas_drag_plugin("abc", state);
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 4.0,
             bounds.y + 4.0,
             None,
         );
-        app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Released,
             bounds.x + 20.0,
             bounds.y + 20.0,
@@ -1137,13 +1137,13 @@ mod tests {
         let press_x = bounds.x + 10.0;
         let press_y = bounds.y + 10.0;
 
-        app.dispatch_editor_mouse_input(ElementState::Pressed, press_x, press_y, None);
+        let _ = app.dispatch_editor_mouse_input(ElementState::Pressed, press_x, press_y, None);
         state.borrow_mut().hit_target_response =
             SemanticQueryResponse::Target(Some(EditHitTarget::TextCaret {
                 byte_offset: 4,
                 selection_scope: None,
             }));
-        app.dispatch_editor_cursor_moved(press_x + 10.0, press_y, None);
+        let _ = app.dispatch_editor_cursor_moved(press_x + 10.0, press_y, None);
 
         let entry = app.active_tab_session().expect("active entry");
         assert_eq!(entry.document.selection_range(), Some((1, 5)));
@@ -1171,7 +1171,7 @@ mod tests {
         }
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 10.0,
             bounds.y + 10.0,
@@ -1194,7 +1194,7 @@ mod tests {
         let mut app = app_with_semantic_plugin("abcdef", state.clone());
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 10.0,
             bounds.y + 10.0,
@@ -1221,7 +1221,7 @@ mod tests {
         let mut app = app_with_semantic_plugin("abcdef", state);
         let bounds = app.plugin_render_bounds();
 
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             ElementState::Pressed,
             bounds.x + 10.0,
             bounds.y + 10.0,
@@ -1247,9 +1247,9 @@ mod tests {
         let x = bounds.x + 10.0;
         let y = bounds.y + 10.0;
 
-        app.dispatch_editor_mouse_input(ElementState::Pressed, x, y, None);
-        app.dispatch_editor_mouse_input(ElementState::Released, x, y, None);
-        app.dispatch_editor_mouse_input(ElementState::Pressed, x, y, None);
+        let _ = app.dispatch_editor_mouse_input(ElementState::Pressed, x, y, None);
+        let _ = app.dispatch_editor_mouse_input(ElementState::Released, x, y, None);
+        let _ = app.dispatch_editor_mouse_input(ElementState::Pressed, x, y, None);
 
         let entry = app.active_tab_session().expect("active entry");
         assert_eq!(entry.document.selection_range(), Some((0, "title".len())));

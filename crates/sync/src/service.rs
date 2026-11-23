@@ -4,8 +4,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::{
-    DeviceConfig, DeviceId, EventCursor, FolderConfig, FolderId, FolderStatus, InstanceInfo,
-    RetryBackoff, RetryFailure, SyncError, SyncEvent, SyncthingClient,
+    DeviceConfig, DeviceId, EventBatch, EventCursor, FolderConfig, FolderId, FolderStatus,
+    InstanceInfo, RetryBackoff, RetryFailure, SyncError, SyncEvent, SyncthingClient,
 };
 
 pub enum SyncCommand {
@@ -45,11 +45,11 @@ pub enum SyncResult {
 trait SyncTransport: Send + Sync + 'static {
     fn probe(&self) -> Result<InstanceInfo, SyncError>;
     fn folder_status(&self, folder: &FolderId) -> Result<FolderStatus, SyncError>;
-    fn events_since(
+    fn event_batch_since(
         &self,
         cursor: EventCursor,
         timeout_seconds: u16,
-    ) -> Result<Vec<SyncEvent>, SyncError>;
+    ) -> Result<EventBatch, SyncError>;
     fn put_device(&self, config: &DeviceConfig) -> Result<DeviceConfig, SyncError>;
     fn put_folder(&self, config: &FolderConfig) -> Result<FolderConfig, SyncError>;
     fn device_config(&self, device_id: &DeviceId) -> Result<Option<DeviceConfig>, SyncError>;
@@ -81,12 +81,12 @@ impl SyncTransport for ClientTransport {
         self.client.folder_status(folder)
     }
 
-    fn events_since(
+    fn event_batch_since(
         &self,
         cursor: EventCursor,
         timeout_seconds: u16,
-    ) -> Result<Vec<SyncEvent>, SyncError> {
-        self.client.events_since(cursor, timeout_seconds)
+    ) -> Result<EventBatch, SyncError> {
+        self.client.event_batch_since(cursor, timeout_seconds)
     }
 
     fn put_device(&self, config: &DeviceConfig) -> Result<DeviceConfig, SyncError> {
@@ -354,24 +354,17 @@ fn event_loop(
             cursor = new_cursor;
         }
 
-        match transport.events_since(cursor, 1) {
-            Ok(events) => {
+        match transport.event_batch_since(cursor, 1) {
+            Ok(EventBatch { next_cursor, events }) => {
                 backoff.reset();
-                let mut requires_resubscribe = false;
-                let mut emitted = false;
+                // A forward gap can resume from the last seen ID after reporting the
+                // refresh. A rollback needs a new subscription with a reset cursor.
+                let requires_resubscribe =
+                    next_cursor == cursor && events.contains(&SyncEvent::FullRefreshRequired);
+                cursor = next_cursor;
+                let emitted = !events.is_empty();
                 for event in events {
-                    match event {
-                        SyncEvent::Remote { id, kind } => {
-                            cursor = EventCursor(cursor.0.max(id));
-                            send_event(&sender, &wake, SyncEvent::Remote { id, kind });
-                            emitted = true;
-                        }
-                        SyncEvent::FullRefreshRequired => {
-                            send_event(&sender, &wake, SyncEvent::FullRefreshRequired);
-                            requires_resubscribe = true;
-                            emitted = true;
-                        }
-                    }
+                    send_event(&sender, &wake, event);
                 }
                 if requires_resubscribe {
                     cursor = match receive_subscription(&receiver, &shutdown) {
@@ -475,8 +468,8 @@ mod tests {
 
     use super::{SyncCommand, SyncResult, SyncService, SyncTransport};
     use crate::{
-        DeviceConfig, DeviceId, EventCursor, FolderConfig, FolderId, FolderPhase, FolderStatus,
-        InstanceInfo, SyncError, SyncEvent, SyncEventKind,
+        DeviceConfig, DeviceId, EventBatch, EventCursor, FolderConfig, FolderId, FolderPhase,
+        FolderStatus, InstanceInfo, SyncError, SyncEvent, SyncEventKind,
     };
 
     const DEVICE_ID: &str = "ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG";
@@ -518,19 +511,25 @@ mod tests {
             })
         }
 
-        fn events_since(
+        fn event_batch_since(
             &self,
             cursor: EventCursor,
             _timeout_seconds: u16,
-        ) -> Result<Vec<SyncEvent>, SyncError> {
+        ) -> Result<EventBatch, SyncError> {
             self.calls
                 .lock()
                 .expect("fake calls lock should work")
                 .push(format!("events:{}", cursor.0));
             if cursor.0 == 0 {
-                Ok(vec![SyncEvent::Remote { id: 1, kind: SyncEventKind::FolderStateChanged }])
+                Ok(EventBatch {
+                    next_cursor: EventCursor(1),
+                    events: vec![SyncEvent::Remote {
+                        id: 1,
+                        kind: SyncEventKind::FolderStateChanged,
+                    }],
+                })
             } else {
-                Ok(Vec::new())
+                Ok(EventBatch { next_cursor: cursor, events: Vec::new() })
             }
         }
 

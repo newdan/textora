@@ -1,4 +1,4 @@
-//! Smoke tests for edit+ app lifecycle.
+//! Smoke tests for textora app lifecycle.
 //!
 //! GPU-dependent tests run in headless mode and skip gracefully when no adapter is available.
 

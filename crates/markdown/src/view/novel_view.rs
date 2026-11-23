@@ -193,3 +193,31 @@ impl PluginFactory for NovelViewFactory {
         Box::new(NovelView::new())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_of_contents_keeps_novel_titles_outside_the_viewport() {
+        let source = format!(
+            "  《示例小说》  \n\n  第一章 起点  \n\n{}\n第二章 远方\n",
+            "正文。\n\n".repeat(120),
+        );
+        let document = textora_core::document::StringDocView::new(&source);
+        let theme = ui::theme::test_theme();
+        let bounds = ui::Rect::new(0.0, 0.0, 800.0, 200.0);
+        let mut shaper = shaping::Shaper::new().expect("novel layout requires fonts");
+        let mut view = NovelView::new();
+
+        view.render(&document, bounds, &theme, &mut shaper, 1.0);
+
+        let PluginResponse::Headings(headings) = view.query(PluginQuery::TOCHeadings, &document)
+        else {
+            panic!("novel view must publish its headings");
+        };
+        let titles: Vec<_> = headings.iter().map(|heading| heading.title.as_str()).collect();
+        assert_eq!(titles, ["《示例小说》", "第一章 起点", "第二章 远方"]);
+        assert!(headings[2].y > bounds.h);
+    }
+}

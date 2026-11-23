@@ -1,7 +1,7 @@
 pub(in crate::mindmap_view) use crate::mmf::canvas::MindmapRenderProjection;
 pub(in crate::mindmap_view) use crate::mmf::layout::{
     EXPANDED_CONTROL_RIGHT_OFFSET_DP, HitMap, LayoutConstants, LayoutTree, ProjectedTitle,
-    descendant_count, measured_card_width,
+    descendant_count, measured_card_width_for_depth,
 };
 pub(in crate::mindmap_view) use crate::mmf::utils::{
     collect_nodes_dfs, find_parent, find_siblings,
@@ -30,8 +30,6 @@ pub(in crate::mindmap_view) use ui::theme::{
     resolve_mindmap_theme_selection,
 };
 
-pub(in crate::mindmap_view) const PREVIEW_TEXT_FALLBACK_ADVANCE_PER_BYTE: f32 = 7.0;
-
 pub(in crate::mindmap_view) fn mindmap_render_theme<'a>(
     theme: &'a Theme,
     scheme_id: Option<&'a str>,
@@ -50,6 +48,7 @@ pub(in crate::mindmap_view) enum MindmapDocumentState {
         source: String,
         tree: Box<Tree>,
         layout: Option<Box<LayoutTree>>,
+        drag_preview_cards: Vec<DragPreviewCard>,
         hit_map: Option<Box<HitMap>>,
         connector_mesh_cache: Option<mmf::canvas::ConnectorMeshCache>,
     },
@@ -81,10 +80,9 @@ pub(in crate::mindmap_view) struct MindmapDragPreview {
     pub(in crate::mindmap_view) canvas: CanvasDragPreview,
 }
 
-pub(in crate::mindmap_view) struct DragCandidate<'a> {
-    pub(in crate::mindmap_view) node_index: usize,
-    pub(in crate::mindmap_view) node: &'a mmf::Node,
-    pub(in crate::mindmap_view) layout_node: &'a mmf::layout::LayoutNode,
+pub(in crate::mindmap_view) struct DragPreviewCard {
+    width: f32,
+    descendant_count: usize,
 }
 
 pub struct MindmapView {
@@ -97,7 +95,7 @@ pub struct MindmapView {
     pub(in crate::mindmap_view) clear_focus_at: Option<usize>,
     pub(in crate::mindmap_view) canvas_viewport: Option<CanvasViewportSnapshot>,
     pub(in crate::mindmap_view) canvas_pointer: Option<CanvasPoint>,
-    pub(in crate::mindmap_view) cached_font_size: f32,
+    layout_font_key: Option<(u32, u64)>,
     pub(in crate::mindmap_view) cached_dpi: f32,
     pub(in crate::mindmap_view) constants: LayoutConstants,
     pub(in crate::mindmap_view) same_level_threshold_ratio: f32,
@@ -122,7 +120,7 @@ impl MindmapView {
             clear_focus_at: None,
             canvas_viewport: None,
             canvas_pointer: None,
-            cached_font_size: 0.0,
+            layout_font_key: None,
             cached_dpi: 0.0,
             constants: LayoutConstants::default(),
             same_level_threshold_ratio: ui::theme::MindmapGeometry::default()
@@ -136,8 +134,13 @@ impl MindmapView {
         shaper: &mut Shaper,
         projected_title: Option<ProjectedTitle<'_>>,
     ) {
-        self.cached_font_size = shaper.font_size();
-        let MindmapDocumentState::Ready { tree, layout, hit_map, .. } = &mut self.document_state
+        let font_key = (shaper.font_size().to_bits(), shaper.attrs_hash());
+        if self.layout_font_key != Some(font_key) {
+            self.layout_font_key = Some(font_key);
+            self.clear_layout();
+        }
+        let MindmapDocumentState::Ready { tree, layout, drag_preview_cards, hit_map, .. } =
+            &mut self.document_state
         else {
             return;
         };
@@ -154,15 +157,28 @@ impl MindmapView {
             &self.constants,
             projected_title,
         );
+        *drag_preview_cards = measure_drag_preview_cards(
+            tree,
+            &computed_layout,
+            &self.constants,
+            shaper,
+            projected_title,
+        );
         *layout = Some(Box::new(computed_layout));
         *hit_map = Some(Box::new(computed_hit_map));
     }
 
     pub(in crate::mindmap_view) fn clear_layout(&mut self) {
-        if let MindmapDocumentState::Ready { layout, hit_map, connector_mesh_cache, .. } =
-            &mut self.document_state
+        if let MindmapDocumentState::Ready {
+            layout,
+            drag_preview_cards,
+            hit_map,
+            connector_mesh_cache,
+            ..
+        } = &mut self.document_state
         {
             *layout = None;
+            drag_preview_cards.clear();
             *hit_map = None;
             *connector_mesh_cache = None;
         }
@@ -519,23 +535,48 @@ pub(in crate::mindmap_view) fn hit_geometry_for_source(
     hit_map.nodes.iter().find(|geometry| geometry.source_node_index == source_node_index)
 }
 
-pub(in crate::mindmap_view) fn measured_preview_card_width(
-    label: &str,
-    minimum_width: f32,
+fn measure_drag_preview_cards(
+    tree: &Tree,
+    layout: &LayoutTree,
     constants: &LayoutConstants,
-    font_size: f32,
-    depth: u8,
-) -> f32 {
-    let measured_width = Shaper::new()
-        .ok()
-        .map(|mut shaper| {
-            if font_size.is_finite() && font_size > 0.0 {
-                shaper.set_font_size(font_size * constants.font_scale_for_depth(depth));
-            }
-            measured_card_width(label, constants, &mut shaper) - 2.0 * constants.card_padding_x
+    shaper: &mut Shaper,
+    projected_title: Option<ProjectedTitle<'_>>,
+) -> Vec<DragPreviewCard> {
+    fn visit<'a>(node: &'a mmf::Node, nodes: &mut Vec<(&'a mmf::Node, usize)>) {
+        let index = nodes.len();
+        nodes.push((node, 0));
+        for child in &node.children {
+            visit(child, nodes);
+        }
+        nodes[index].1 = nodes.len() - index - 1;
+    }
+
+    let mut nodes = Vec::new();
+    visit(&tree.root, &mut nodes);
+    layout
+        .nodes
+        .iter()
+        .map(|layout_node| {
+            let (node, descendant_count) = nodes[layout_node.source_node_index];
+            let title_is_projected = projected_title
+                .is_some_and(|title| title.node_index == layout_node.source_node_index);
+            let width = if descendant_count > 0 || title_is_projected {
+                let label = drag_preview_label(&node.title, descendant_count);
+                measured_card_width_for_depth(&label, constants, shaper, layout_node.depth)
+                    .max(layout_node.w)
+            } else {
+                layout_node.w
+            };
+            DragPreviewCard { width, descendant_count }
         })
-        .unwrap_or(label.len() as f32 * PREVIEW_TEXT_FALLBACK_ADVANCE_PER_BYTE);
-    (measured_width + 2.0 * constants.card_padding_x).max(minimum_width)
+        .collect()
+}
+
+fn drag_preview_label(title: &str, descendant_count: usize) -> String {
+    match descendant_count {
+        0 => title.to_owned(),
+        count => format!("{title} · {count}"),
+    }
 }
 
 pub(in crate::mindmap_view) fn visible_source_indices(root: &mmf::Node) -> Vec<usize> {
@@ -779,6 +820,7 @@ impl ViewPlugin for MindmapView {
                         source: text,
                         tree: Box::new(tree),
                         layout: None,
+                        drag_preview_cards: Vec::new(),
                         hit_map: None,
                         connector_mesh_cache: None,
                     },

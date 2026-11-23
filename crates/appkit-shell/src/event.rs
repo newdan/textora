@@ -27,6 +27,7 @@ pub enum ShellEffectStep {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[must_use = "merge this effect into the caller's effect or apply it at the product boundary"]
 pub struct ShellEffect {
     pub redraw: bool,
     pub reshape: bool,

@@ -248,7 +248,6 @@ pub struct NovelStructure {
 
 impl NovelStructure {
     /// 扫描小说文档，产生 NovelStructure。
-    /// 分类逻辑与 build_from_novel_doc 完全一致。
     pub fn scan(doc: &dyn textora_core::document::DocView) -> Self {
         let mut blocks = Vec::new();
         let mut headings = Vec::new();
@@ -1225,117 +1224,6 @@ impl MarkdownDoc {
         }
 
         builder.build()
-    }
-
-    /// Build a MarkdownDoc directly from a DocView, optimized for Novel Mode.
-    /// This avoids creating a giant intermediate String and minimizes regex overhead.
-    pub fn build_from_novel_doc(doc: &dyn textora_core::document::DocView) -> Self {
-        let mut blocks = Vec::new();
-        let total_lines = doc.line_count();
-        let mut para_lines = Vec::new();
-        let mut para_start_byte = 0;
-
-        for i in 0..total_lines {
-            let text = doc.doc_line_text(i);
-            let trimmed = text.trim();
-            let line_start = doc.line_byte_offset(i);
-            let line_end = if i + 1 < total_lines {
-                doc.line_byte_offset(i + 1)
-            } else {
-                line_start + doc.line_byte_length(i)
-            };
-
-            if trimmed.is_empty() {
-                if !para_lines.is_empty() {
-                    let text_styles = para_lines.iter().map(|_| vec![]).collect();
-                    blocks.push(BlockNode {
-                        kind: BlockKind::Paragraph,
-                        children: vec![],
-                        text_lines: vec![],
-                        projected_lines: vec![],
-                        text_styles,
-                        source_range: BlockSource::Continuous(para_start_byte..line_start),
-                        code_line_source_starts: None,
-                        block_range: para_start_byte..line_start,
-                    });
-                    para_lines.clear();
-                }
-                para_start_byte = line_end;
-                continue;
-            }
-
-            if let Some(heading_level) = classify_title(trimmed) {
-                if !para_lines.is_empty() {
-                    let text_styles = para_lines.iter().map(|_| vec![]).collect();
-                    blocks.push(BlockNode {
-                        kind: BlockKind::Paragraph,
-                        children: vec![],
-                        text_lines: vec![],
-                        projected_lines: vec![],
-                        text_styles,
-                        source_range: BlockSource::Continuous(para_start_byte..line_start),
-                        code_line_source_starts: None,
-                        block_range: para_start_byte..line_start,
-                    });
-                    para_lines.clear();
-                }
-
-                let content_len = text.len();
-                blocks.push(BlockNode {
-                    kind: BlockKind::Heading { level: heading_level },
-                    children: vec![],
-                    text_lines: vec![],
-                    projected_lines: vec![],
-                    text_styles: vec![vec![]],
-                    source_range: BlockSource::Continuous(line_start..(line_start + content_len)),
-                    code_line_source_starts: None,
-                    block_range: line_start..(line_start + content_len),
-                });
-                para_start_byte = line_end;
-                continue;
-            }
-
-            let last_char = trimmed.chars().last().unwrap_or(' ');
-            para_lines.push(1); // just a placeholder to count lines
-
-            if is_paragraph_end_char(last_char) {
-                let text_styles = para_lines.iter().map(|_| vec![]).collect();
-                blocks.push(BlockNode {
-                    kind: BlockKind::Paragraph,
-                    children: vec![],
-                    text_lines: vec![],
-                    projected_lines: vec![],
-                    text_styles,
-                    source_range: BlockSource::Continuous(para_start_byte..line_end),
-                    code_line_source_starts: None,
-                    block_range: para_start_byte..line_end,
-                });
-                para_lines.clear();
-                para_start_byte = line_end;
-            }
-        }
-
-        if !para_lines.is_empty() {
-            let last_line_end = if total_lines > 0 {
-                let last = total_lines - 1;
-                doc.line_byte_offset(last) + doc.line_byte_length(last)
-            } else {
-                0
-            };
-            let text_styles = para_lines.iter().map(|_| vec![]).collect();
-            blocks.push(BlockNode {
-                kind: BlockKind::Paragraph,
-                children: vec![],
-                text_lines: vec![],
-                projected_lines: vec![],
-                text_styles,
-                source_range: BlockSource::Continuous(para_start_byte..last_line_end),
-                code_line_source_starts: None,
-                block_range: para_start_byte..last_line_end,
-            });
-        }
-
-        Self { blocks }
     }
 }
 

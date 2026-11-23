@@ -26,16 +26,14 @@ use crate::textora_product::ProductEventSender;
 use appkit_shell::input_mapper::key_to_command;
 use ui::core::overlay::OverlayAction;
 use ui::core::widget::{KeyCode, Modifiers, WidgetAction};
-#[allow(unused_imports)]
-use ui::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
 
-// Font size and line height are now in Settings
 const FALLBACK_LOCAL_DEVICE_SHORT_ID: &str = "local";
 const ACCESSIBILITY_WINDOW_NAME: &str = "textora";
 
-/// 计算光标当前是否可见，以及下一次切换的时间点。
-
-// ── Search bar keyboard routing helpers ──
+fn report_lifecycle_error(message: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{message}");
+}
 
 /// Returns true if the key combo should bypass search bar forwarding
 /// and go through the normal key_to_command → handle_command pipeline.
@@ -87,9 +85,7 @@ fn spawn_recent_file_loader(
 ) {
     std::thread::spawn(move || {
         let recent_paths = load_recent_file_paths(&file_history, workspace_root.as_deref());
-        if product_event_sender.send_recent_files_loaded(recent_paths).is_err() {
-            eprintln!("[startup] recent file loader could not reach product inbox");
-        }
+        let _ = product_event_sender.send_recent_files_loaded(recent_paths);
     });
 }
 
@@ -331,7 +327,9 @@ impl App {
     fn handle_dropped_file(&mut self, path: &std::path::Path) {
         match self.open_file(path) {
             Ok(effect) => self.apply_effect(effect),
-            Err(error) => eprintln!("Error opening dropped file: {error}"),
+            Err(error) => {
+                report_lifecycle_error(format_args!("Error opening dropped file: {error}"))
+            }
         }
     }
 
@@ -339,7 +337,10 @@ impl App {
         for path in paths {
             match self.open_file(&path) {
                 Ok(effect) => self.apply_effect(effect),
-                Err(error) => eprintln!("[macos] could not open {}: {error}", path.display()),
+                Err(error) => report_lifecycle_error(format_args!(
+                    "[macos] could not open {}: {error}",
+                    path.display()
+                )),
             }
         }
     }
@@ -372,7 +373,7 @@ impl App {
                                 MonitorEvent::PathsChanged(paths) => reported |= !paths.is_empty(),
                                 MonitorEvent::RootsUpdated => reported = true,
                                 MonitorEvent::Failed(error) => {
-                                    eprintln!("[file-monitor] {error}");
+                                    report_lifecycle_error(format_args!("[file-monitor] {error}"));
                                     reported = true;
                                 }
                             }
@@ -392,8 +393,7 @@ impl App {
 
     fn publish_accessibility_tree(&mut self) {
         let tree = self.ui_shell.accessibility_tree(ACCESSIBILITY_WINDOW_NAME);
-        if let Err(errors) = tree.validate() {
-            eprintln!("[accessibility] invalid semantic tree: {errors:?}");
+        if tree.validate().is_err() {
             return;
         }
         let Some(adapter) = self.accessibility_adapter.as_mut() else { return };
@@ -452,7 +452,7 @@ impl App {
             self.pending_quit_after_save = true;
             if let Err(error) = self.submit_editor_save(tab_id, None) {
                 self.pending_quit_after_save = false;
-                eprintln!("auto-save on close failed: {error}");
+                report_lifecycle_error(format_args!("auto-save on close failed: {error}"));
                 self.quit_app(event_loop);
             }
             return;
@@ -797,10 +797,6 @@ impl App {
 
             WindowEvent::DroppedFile(path) => self.handle_dropped_file(&path),
             WindowEvent::RedrawRequested => {
-                // 诊断：记录 RedrawRequested 到达时间
-                let _rr_arrive = std::time::Instant::now();
-                let _since_last_rr = self.editor_runtime.note_reshape_result_arrived(_rr_arrive);
-
                 self.needs_redraw = false;
                 self.flush_pending_resize();
                 // Tick sidebar hover state machine each frame
@@ -816,26 +812,8 @@ impl App {
                 } else {
                     self.sidebar_animating = false;
                 }
-                let _rr_t0 = std::time::Instant::now();
                 self.render();
                 self.publish_accessibility_tree();
-                let _rr_us = _rr_t0.elapsed().as_micros();
-                // Debug-only: append frame timing to /tmp/perf.log
-                #[cfg(debug_assertions)]
-                {
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/perf.log")
-                        .and_then(|mut f| {
-                            use std::io::Write;
-                            writeln!(
-                                f,
-                                "[rr] render={}us since_last={}us nr_after_render={}",
-                                _rr_us, _since_last_rr, self.needs_redraw
-                            )
-                        });
-                }
             }
             _ => {}
         }
@@ -933,7 +911,7 @@ impl App {
                     appkit_shell::editor_runtime::EditorNotification::SaveFailed {
                         message,
                         ..
-                    } => eprintln!("save error: {message}"),
+                    } => report_lifecycle_error(format_args!("save error: {message}")),
                     _ => {}
                 }
             }
@@ -1081,8 +1059,7 @@ impl ApplicationHandler<AppEvent> for App {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.do_resumed(event_loop);
         }));
-        if let Err(e) = result {
-            eprintln!("[fatal] panic in resumed: {:?}", e);
+        if result.is_err() {
             event_loop.exit();
         }
     }
@@ -1110,13 +1087,11 @@ impl ApplicationHandler<AppEvent> for App {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.do_window_event(event_loop, event);
         }));
-        if let Err(e) = result {
-            eprintln!("[fatal] panic in window_event: {:?}", e);
+        if result.is_err() {
             event_loop.exit();
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let _atw_t0 = std::time::Instant::now();
         // Poll menu actions — menu clicks may happen between window events
         // Collect first to avoid borrow conflict with dispatch
         let actions: Vec<MenuAction> = if let Some(native_menu) = self.native_menu() {
@@ -1138,11 +1113,6 @@ impl ApplicationHandler<AppEvent> for App {
 
         self.submit_file_safety_checks();
 
-        #[cfg(debug_assertions)]
-        let redraw_before = self.needs_redraw;
-        #[cfg(debug_assertions)]
-        let mut redraw_reason = "none";
-
         // 检测光标闪烁 phase 变化 → 触发渲染
         // 窗口未激活时不闪烁；搜索框焦点时跳过（TextBox 自己管理闪烁）
         // 预览模式没有可见光标，跳过闪烁检测
@@ -1156,10 +1126,6 @@ impl ApplicationHandler<AppEvent> for App {
             if visible != self.last_cursor_visible {
                 self.last_cursor_visible = visible;
                 self.needs_redraw = true;
-                #[cfg(debug_assertions)]
-                {
-                    redraw_reason = "blink";
-                }
             }
         }
 
@@ -1177,15 +1143,9 @@ impl ApplicationHandler<AppEvent> for App {
         // 检测动画 → 触发渲染
         if self.has_active_animation() {
             self.needs_redraw = true;
-            #[cfg(debug_assertions)]
-            {
-                redraw_reason = if redraw_reason == "none" { "anim" } else { "blink+anim" };
-            }
         }
 
         // 仅在有需要时 request_redraw（不再无条件刷新）
-        #[cfg(debug_assertions)]
-        let redraw_requested = self.needs_redraw;
         if self.needs_redraw
             && let Some(window) = self.editor_runtime.window()
         {
@@ -1194,9 +1154,6 @@ impl ApplicationHandler<AppEvent> for App {
 
         // 设置 ControlFlow — 精确调度下一次唤醒
         let next_wake = self.compute_next_wake_time();
-        #[cfg(debug_assertions)]
-        let wake_after_millis =
-            next_wake.map(|d| d.duration_since(std::time::Instant::now()).as_millis() as i64);
         match next_wake {
             Some(deadline) => {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
@@ -1206,28 +1163,6 @@ impl ApplicationHandler<AppEvent> for App {
             }
         }
 
-        let _atw_us = _atw_t0.elapsed().as_micros();
-        // Debug-only: append about_to_wait timing to /tmp/perf.log
-        #[cfg(debug_assertions)]
-        {
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/perf.log")
-                .and_then(|mut f| {
-                    use std::io::Write;
-                    writeln!(
-                        f,
-                        "[atw] {:>5}us nr={}->{} why={:<10} req={} wake={:?}",
-                        _atw_us,
-                        redraw_before,
-                        self.needs_redraw,
-                        redraw_reason,
-                        redraw_requested,
-                        wake_after_millis
-                    )
-                });
-        }
         self.update_ime_cursor_area();
     }
 }
@@ -1235,7 +1170,7 @@ impl ApplicationHandler<AppEvent> for App {
 #[cfg(test)]
 mod file_safety_race_tests {
     use super::App;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::file_safety::{FileSafetyOutcome, capture_revision};
     use crate::plugins::editor::EditorPlugin;
 
@@ -1256,14 +1191,15 @@ mod file_safety_race_tests {
         let directory = tempfile::tempdir().expect("reload fixture directory");
         let path = directory.path().join("notes.md");
         fs::write(&path, "old\nlonger line\nlast").expect("write reload baseline");
-        let mut document = DocumentView::from_file(&path, 10, 100.0).expect("load reload fixture");
+        let mut document =
+            DocumentFixture::from_file(&path, 10, 100.0).expect("load reload fixture");
         let old_revision = document.disk_revision.clone();
         let content_revision = document.content_revision();
         document.set_cursor_offset_synced(2);
         document.cursor_mut().selection_anchor = Some(document.buffer_len());
         let mut app = App::new(None);
         let tab_id = app.push_entry_for_test(document, Box::new(EditorPlugin::new()));
-        app.new_untitled_doc();
+        let _ = app.new_untitled_doc();
         let scroll_anchor = ui::viewport::ScrollAnchor::new(1, 3.0);
         app.tab_session_mut(tab_id)
             .expect("reload fixture tab")
@@ -1306,7 +1242,7 @@ mod file_safety_race_tests {
         fs::write(&path, "remote").expect("file should be written");
         let revision = capture_revision(&path).expect("revision should capture");
 
-        let mut document = DocumentView::new(vec!["local edit".to_owned()], 10, 10.0);
+        let mut document = DocumentFixture::new(vec!["local edit".to_owned()], 10, 10.0);
         document.file_path = Some(path.clone());
         document.dirty = true;
         document.mark_content_changed();
@@ -1338,7 +1274,7 @@ mod file_safety_race_tests {
         fs::write(&conflict, "stale local snapshot").expect("conflict snapshot should exist");
         let revision = capture_revision(&path).expect("revision should capture");
 
-        let mut document = DocumentView::new(vec!["latest local edit".to_owned()], 10, 10.0);
+        let mut document = DocumentFixture::new(vec!["latest local edit".to_owned()], 10, 10.0);
         document.file_path = Some(path.clone());
         document.dirty = true;
         document.mark_content_changed();
@@ -1378,7 +1314,7 @@ mod file_safety_race_tests {
     fn external_content_tab_is_product_prepared_and_returns_activation_effects() {
         let path = std::path::PathBuf::from("/virtual/shared.md");
         let mut app = App::new(None);
-        app.new_untitled_doc();
+        let _ = app.new_untitled_doc();
 
         let effect = app.open_external_content_tab(&path, "# Shared");
         let active = app.active_tab_session().expect("external content should become active");
@@ -1396,7 +1332,7 @@ mod file_safety_race_tests {
         );
 
         let external_tab_id = app.active_tab_id().expect("external content should have a tab ID");
-        app.new_untitled_doc();
+        let _ = app.new_untitled_doc();
         let len_before_reopen = app.editor_tab_count();
 
         let reopen_effect = app.open_external_content_tab(&path, "# Replacement");
@@ -1423,7 +1359,8 @@ mod file_safety_race_tests {
         fs::write(&path, "baseline").expect("write conflict baseline");
         let mut monitor = crate::file_safety::FileSafetyMonitor::new();
         monitor.track(&path).expect("track conflict baseline");
-        let mut document = DocumentView::from_file(&path, 10, 10.0).expect("load conflict fixture");
+        let mut document =
+            DocumentFixture::from_file(&path, 10, 10.0).expect("load conflict fixture");
         document.insert_at_cursor(b"local ");
         let content_revision = document.content_revision();
         let local = document.full_text();
@@ -2127,7 +2064,7 @@ mod tests {
 
         let theme = ui::theme::test_theme();
         let mut app = crate::app::App::new(None);
-        app.open_settings_overlay();
+        let _ = app.open_settings_overlay();
 
         let mut measure = ui::core::measure::NoopMeasure;
         let inputs = app.build_shell_inputs();
@@ -2357,7 +2294,7 @@ mod tests {
         spawn_recent_file_loader(product.event_sender(), history, Some(workspace));
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while product.native_menu().is_none() && std::time::Instant::now() < deadline {
-            ProductHost::drain_product_events(&mut product);
+            let _ = ProductHost::drain_product_events(&mut product);
             std::thread::yield_now();
         }
         assert!(product.native_menu().is_some(), "recent file loader should reach product inbox");
@@ -2639,7 +2576,7 @@ mod tests {
         assert_eq!(cancel_request_count(&state.borrow()), 1);
         assert_eq!(document_texts(&app), ["abc", "def"]);
 
-        app.handle_window_focus_changed(false);
+        let _ = app.handle_window_focus_changed(false);
 
         assert_eq!(cancel_request_count(&state.borrow()), 1);
     }
@@ -2675,7 +2612,7 @@ mod tests {
         assert_eq!(app.mouse.last_hover_redraw_pos, None);
         assert_eq!(app.mouse.last_hover_tab, None);
 
-        app.handle_window_focus_changed(false);
+        let _ = app.handle_window_focus_changed(false);
         assert_eq!(
             app.editor_runtime.pointer_capture(),
             appkit_shell::editor_runtime::MouseCapture::None

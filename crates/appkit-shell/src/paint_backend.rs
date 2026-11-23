@@ -33,15 +33,10 @@ pub fn drain(
     mut text: Option<&mut TextState>,
     gpu: Option<&GpuState>,
 ) -> Vec<GlyphVertex> {
-    let _drain_t0 = std::time::Instant::now();
     let mut vertices = Vec::new();
     let mut clip_stack: Vec<Rect> = Vec::new();
     let sw = screen.w;
     let sh = screen.h;
-    let mut text_layout_count: usize = 0;
-    let mut glyph_resolve_count: usize = 0;
-    let mut glyph_cache_hit: usize = 0;
-    let mut glyph_cache_miss: usize = 0;
 
     for cmd in list.cmds {
         match cmd {
@@ -112,7 +107,6 @@ pub fn drain(
                 let (Some(text_state), Some(gpu)) = (text.as_deref_mut(), gpu) else {
                     continue;
                 };
-                text_layout_count += 1;
                 let cache_key = preview_text_cache_key(layout.id, x);
 
                 // 尝试从预览 cache 获取
@@ -139,26 +133,6 @@ pub fn drain(
                                 cluster.font_id,
                                 requested_x,
                             );
-                            glyph_resolve_count += 1;
-                            // Check atlas hit before resolve_glyph
-                            let font_id_usize = {
-                                use std::hash::{Hash, Hasher};
-                                let mut h = std::hash::DefaultHasher::new();
-                                cluster.font_id.hash(&mut h);
-                                h.finish() as usize
-                            };
-                            let key = render::GlyphKey {
-                                glyph_id: cluster.glyph_id,
-                                font_id: font_id_usize,
-                                font_size: (layout.font_size * 64.0) as u32,
-                                subpixel_phase: phase,
-                            };
-                            if text_state.atlas.get(&key).is_some() {
-                                glyph_cache_hit += 1;
-                            } else {
-                                glyph_cache_miss += 1;
-                            }
-
                             let slot = crate::text_rasterize::resolve_glyph(
                                 cluster.font_id,
                                 cluster.glyph_id as u16,
@@ -204,8 +178,7 @@ pub fn drain(
                 };
                 match slot {
                     Ok(slot) => append_image_quad(&mut vertices, rect, clipped, slot.uv, &screen),
-                    Err(error) => {
-                        eprintln!("[image atlas] cannot draw image {}: {error:?}", image.id());
+                    Err(_) => {
                         let fallback = image_failure_draw_list(
                             clipped,
                             text.as_deref_mut().map(|state| &mut state.shaper),
@@ -259,17 +232,6 @@ pub fn drain(
             }
         }
     }
-
-    let _drain_elapsed = _drain_t0.elapsed();
-    eprintln!(
-        "[drain] time={:.1}ms text_layout_commands={} glyph_resolve={} cache_hit={} cache_miss={} total_vertices={}",
-        _drain_elapsed.as_secs_f64() * 1000.0,
-        text_layout_count,
-        glyph_resolve_count,
-        glyph_cache_hit,
-        glyph_cache_miss,
-        vertices.len(),
-    );
 
     vertices
 }

@@ -1,4 +1,4 @@
-//! edit+ UI — pure UI component library.
+//! textora UI — pure UI component library.
 //!
 //! Provides rendering primitives and widget components.
 //! Depends on core, render, shaping, stdext — no app-layer types.

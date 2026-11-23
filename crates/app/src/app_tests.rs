@@ -1,5 +1,5 @@
 use super::*;
-use crate::document_view::DocumentView;
+use crate::document_fixture::DocumentFixture;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 use appkit_shell::input_mapper::EditCommand;
 use textora_core::types::ByteIndex;
@@ -36,16 +36,14 @@ fn active_document_text(app: &App) -> String {
 fn close_editor_tab_for_test(app: &mut App, index: usize) {
     let tab_id = app.editor_tab_id_at(index).expect("test tab index should be valid");
     let effect = app.close_editor_tab(tab_id).expect("test tab should close");
-    app.apply_workspace_effect(effect);
+    let _ = app.apply_workspace_effect(effect);
 }
 
 fn update_runtime_frame_cache(
     app: &mut App,
     update: impl FnOnce(&mut appkit_shell::frame_cache::FrameCache),
 ) {
-    let mut resources = app.editor_runtime.take_render_resources();
-    update(&mut resources.frame_cache);
-    app.editor_runtime.restore_render_resources(resources);
+    app.editor_runtime.with_render_resources(|_, resources| update(&mut resources.frame_cache));
 }
 
 /// Helper: create a GlyphCluster for testing
@@ -124,10 +122,10 @@ fn compute_visual_lines_whitespace_uses_char_width() {
     assert_eq!(result[0], (0, 3, 110.0));
 }
 
-/// Helper: create an App with a DocumentView loaded with test content.
+/// Helper: create an App with a DocumentFixture loaded with test content.
 fn app_with_content(lines: Vec<&str>) -> App {
     let mut app = App::new(None);
-    let dv = DocumentView::new(lines.into_iter().map(|s| s.to_string()).collect(), 80, 10.0);
+    let dv = DocumentFixture::new(lines.into_iter().map(|s| s.to_string()).collect(), 80, 10.0);
     let line_count = dv.line_count();
     let tab_id = app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
     app.switch_workspace_for_test(0);
@@ -166,7 +164,7 @@ fn line_end_enter_invalidates_cache_for_inserted_line() {
     tab.display_mut().render_cache.insert(1, cached_line_for_test(STALE_LINE_HASH));
     tab.display_mut().render_cache.insert(2, cached_line_for_test(STALE_LINE_HASH));
 
-    let mut presentation = tab.take_presentation();
+    let presentation = &mut tab.runtime.presentation;
     let page_step_rows = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
     let outcome = crate::commands::execute_edit_command_v2_with_presentation(
         &appkit_shell::input_mapper::EditCommand::InsertNewline,
@@ -207,7 +205,6 @@ fn line_end_enter_invalidates_cache_for_inserted_line() {
         !presentation.display.render_cache.contains(2),
         "line-count changes must clear stale cache keys beyond the old document range"
     );
-    tab.restore_presentation(presentation);
 }
 
 #[test]
@@ -381,7 +378,7 @@ fn move_up_into_skipped_area_moves_cursor_byte() {
         frame_cache.first_line.doc_offset = 0;
     });
 
-    app.move_cursor_visual(-1);
+    let _ = app.move_cursor_visual(-1);
 
     let dv = editor_document_for_test(&mut app, 0);
     assert_eq!(
@@ -431,7 +428,7 @@ fn move_down_past_visible_preserves_sticky_x() {
         frame_cache.last_line.clusters = (0..14).map(|i| (i, i + 1, 7.8)).collect();
     });
 
-    app.move_cursor_visual(1);
+    let _ = app.move_cursor_visual(1);
 
     let dv = editor_document_for_test(&mut app, 0);
     assert_eq!(
@@ -475,7 +472,7 @@ fn move_down_wrapped_line_uses_correct_byte_offset() {
         tab.document.cursor_move_to_offset(0);
     }
 
-    app.move_cursor_visual(1);
+    let _ = app.move_cursor_visual(1);
 
     let dv = editor_document_for_test(&mut app, 0);
     assert_eq!(
@@ -513,7 +510,7 @@ fn move_down_wrapped_line_boundary_no_stall() {
         frame_cache.last_line.clusters = (0..14).map(|i| (i, i + 1, 7.8)).collect();
     });
 
-    app.move_cursor_visual(1);
+    let _ = app.move_cursor_visual(1);
 
     let dv = editor_document_for_test(&mut app, 0);
     // Should move to VL1 (byte 7), not stay at byte 0
@@ -1033,7 +1030,7 @@ fn mouse_wheel_scroll_no_autoscroll() {
     tab.display_mut().viewport.viewport_height = 10.0;
 
     // User scrolls via mouse wheel (Stage 5: use scroll_doc_lines)
-    let mut presentation = tab.take_presentation();
+    let presentation = &mut tab.runtime.presentation;
     presentation.display.viewport.scroll_doc_lines(20, &presentation.display.display_map);
     presentation.display.viewport.derive_scroll_top(&presentation.display.display_map, 14.0);
     assert_eq!(presentation.display.viewport.scroll_anchor.doc_line, 20);
@@ -1042,7 +1039,6 @@ fn mouse_wheel_scroll_no_autoscroll() {
     let old_anchor = presentation.display.viewport.scroll_anchor.doc_line;
     assert_eq!(presentation.cursor_render_state.last_cursor_offset, ByteIndex(0)); // hasn't moved
     assert_eq!(presentation.display.viewport.scroll_anchor.doc_line, old_anchor);
-    tab.restore_presentation(presentation);
 }
 
 /// Regression: advance_cache cleared at start of shape_visible_lines must not
@@ -1140,14 +1136,13 @@ fn first_visible_dr_captured_with_scroll_offset() {
     assert_eq!(first_visible_dr, 6, "doc line 3 starts at DisplayRow 6 (2+2+2)");
 
     // Scroll to second visual line of doc line 3 (Stage 5: anchor-based)
-    let mut presentation = tab.take_presentation();
+    let presentation = &mut tab.runtime.presentation;
     presentation.display.viewport.scroll_anchor = ui::viewport::ScrollAnchor::new(3, 14.0);
     presentation.display.viewport.derive_scroll_top(&presentation.display.display_map, 14.0);
 
     // skip = pixel_offset / lh = 14/14 = 1
     let skip = (presentation.display.viewport.scroll_anchor.pixel_offset / 14.0) as usize;
     assert_eq!(skip, 1, "should skip 1 visual line (first visual line of doc 3 is above viewport)");
-    tab.restore_presentation(presentation);
 }
 
 // ── Regression tests: plans_state_consolidation 回归用例 ──
@@ -1293,7 +1288,7 @@ fn regression_wrap_shift_down_extends_by_visual_line() {
     }
 
     // 执行 ExtendDown（现在走 visual 行）
-    app.extend_selection_visual(1);
+    let _ = app.extend_selection_visual(1);
 
     // cursor 应该移动到下一个 visual 行，而不是跳到 doc line 末尾
     let dv = editor_document_for_test(&mut app, 0);
@@ -1313,7 +1308,8 @@ fn regression_wrap_shift_down_extends_by_visual_line() {
 /// 覆盖: F4 — cached_cursor_line 失效
 #[test]
 fn regression_delete_selection_cursor_line_cache() {
-    let mut dv = DocumentView::new(vec!["line0".into(), "line1".into(), "line2".into()], 80, 10.0);
+    let mut dv =
+        DocumentFixture::new(vec!["line0".into(), "line1".into(), "line2".into()], 80, 10.0);
 
     // 选中 line0 的全部内容
     dv.cursor_mut().selection_anchor = Some(0);
@@ -1337,39 +1333,39 @@ fn regression_delete_selection_cursor_line_cache() {
 /// 覆盖: 阶段 4 — assert_cursor_synced
 #[test]
 fn regression_edit_sequence_no_cursor_desync() {
-    let mut dv = DocumentView::new(vec!["hello world".into()], 80, 10.0);
+    let mut dv = DocumentFixture::new(vec!["hello world".into()], 80, 10.0);
 
     // 序列: 输入 → 移动 → 删除 → 选区 → 删除选区
     dv.insert_at_cursor(b"abc");
-    dv.assert_cursor_synced();
+    assert_eq!(dv.tb().cursor_offset(), dv.cursor_offset());
 
     dv.cursor_move_left();
-    dv.assert_cursor_synced();
+    assert_eq!(dv.tb().cursor_offset(), dv.cursor_offset());
 
     dv.cursor_move_right();
-    dv.assert_cursor_synced();
+    assert_eq!(dv.tb().cursor_offset(), dv.cursor_offset());
 
     dv.delete_backward(1);
-    dv.assert_cursor_synced();
+    assert_eq!(dv.tb().cursor_offset(), dv.cursor_offset());
 
     dv.extend_selection_left();
-    dv.assert_cursor_synced();
+    assert_eq!(dv.tb().cursor_offset(), dv.cursor_offset());
 
     dv.extend_selection_right();
-    dv.assert_cursor_synced();
+    assert_eq!(dv.tb().cursor_offset(), dv.cursor_offset());
 
     dv.delete_selection();
-    dv.assert_cursor_synced();
+    assert_eq!(dv.tb().cursor_offset(), dv.cursor_offset());
 
     dv.select_all();
-    dv.assert_cursor_synced();
+    assert_eq!(dv.tb().cursor_offset(), dv.cursor_offset());
 
     dv.cursor_move_to_offset(0);
-    dv.assert_cursor_synced();
+    assert_eq!(dv.tb().cursor_offset(), dv.cursor_offset());
 
     // 模拟 set_cursor_offset_synced 后的断言
     dv.set_cursor_offset_synced(5);
-    dv.assert_cursor_synced();
+    assert_eq!(dv.tb().cursor_offset(), dv.cursor_offset());
 }
 
 /// 回归测试: close_entry 关闭当前活动 tab(非最后一个)后，
@@ -1379,7 +1375,7 @@ fn close_entry_active_rebuilds_wrap_index() {
     // 打开 3 个文档，激活中间那个
     let mut app = app_with_content(vec!["doc1 line1", "doc1 line2", "doc1 line3"]);
     // 添加 doc2（5行）
-    let dv2 = DocumentView::new(
+    let dv2 = DocumentFixture::new(
         ["d2l1", "d2l2", "d2l3", "d2l4", "d2l5"].iter().map(|s| s.to_string()).collect(),
         80,
         10.0,
@@ -1388,7 +1384,7 @@ fn close_entry_active_rebuilds_wrap_index() {
     app.switch_workspace_for_test(1);
     app.init_display_map(1);
     // 添加 doc3（10行）
-    let dv3 = DocumentView::new((0..10).map(|i| format!("line{i}")).collect(), 80, 10.0);
+    let dv3 = DocumentFixture::new((0..10).map(|i| format!("line{i}")).collect(), 80, 10.0);
     app.push_entry_for_test(dv3, Box::new(EditorPlugin::new()));
     // active 仍是 1 (doc2)
 
@@ -1416,10 +1412,10 @@ fn close_entry_active_rebuilds_wrap_index() {
 fn close_entry_before_active_shifts_index() {
     let mut app = app_with_content(vec!["doc1"]);
     // doc2
-    let dv2 = DocumentView::new(["d2"].iter().map(|s| s.to_string()).collect(), 80, 10.0);
+    let dv2 = DocumentFixture::new(["d2"].iter().map(|s| s.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(dv2, Box::new(EditorPlugin::new()));
     // doc3（7行，将是 active）
-    let dv3 = DocumentView::new((0..7).map(|i| format!("l{i}")).collect(), 80, 10.0);
+    let dv3 = DocumentFixture::new((0..7).map(|i| format!("l{i}")).collect(), 80, 10.0);
     app.push_entry_for_test(dv3, Box::new(EditorPlugin::new()));
     app.switch_workspace_for_test(2);
     app.init_display_map(2);
@@ -1438,10 +1434,10 @@ fn close_entry_before_active_shifts_index() {
 #[test]
 fn close_entry_down_to_single_document() {
     let mut app = app_with_content(vec!["a"]);
-    let dv2 = DocumentView::new(["b1", "b2"].iter().map(|s| s.to_string()).collect(), 80, 10.0);
+    let dv2 = DocumentFixture::new(["b1", "b2"].iter().map(|s| s.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(dv2, Box::new(EditorPlugin::new()));
     let dv3 =
-        DocumentView::new(["c1", "c2", "c3"].iter().map(|s| s.to_string()).collect(), 80, 10.0);
+        DocumentFixture::new(["c1", "c2", "c3"].iter().map(|s| s.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(dv3, Box::new(EditorPlugin::new()));
     app.switch_workspace_for_test(2);
     app.init_display_map(2);
@@ -1463,7 +1459,7 @@ fn close_entry_down_to_single_document() {
 #[test]
 fn tab_runtime_by_id_mut_updates_exact_tab() {
     let mut app = app_with_content(vec!["doc1"]);
-    let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
+    let second = DocumentFixture::new(vec!["doc2".to_string()], 80, 10.0);
     app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
 
     let first_id = app.editor_tab_id_at(0).expect("first tab id");
@@ -1484,7 +1480,7 @@ fn tab_runtime_by_id_mut_updates_exact_tab() {
 #[test]
 fn tab_runtime_by_id_is_none_after_close() {
     let mut app = app_with_content(vec!["doc1"]);
-    let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
+    let second = DocumentFixture::new(vec!["doc2".to_string()], 80, 10.0);
     app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
 
     let closed_id = app.editor_tab_id_at(0).expect("closed tab id");
@@ -1499,7 +1495,7 @@ fn tab_runtime_by_id_is_none_after_close() {
 #[test]
 fn apply_workspace_effect_removes_closed_runtime_from_store_by_exact_tab_id() {
     let mut app = app_with_content(vec!["doc1"]);
-    let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
+    let second = DocumentFixture::new(vec!["doc2".to_string()], 80, 10.0);
     let second_id = app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
     let first_id = app.editor_tab_id_at(0).expect("first tab id");
     close_editor_tab_for_test(&mut app, 0);
@@ -1511,7 +1507,7 @@ fn apply_workspace_effect_removes_closed_runtime_from_store_by_exact_tab_id() {
 #[test]
 fn tab_runtime_lookup_reads_the_runtime_store() {
     let mut app = app_with_content(vec!["doc1"]);
-    let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
+    let second = DocumentFixture::new(vec!["doc2".to_string()], 80, 10.0);
     let second_id = app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
 
     app.tab_runtime_mut(second_id).expect("store runtime").toc_visible = true;
@@ -1534,29 +1530,29 @@ fn assert_workspace_runtime_bijection(app: &App) {
 fn runtime_store_stays_bijective_across_create_switch_and_close() {
     let mut app = App::new(None);
 
-    app.new_untitled_doc();
+    let _ = app.new_untitled_doc();
     assert_workspace_runtime_bijection(&app);
 
-    app.new_typed_untitled_doc(ui::sidebar::NewDocumentKind::Markdown);
+    let _ = app.new_typed_untitled_doc(ui::sidebar::NewDocumentKind::Markdown);
     assert_workspace_runtime_bijection(&app);
 
     let temp_dir = tempfile::tempdir().expect("runtime lifecycle tempdir");
     let file_path = temp_dir.path().join("opened.txt");
     std::fs::write(&file_path, "opened").expect("runtime lifecycle fixture");
-    app.open_file(&file_path).expect("file should open");
+    let _ = app.open_file(&file_path).expect("file should open");
     assert_workspace_runtime_bijection(&app);
 
-    app.open_file(&file_path).expect("opening an existing tab should activate it");
+    let _ = app.open_file(&file_path).expect("opening an existing tab should activate it");
     assert_workspace_runtime_bijection(&app);
 
     let first_id = app.editor_tab_id_at(0).expect("first tab id");
-    app.dispatch_tab_switch(first_id);
+    let _ = app.dispatch_tab_switch(first_id);
     assert_workspace_runtime_bijection(&app);
 
     close_editor_tab_for_test(&mut app, 1);
     assert_workspace_runtime_bijection(&app);
 
-    app.execute_batch_close(&[1]);
+    let _ = app.execute_batch_close(&[1]);
     assert_workspace_runtime_bijection(&app);
 
     close_editor_tab_for_test(&mut app, 0);
@@ -1566,7 +1562,7 @@ fn runtime_store_stays_bijective_across_create_switch_and_close() {
 #[test]
 fn tab_session_borrows_document_and_store_runtime_for_exact_id() {
     let mut app = app_with_content(vec!["doc1"]);
-    let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
+    let second = DocumentFixture::new(vec!["doc2".to_string()], 80, 10.0);
     let second_id = app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
 
     app.tab_runtime_mut(second_id).expect("store runtime").toc_visible = true;
@@ -1581,7 +1577,7 @@ fn tab_session_borrows_document_and_store_runtime_for_exact_id() {
 #[test]
 fn tab_session_mut_updates_store_runtime() {
     let mut app = app_with_content(vec!["doc1"]);
-    let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
+    let second = DocumentFixture::new(vec!["doc2".to_string()], 80, 10.0);
     let second_id = app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
 
     app.tab_session_mut(second_id).expect("second mutable tab session").runtime.toc_visible = true;
@@ -1595,7 +1591,7 @@ fn tab_session_mut_updates_store_runtime() {
 #[test]
 fn active_tab_session_tracks_workspace_activation_by_tab_id() {
     let mut app = app_with_content(vec!["doc1"]);
-    let second = DocumentView::new(vec!["doc2".to_string()], 80, 10.0);
+    let second = DocumentFixture::new(vec!["doc2".to_string()], 80, 10.0);
     let second_id = app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
     app.switch_workspace_for_test(1);
 
@@ -1760,7 +1756,7 @@ fn test_backspace_with_empty_selection() {
 #[test]
 fn tabs_geometry_and_preview_offset_use_instance_settings() {
     let mut app = app_with_content(vec!["first"]);
-    let second = DocumentView::new(vec!["second".into()], 10, 10.0);
+    let second = DocumentFixture::new(vec!["second".into()], 10, 10.0);
     app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
     app.switch_workspace_for_test(1);
     app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
@@ -1816,7 +1812,7 @@ fn viewport_dimensions_use_instance_line_height_and_chrome() {
         crate::app_init::build_product_workspace(),
         crate::tab_runtime::TabRuntimeStore::default(),
     );
-    let dv = crate::document_view::DocumentView::new(vec!["".into()], 80, 10.0);
+    let dv = crate::document_fixture::DocumentFixture::new(vec!["".into()], 80, 10.0);
     app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
     app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
     app.settings.show_status_bar = false;
@@ -1878,7 +1874,7 @@ fn dpi_zoom_and_sidebar_width_are_reversible() {
     assert_eq!(app.ui_metrics().font_size, logical_font * 2.0);
     assert_eq!(app.ui_shell.sidebar_width(), logical_sidebar * 2.0);
 
-    app.apply_zoom(logical_font + 1.0);
+    let _ = app.apply_zoom(logical_font + 1.0);
     assert_eq!(app.settings.font_size, logical_font + 1.0);
     assert_eq!(app.ui_metrics().font_size, (logical_font + 1.0) * 2.0);
 
@@ -2129,7 +2125,7 @@ fn selected_enter_still_queries_plugin_edit_policy() {
         ..RecordingWysiwygState::default()
     }));
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(vec!["| a | b |".to_string()], 80, 10.0);
+    let mut doc = DocumentFixture::new(vec!["| a | b |".to_string()], 80, 10.0);
     doc.cursor_move_to_offset(3);
     doc.cursor_mut().selection_anchor = Some(2); // select `a`
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
@@ -2149,12 +2145,12 @@ fn selected_enter_still_queries_plugin_edit_policy() {
 #[cfg(feature = "markdown")]
 fn markdown_empty_list_enter_uses_structural_edit_policy() {
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(vec!["- ".to_string()], 80, 10.0);
+    let mut doc = DocumentFixture::new(vec!["- ".to_string()], 80, 10.0);
     doc.cursor_move_to_offset(2);
     app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
 
-    app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
+    let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
 
     assert_eq!(active_document_text(&app), "");
 }
@@ -2167,14 +2163,15 @@ fn markdown_enter_then_backspace_removes_generated_item_before_horizontal_rule()
         source.find("3.  阿斯卡打开").expect("fixture must contain the third ordered item")
             + "3.  阿斯卡打开".len();
     let mut app = App::new(None);
-    let mut document = DocumentView::new(source.split('\n').map(str::to_owned).collect(), 80, 10.0);
+    let mut document =
+        DocumentFixture::new(source.split('\n').map(str::to_owned).collect(), 80, 10.0);
     document.cursor_move_to_offset(third_item_end);
     app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
 
-    app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
+    let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
 
@@ -2189,7 +2186,7 @@ fn markdown_enter_then_backspace_removes_generated_item_before_horizontal_rule()
         assert_eq!(tab.document.selection_range(), None);
     }
 
-    app.dispatch_transactional_edit_for_test(EditCommand::Backspace);
+    let _ = app.dispatch_transactional_edit_for_test(EditCommand::Backspace);
 
     assert_eq!(
         active_document_text(&app),
@@ -2203,7 +2200,7 @@ fn markdown_table_enter_keeps_moved_cursor_visible() {
     let source = "| a |\n|---|\n| b |";
     let expected_cursor = source.find('b').expect("table target content must exist");
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(source.lines().map(str::to_owned).collect(), 1, 1.0);
+    let mut doc = DocumentFixture::new(source.lines().map(str::to_owned).collect(), 1, 1.0);
     doc.cursor_move_to_offset(source.find('a').expect("source table cell must exist"));
     let generation_before = doc.generation();
     doc.presentation.display.display_map.set_entries(
@@ -2326,12 +2323,12 @@ impl ui::plugin::ViewPlugin for RecordingPreviewPlugin {
 fn preview_mouse_hit_test_uses_plugin_render_bounds_origin() {
     let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingPreviewState::default()));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingPreviewPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
     let bounds = app.plugin_render_bounds();
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         bounds.x + 10.0,
         bounds.y + 10.0,
@@ -2354,7 +2351,7 @@ fn preview_tiny_mouse_move_does_not_start_selection() {
         }));
         let mut app = App::new(None);
         app.update_scale_factor(scale_factor);
-        let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+        let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
         app.push_entry_for_test(doc, Box::new(RecordingPreviewPlugin::new(state.clone())));
         app.switch_workspace_for_test(0);
 
@@ -2362,7 +2359,7 @@ fn preview_tiny_mouse_move_does_not_start_selection() {
         let click_x = bounds.x + 10.0;
         let click_y = bounds.y + 10.0;
         let tiny_drag_x = click_x + 4.0 * scale_factor as f32;
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             winit::event::ElementState::Pressed,
             click_x,
             click_y,
@@ -2370,7 +2367,7 @@ fn preview_tiny_mouse_move_does_not_start_selection() {
         );
         state.borrow_mut().hit_test_position = Some((0, 1));
 
-        app.dispatch_editor_cursor_moved(tiny_drag_x, click_y, None);
+        let _ = app.dispatch_editor_cursor_moved(tiny_drag_x, click_y, None);
 
         assert!(
             !app.active_tab_session()
@@ -2378,7 +2375,8 @@ fn preview_tiny_mouse_move_does_not_start_selection() {
                 .query_bool(ui::plugin::PluginQuery::HasSelection),
             "tiny preview mouse movement should not start text selection"
         );
-        app.dispatch_editor_cursor_moved(click_x + 6.0 * scale_factor as f32, click_y, None);
+        let _ =
+            app.dispatch_editor_cursor_moved(click_x + 6.0 * scale_factor as f32, click_y, None);
         assert!(
             app.active_tab_session()
                 .expect("active runtime session")
@@ -2395,15 +2393,25 @@ fn preview_mouse_release_clears_empty_selection() {
         ..RecordingPreviewState::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingPreviewPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
     let bounds = app.plugin_render_bounds();
     let click_x = bounds.x + 10.0;
     let click_y = bounds.y + 10.0;
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y, None);
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Released, click_x, click_y, None);
+    let _ = app.dispatch_editor_mouse_input(
+        winit::event::ElementState::Pressed,
+        click_x,
+        click_y,
+        None,
+    );
+    let _ = app.dispatch_editor_mouse_input(
+        winit::event::ElementState::Released,
+        click_x,
+        click_y,
+        None,
+    );
 
     let preview_state = state.borrow();
     assert_eq!(preview_state.selection_anchor, None);
@@ -2418,14 +2426,14 @@ fn wysiwyg_missing_projection_keeps_cursor_and_selection_unchanged() {
         ..RecordingWysiwygState::default()
     }));
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(vec!["abcdef".to_string()], 80, 10.0);
+    let mut doc = DocumentFixture::new(vec!["abcdef".to_string()], 80, 10.0);
     doc.cursor_move_to_offset(3);
     doc.cursor_mut().selection_anchor = Some(1);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state)));
     app.switch_workspace_for_test(0);
 
     let bounds = app.plugin_render_bounds();
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         bounds.x + 10.0,
         bounds.y + 10.0,
@@ -2446,14 +2454,14 @@ fn wysiwyg_tiny_mouse_move_after_click_does_not_create_selection() {
         }));
         let mut app = App::new(None);
         app.update_scale_factor(scale_factor);
-        let doc = DocumentView::new(vec!["abcdef".to_string()], 80, 10.0);
+        let doc = DocumentFixture::new(vec!["abcdef".to_string()], 80, 10.0);
         app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
         app.switch_workspace_for_test(0);
 
         let bounds = app.plugin_render_bounds();
         let click_x = bounds.x + 10.0;
         let click_y = bounds.y + 10.0;
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             winit::event::ElementState::Pressed,
             click_x,
             click_y,
@@ -2461,8 +2469,9 @@ fn wysiwyg_tiny_mouse_move_after_click_does_not_create_selection() {
         );
         state.borrow_mut().hit_test_byte = Some(3);
 
-        app.dispatch_editor_cursor_moved(click_x + 4.0 * scale_factor as f32, click_y, None);
-        app.dispatch_editor_mouse_input(
+        let _ =
+            app.dispatch_editor_cursor_moved(click_x + 4.0 * scale_factor as f32, click_y, None);
+        let _ = app.dispatch_editor_mouse_input(
             winit::event::ElementState::Released,
             click_x + 4.0 * scale_factor as f32,
             click_y,
@@ -2497,14 +2506,14 @@ fn wysiwyg_backward_drag_keeps_plugin_selection_anchor() {
         }));
         let mut app = App::new(None);
         app.update_scale_factor(scale_factor);
-        let doc = DocumentView::new(vec!["abc：def".to_string()], 80, 10.0);
+        let doc = DocumentFixture::new(vec!["abc：def".to_string()], 80, 10.0);
         app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
         app.switch_workspace_for_test(0);
 
         let bounds = app.plugin_render_bounds();
         let click_x = bounds.x + 10.0;
         let click_y = bounds.y + 10.0;
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             winit::event::ElementState::Pressed,
             click_x,
             click_y,
@@ -2512,8 +2521,9 @@ fn wysiwyg_backward_drag_keeps_plugin_selection_anchor() {
         );
         state.borrow_mut().hit_test_byte = Some(3);
 
-        app.dispatch_editor_cursor_moved(click_x - 6.0 * scale_factor as f32, click_y, None);
-        app.dispatch_editor_mouse_input(
+        let _ =
+            app.dispatch_editor_cursor_moved(click_x - 6.0 * scale_factor as f32, click_y, None);
+        let _ = app.dispatch_editor_mouse_input(
             winit::event::ElementState::Released,
             click_x - 6.0 * scale_factor as f32,
             click_y,
@@ -2542,20 +2552,25 @@ fn wysiwyg_backward_drag_keeps_initial_anchor_across_moves() {
         ..RecordingWysiwygState::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["abc：def".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["abc：def".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
     let bounds = app.plugin_render_bounds();
     let click_x = bounds.x + 80.0;
     let click_y = bounds.y + 10.0;
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y, None);
+    let _ = app.dispatch_editor_mouse_input(
+        winit::event::ElementState::Pressed,
+        click_x,
+        click_y,
+        None,
+    );
 
     state.borrow_mut().hit_test_byte = Some(5);
-    app.dispatch_editor_cursor_moved(click_x - 20.0, click_y, None);
+    let _ = app.dispatch_editor_cursor_moved(click_x - 20.0, click_y, None);
 
     state.borrow_mut().hit_test_byte = Some(3);
-    app.dispatch_editor_cursor_moved(click_x - 40.0, click_y, None);
+    let _ = app.dispatch_editor_cursor_moved(click_x - 40.0, click_y, None);
 
     let active_entry = app.active_tab_session().expect("active entry");
     assert_eq!(
@@ -2584,18 +2599,23 @@ fn wysiwyg_drag_move_does_not_synchronously_render_plugin() {
     }));
     let mut app = App::new(None);
     let doc =
-        DocumentView::new(vec!["first line".to_string(), "> quoted line".to_string()], 80, 10.0);
+        DocumentFixture::new(vec!["first line".to_string(), "> quoted line".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
     let bounds = app.plugin_render_bounds();
     let click_x = bounds.x + 80.0;
     let click_y = bounds.y + 10.0;
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y, None);
+    let _ = app.dispatch_editor_mouse_input(
+        winit::event::ElementState::Pressed,
+        click_x,
+        click_y,
+        None,
+    );
     state.borrow_mut().render_count = 0;
 
     state.borrow_mut().hit_test_byte = Some(2);
-    app.dispatch_editor_cursor_moved(click_x - 40.0, click_y + 24.0, None);
+    let _ = app.dispatch_editor_cursor_moved(click_x - 40.0, click_y + 24.0, None);
 
     let active_entry = app.active_tab_session().expect("active entry");
     assert_eq!(
@@ -2620,18 +2640,23 @@ fn wysiwyg_backward_drag_across_paragraph_keeps_plugin_selection_anchor() {
         ..RecordingWysiwygState::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(source.lines().map(|line| line.to_string()).collect(), 80, 10.0);
+    let doc = DocumentFixture::new(source.lines().map(|line| line.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
     let bounds = app.plugin_render_bounds();
     let click_x = bounds.x + 180.0;
     let click_y = bounds.y + 80.0;
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y, None);
+    let _ = app.dispatch_editor_mouse_input(
+        winit::event::ElementState::Pressed,
+        click_x,
+        click_y,
+        None,
+    );
     state.borrow_mut().hit_test_byte = Some(cursor_byte);
 
-    app.dispatch_editor_cursor_moved(click_x - 120.0, click_y - 48.0, None);
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_cursor_moved(click_x - 120.0, click_y - 48.0, None);
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Released,
         click_x - 120.0,
         click_y - 48.0,
@@ -2663,7 +2688,7 @@ fn render_active_wysiwyg_plugin_for_test(app: &mut App) -> ui::core::paint::Draw
 fn wysiwyg_edit_then_navigation_does_not_require_an_intervening_paint() {
     use appkit_shell::input_mapper::EditCommand;
     let mut app = App::new(None);
-    let mut document = DocumentView::new(vec!["abc".into()], 80, 10.0);
+    let mut document = DocumentFixture::new(vec!["abc".into()], 80, 10.0);
     document.cursor_move_to_offset(1);
     app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
@@ -2697,7 +2722,7 @@ fn wysiwyg_edit_then_navigation_does_not_require_an_intervening_paint() {
 #[cfg(feature = "markdown")]
 fn wysiwyg_search_geometry_uses_the_document_match_list() {
     let mut app = App::new(None);
-    let document = DocumentView::new(vec!["one two one".into()], 80, 10.0);
+    let document = DocumentFixture::new(vec!["one two one".into()], 80, 10.0);
     app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
     app.sync_plugin_state();
@@ -2727,7 +2752,7 @@ fn wysiwyg_search_geometry_uses_the_document_match_list() {
 fn wysiwyg_ime_navigation_preview_matches_commit() {
     use appkit_shell::input_mapper::EditCommand;
     let mut app = App::new(None);
-    let mut document = DocumentView::new(vec!["old tail".into()], 80, 10.0);
+    let mut document = DocumentFixture::new(vec!["old tail".into()], 80, 10.0);
     document.cursor_move_to_offset(3);
     document.cursor_mut().selection_anchor = Some(0);
     app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
@@ -2737,13 +2762,13 @@ fn wysiwyg_ime_navigation_preview_matches_commit() {
     render_active_wysiwyg_plugin_for_test(&mut app);
     assert_eq!(app.active_tab_session().expect("composing editor").flat_lines()[0].text, "新 tail");
 
-    app.dispatch_wysiwyg_navigation(&EditCommand::MoveRight);
+    let _ = app.dispatch_wysiwyg_navigation(&EditCommand::MoveRight);
     set_editor_preedit_for_test(&mut app, "新", Some((3, 3)));
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
     let preview = app.active_tab_session().expect("navigated editor").flat_lines()[0].text.clone();
     assert_eq!(preview, "old 新tail");
-    app.dispatch_transactional_edit_for_test(EditCommand::InsertText("新".into()));
+    let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertText("新".into()));
     set_editor_preedit_for_test(&mut app, "", None);
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
@@ -2816,7 +2841,7 @@ fn mmap_cursor_window_rect_for_test(app: &App, byte_offset: usize) -> ui::core::
 #[cfg(feature = "markdown")]
 fn app_with_mmap_source(source: &str) -> App {
     let mut app = App::new(None);
-    let doc = DocumentView::new(source.split('\n').map(str::to_owned).collect(), 80, 10.0);
+    let doc = DocumentFixture::new(source.split('\n').map(str::to_owned).collect(), 80, 10.0);
     app.push_entry_for_test(doc, Box::new(textora_mindmap::mindmap_view::MindmapView::new()));
     app.switch_workspace_for_test(0);
     app.sync_plugin_state();
@@ -2991,26 +3016,27 @@ fn drag_mmap_node(app: &mut App, source_title: &str, target: DragTarget<'_>) {
     let drop_x = anchor_card.right + drop_x_offset;
     let drop_y = anchor_card.bottom + drop_y_offset;
 
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         source_card.left,
         source_card.top,
         None,
     );
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Released,
         source_card.left,
         source_card.top,
         None,
     );
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         source_card.left,
         source_card.top,
         None,
     );
-    app.dispatch_editor_cursor_moved(drop_x, drop_y, None);
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Released, drop_x, drop_y, None);
+    let _ = app.dispatch_editor_cursor_moved(drop_x, drop_y, None);
+    let _ =
+        app.dispatch_editor_mouse_input(winit::event::ElementState::Released, drop_x, drop_y, None);
 }
 
 #[test]
@@ -3122,14 +3148,14 @@ fn mmap_dragging_title_text_selects_text_without_moving_the_node() {
     let alpha_start_point = mmap_text_caret_hit_point(&mut app, alpha_range.start);
     let alpha_end_point = mmap_text_caret_hit_point(&mut app, alpha_range.end);
 
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         alpha_start_point.0,
         alpha_start_point.1,
         None,
     );
-    app.dispatch_editor_cursor_moved(alpha_end_point.0, alpha_end_point.1, None);
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_cursor_moved(alpha_end_point.0, alpha_end_point.1, None);
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Released,
         alpha_end_point.0,
         alpha_end_point.1,
@@ -3155,7 +3181,7 @@ fn mmap_drag_between_titles_does_not_create_a_document_selection() {
     let alpha_point = mmap_text_caret_hit_point(&mut app, alpha_range.start);
     let beta_point = mmap_text_caret_hit_point(&mut app, beta_range.start);
 
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         alpha_point.0,
         alpha_point.1,
@@ -3166,8 +3192,8 @@ fn mmap_drag_between_titles_does_not_create_a_document_selection() {
         alpha_range.start,
         "fixture must press the first title's semantic text caret"
     );
-    app.dispatch_editor_cursor_moved(beta_point.0, beta_point.1, None);
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_cursor_moved(beta_point.0, beta_point.1, None);
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Released,
         beta_point.0,
         beta_point.1,
@@ -3194,13 +3220,13 @@ fn mmap_drag_within_a_title_selects_its_source_range() {
     let alpha_start_point = mmap_text_caret_hit_point(&mut app, alpha_range.start);
     let alpha_end_point = mmap_text_caret_hit_point(&mut app, alpha_range.end);
 
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         alpha_start_point.0,
         alpha_start_point.1,
         None,
     );
-    app.dispatch_editor_cursor_moved(alpha_end_point.0, alpha_end_point.1, None);
+    let _ = app.dispatch_editor_cursor_moved(alpha_end_point.0, alpha_end_point.1, None);
 
     let tab = app.active_tab_session().expect("active mmap tab");
     assert_eq!(tab.selection_range(), Some((alpha_range.start, alpha_range.end)));
@@ -3217,19 +3243,19 @@ fn mmap_title_double_click_selects_the_title_word() {
     render_active_wysiwyg_plugin_for_test(&mut app);
     let alpha_point = mmap_text_caret_hit_point(&mut app, alpha_range.start + 1);
 
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         alpha_point.0,
         alpha_point.1,
         None,
     );
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Released,
         alpha_point.0,
         alpha_point.1,
         None,
     );
-    app.dispatch_editor_mouse_input(
+    let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         alpha_point.0,
         alpha_point.1,
@@ -3251,7 +3277,7 @@ fn mmap_selected_node_typing_replaces_title_then_undo_and_redo_restore_it() {
     let generation_before =
         app.active_tab_session().expect("active document").document.generation();
 
-    app.dispatch_transactional_edit_for_test(EditCommand::InsertChar("Renamed".into()));
+    let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertChar("Renamed".into()));
     assert_eq!(active_document_text(&app), "# Root\n## Renamed\n### Child\n## Next\n");
     assert!(
         app.active_tab_session().expect("active document").document.generation()
@@ -3279,11 +3305,11 @@ fn mmap_tab_creates_empty_child_and_enter_creates_empty_sibling() {
     }
     app.sync_plugin_state();
 
-    app.dispatch_transactional_edit_for_test(EditCommand::Tab);
+    let _ = app.dispatch_transactional_edit_for_test(EditCommand::Tab);
     let after_child = active_document_text(&app);
     assert!(after_child.contains("###\n"));
 
-    app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
+    let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
     let after_sibling = active_document_text(&app);
     let parsed = textora_mindmap::mmf::parser::parse(&after_sibling).expect("parse edited map");
     assert_eq!(parsed.root.children[0].children.len(), 2);
@@ -3299,7 +3325,7 @@ fn mmap_demote_adjusts_whole_subtree_and_undoes_once() {
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, second_range);
 
-    app.dispatch_transactional_edit(ui::plugin::EditIntent::DemoteObject, None);
+    let _ = app.dispatch_transactional_edit(ui::plugin::EditIntent::DemoteObject, None);
     assert_eq!(active_document_text(&app), "# Root\n## First\n### Second\n#### Leaf\n");
 
     undo_active_mmap_edit(&mut app);
@@ -3315,7 +3341,7 @@ fn mmap_selected_node_delete_removes_subtree_then_undo_restores_it() {
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, parent_range);
 
-    app.dispatch_transactional_edit_for_test(EditCommand::DeleteForward);
+    let _ = app.dispatch_transactional_edit_for_test(EditCommand::DeleteForward);
     assert_eq!(active_document_text(&app), "# Root\n## Next\n");
 
     undo_active_mmap_edit(&mut app);
@@ -3335,7 +3361,7 @@ fn mmap_preedit_does_not_change_document_until_commit() {
 
     assert_eq!(active_document_text(&app), source);
 
-    app.dispatch_transactional_edit_for_test(EditCommand::InsertChar("你".into()));
+    let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertChar("你".into()));
     assert_eq!(active_document_text(&app), "# Root\n## 你\n");
 }
 
@@ -3387,7 +3413,7 @@ fn mmap_canvas_tab_switch_restores_each_session_and_new_doc_item_refits() {
     let mut app = App::new(None);
     for source in ["# First\n", "# Second\n"] {
         let mut document =
-            DocumentView::new(source.split('\n').map(str::to_owned).collect(), 80, 10.0);
+            DocumentFixture::new(source.split('\n').map(str::to_owned).collect(), 80, 10.0);
         document.file_path = Some(std::path::PathBuf::from(SHARED_PATH));
         app.push_entry_for_test(
             document,
@@ -3434,7 +3460,7 @@ fn mmap_canvas_tab_switch_restores_each_session_and_new_doc_item_refits() {
         .position();
     assert_ne!(first_position, second_position, "fixture must give each tab a distinct view");
 
-    app.dispatch_tab_switch(second_id);
+    let _ = app.dispatch_tab_switch(second_id);
     assert_eq!(
         app.active_tab_session()
             .expect("second mmap tab must be active")
@@ -3446,7 +3472,7 @@ fn mmap_canvas_tab_switch_restores_each_session_and_new_doc_item_refits() {
         second_position,
         "switching to the second mmap tab must restore its own view position"
     );
-    app.dispatch_tab_switch(first_id);
+    let _ = app.dispatch_tab_switch(first_id);
     assert_eq!(
         app.active_tab_session()
             .expect("first mmap tab must be active")
@@ -3459,7 +3485,7 @@ fn mmap_canvas_tab_switch_restores_each_session_and_new_doc_item_refits() {
         "switching back must restore the first mmap tab view position"
     );
 
-    let mut reopened_document = DocumentView::new(vec!["# Reopened".to_owned()], 80, 10.0);
+    let mut reopened_document = DocumentFixture::new(vec!["# Reopened".to_owned()], 80, 10.0);
     reopened_document.file_path = Some(std::path::PathBuf::from(SHARED_PATH));
     let reopened_id = app.push_entry_for_test(
         reopened_document,
@@ -3623,7 +3649,7 @@ fn non_canvas_plugin_editor_and_preview_keep_scroll_and_global_font_zoom() {
     let mut app = App::new(None);
     let line_height = app.ui_metrics().line_height;
     let make_scrolled_document = || {
-        let mut document = DocumentView::new(
+        let mut document = DocumentFixture::new(
             (0..LINE_COUNT).map(|line| format!("line {line}")).collect(),
             80,
             10.0,
@@ -3650,7 +3676,7 @@ fn non_canvas_plugin_editor_and_preview_keep_scroll_and_global_font_zoom() {
     );
 
     let original_font_size = app.settings.font_size;
-    app.apply_zoom(original_font_size + FONT_ZOOM_DELTA);
+    let _ = app.apply_zoom(original_font_size + FONT_ZOOM_DELTA);
 
     assert_eq!(app.settings.font_size, original_font_size + FONT_ZOOM_DELTA);
     assert_eq!(
@@ -3721,7 +3747,7 @@ fn wysiwyg_promotion_blockquote_line_three_click_and_up_navigation_reach_its_sou
         source.find("Style anchor").expect("fixture must contain line four text");
     let mut app = App::new(None);
     let document =
-        DocumentView::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
+        DocumentFixture::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
     app.sync_plugin_state();
@@ -3752,8 +3778,18 @@ fn wysiwyg_promotion_blockquote_line_three_click_and_up_navigation_reach_its_sou
     }
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y, None);
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Released, click_x, click_y, None);
+    let _ = app.dispatch_editor_mouse_input(
+        winit::event::ElementState::Pressed,
+        click_x,
+        click_y,
+        None,
+    );
+    let _ = app.dispatch_editor_mouse_input(
+        winit::event::ElementState::Released,
+        click_x,
+        click_y,
+        None,
+    );
 
     let clicked_byte = app.active_tab_session().expect("active entry").cursor_offset().to_usize();
     assert!(
@@ -3799,7 +3835,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 ";
     let mut app = App::new(None);
     let doc =
-        DocumentView::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
+        DocumentFixture::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
     app.sync_plugin_state();
@@ -3842,7 +3878,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     let probe_byte = source.find("要接受成本").expect("fixture should contain final text");
     let mut app = App::new(None);
     let doc =
-        DocumentView::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
+        DocumentFixture::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
     app.sync_plugin_state();
@@ -3856,8 +3892,13 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     let probe_x = bounds.x + probe_rect.0 + probe_rect.2 * 0.5;
     let probe_y = bounds.y + probe_rect.1 + probe_rect.3 * 0.5;
 
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, blank_x, blank_y, None);
-    app.dispatch_editor_cursor_moved(probe_x, probe_y, None);
+    let _ = app.dispatch_editor_mouse_input(
+        winit::event::ElementState::Pressed,
+        blank_x,
+        blank_y,
+        None,
+    );
+    let _ = app.dispatch_editor_cursor_moved(probe_x, probe_y, None);
     render_active_wysiwyg_plugin_for_test(&mut app);
 
     let tab = app.active_tab_session().expect("active entry");
@@ -3904,7 +3945,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     let probe_byte = source.find("要接受成本").expect("fixture should contain final text");
     let mut app = App::new(None);
     let doc =
-        DocumentView::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
+        DocumentFixture::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
     app.sync_plugin_state();
@@ -3942,7 +3983,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 fn wysiwyg_paragraph_end_enter_then_typing_inserts_at_new_paragraph_start() {
     let source = "hello";
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(vec![source.to_string()], 80, 10.0);
+    let mut doc = DocumentFixture::new(vec![source.to_string()], 80, 10.0);
     doc.cursor_move_to_offset(source.len());
     app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
@@ -3972,7 +4013,7 @@ fn wysiwyg_paragraph_end_enter_then_typing_inserts_at_new_paragraph_start() {
 fn wysiwyg_enter_after_horizontal_rule_places_cursor_in_paragraph_below() {
     let source = "---";
     let mut app = App::new(None);
-    let mut document = DocumentView::new(vec![source.to_owned()], 80, 10.0);
+    let mut document = DocumentFixture::new(vec![source.to_owned()], 80, 10.0);
     document.cursor_move_to_offset(source.len());
     app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
@@ -4004,7 +4045,7 @@ fn wysiwyg_paragraph_end_before_existing_newline_typing_stays_in_new_paragraph()
     let paragraph_end = "hello".len();
     let mut app = App::new(None);
     let mut doc =
-        DocumentView::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
+        DocumentFixture::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
     doc.cursor_move_to_offset(paragraph_end);
     app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
@@ -4037,7 +4078,7 @@ fn wysiwyg_paragraph_end_enter_then_typing_keeps_following_line_below() {
     let paragraph_end = "hello".len();
     let mut app = App::new(None);
     let mut doc =
-        DocumentView::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
+        DocumentFixture::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
     doc.cursor_move_to_offset(paragraph_end);
     app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
@@ -4075,10 +4116,117 @@ fn wysiwyg_cursor_rect_for_byte_for_test(app: &mut App, byte: usize) -> (f32, f3
 }
 
 #[test]
+fn search_replacement_synchronizes_editor_document_and_plugin() {
+    use ui::search_bar::SearchBarAction;
+
+    for (action, original, expected) in [
+        (SearchBarAction::Replace, "before old", "before new\nline"),
+        (SearchBarAction::ReplaceAll, "old old", "new\nline new\nline"),
+    ] {
+        let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState::default()));
+        let mut app = App::new(None);
+        let doc = DocumentFixture::new(vec![original.to_owned()], 80, 10.0);
+        app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
+        app.switch_workspace_for_test(0);
+        let revision = app.active_tab_session().expect("active entry").document.content_revision();
+        app.sync_plugin_state();
+
+        assert!(app.dispatch_search_action(SearchBarAction::QueryChanged("old".into())).redraw);
+        assert!(
+            app.dispatch_search_action(SearchBarAction::ReplaceQueryChanged("new\\nline".into()))
+                .redraw
+        );
+        let effect = app.dispatch_search_action(action);
+
+        let tab = app.active_tab_session().expect("active entry");
+        assert_eq!(tab.document.full_text(), expected);
+        assert_eq!(tab.document.content_revision(), revision + 1);
+        assert_eq!(tab.document.line_count(), expected.lines().count());
+        assert_eq!(tab.document.selection_range(), None);
+        assert!(tab.document.dirty);
+        assert!(effect.reshape);
+        assert_eq!(state.borrow().source_text, expected);
+
+        let tab = app.active_tab_session_mut().expect("active entry");
+        tab.document.undo();
+        assert_eq!(tab.document.full_text(), original);
+    }
+
+    #[cfg(feature = "markdown")]
+    {
+        let mut app = App::new(None);
+        let doc = DocumentFixture::new(vec!["**old**".to_owned()], 80, 10.0);
+        app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownView::new()));
+        app.switch_workspace_for_test(0);
+        assert!(!app.active_allows_editing());
+
+        assert!(app.dispatch_search_action(SearchBarAction::QueryChanged("old".into())).redraw);
+        assert!(
+            app.dispatch_search_action(SearchBarAction::ReplaceQueryChanged("new".into())).redraw
+        );
+        assert!(app.dispatch_search_action(SearchBarAction::Replace).redraw);
+        assert_eq!(
+            app.active_tab_session().expect("preview entry").document.full_text(),
+            "**new**"
+        );
+    }
+}
+
+#[test]
+fn search_replace_all_handles_nonoverlapping_matches_across_the_buffer_gap() {
+    use ui::search_bar::SearchBarAction;
+
+    let mut app = App::new(None);
+    let doc = DocumentFixture::new(vec!["aaaaaa".to_owned()], 80, 10.0);
+    app.push_entry_for_test(doc, Box::new(crate::plugins::editor::EditorPlugin::new()));
+    app.switch_workspace_for_test(0);
+    let tab = app.active_tab_session_mut().expect("active entry");
+    tab.document.cursor_move_to_offset(3);
+    tab.document.insert_at_cursor(b"a");
+
+    assert!(app.dispatch_search_action(SearchBarAction::QueryChanged("aaa".into())).redraw);
+    let tab = app.active_tab_session().expect("active entry");
+    assert_eq!(tab.search_state().matches, [0..3, 3..6]);
+
+    assert!(app.dispatch_search_action(SearchBarAction::ReplaceQueryChanged("X".into())).redraw);
+    assert!(app.dispatch_search_action(SearchBarAction::ReplaceAll).redraw);
+    assert_eq!(app.active_tab_session().expect("active entry").document.full_text(), "XXa");
+}
+
+#[test]
+fn search_replacement_keeps_graphemes_and_caret_valid() {
+    use ui::search_bar::SearchBarAction;
+
+    for (action, original, query, expected, expected_cursor) in [
+        (SearchBarAction::Replace, "🇦x🇧", "x", "🇦🇧", "🇦🇧".len()),
+        (SearchBarAction::ReplaceAll, "e\u{301} e\u{301}", "\u{301}", "e e", 1),
+    ] {
+        let mut app = App::new(None);
+        let doc = DocumentFixture::new(vec![original.to_owned()], 80, 10.0);
+        app.push_entry_for_test(doc, Box::new(crate::plugins::editor::EditorPlugin::new()));
+        app.switch_workspace_for_test(0);
+
+        assert!(app.dispatch_search_action(SearchBarAction::QueryChanged(query.into())).redraw);
+        assert!(app.dispatch_search_action(action).redraw);
+
+        let tab = app.active_tab_session().expect("active entry");
+        assert_eq!(tab.document.full_text(), expected);
+        assert_eq!(tab.document.cursor_offset().to_usize(), expected_cursor);
+
+        let tab = app.active_tab_session_mut().expect("active entry");
+        tab.document.cursor_move_to_offset(0);
+        tab.document.undo();
+        assert_eq!(tab.document.full_text(), original);
+        tab.document.redo();
+        assert_eq!(tab.document.full_text(), expected);
+    }
+}
+
+#[test]
 fn sync_plugin_state_pushes_source_and_cursor() {
     let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState::default()));
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(vec!["hello **world**".to_string()], 80, 10.0);
+    let mut doc = DocumentFixture::new(vec!["hello **world**".to_string()], 80, 10.0);
     doc.cursor_move_to_offset("hello **world**".len());
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
@@ -4095,7 +4243,7 @@ fn sync_plugin_state_pushes_source_and_cursor() {
 
 #[test]
 fn sync_plugin_state_pulls_selection_range_into_document() {
-    let doc = DocumentView::new(vec!["abcdef".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["abcdef".to_string()], 80, 10.0);
     let generation = doc.tb().gap_buffer().generation();
     let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState {
         generation,
@@ -4120,7 +4268,7 @@ fn sync_plugin_state_does_not_pull_selection_when_plugin_needs_source_update() {
         ..RecordingWysiwygState::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["abcdef".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["abcdef".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state)));
     app.switch_workspace_for_test(0);
 
@@ -4139,7 +4287,7 @@ fn sync_plugin_state_clears_stale_plugin_selection_after_source_update() {
         ..RecordingWysiwygState::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["abcdef".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["abcdef".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
@@ -4154,7 +4302,7 @@ fn sync_plugin_state_clears_stale_plugin_selection_after_source_update() {
 fn wysiwyg_selection_delete_clears_plugin_highlight() {
     let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState::default()));
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(vec!["abcdef".to_string()], 80, 10.0);
+    let mut doc = DocumentFixture::new(vec!["abcdef".to_string()], 80, 10.0);
     doc.cursor_move_to_offset(4);
     doc.cursor_mut().selection_anchor = Some(1);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
@@ -4184,7 +4332,7 @@ fn wysiwyg_selection_delete_clears_plugin_highlight() {
 fn ime_commit_syncs_wysiwyg_source_and_snapped_cursor() {
     let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState::default()));
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(vec!["hello **world**".to_string()], 80, 10.0);
+    let mut doc = DocumentFixture::new(vec!["hello **world**".to_string()], 80, 10.0);
     // Set cursor at byte 5 (after "hello")
     doc.cursor_move_to_offset(5);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
@@ -4213,7 +4361,7 @@ fn ime_commit_syncs_wysiwyg_source_and_snapped_cursor() {
 fn ime_commit_clears_preedit_and_preferred_x() {
     let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingWysiwygState::default()));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["hello".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["hello".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
@@ -4241,7 +4389,7 @@ fn ime_commit_clears_preedit_and_preferred_x() {
 #[test]
 fn wysiwyg_navigation_sends_snapped_cursor_byte_to_plugin() {
     // Plugin returns a byte from VisualMove. Host must move
-    // DocumentView cursor, read back cursor_offset(), then send
+    // DocumentFixture cursor, read back cursor_offset(), then send
     // SetCursorByte with the read-back value. This verifies the sync
     // path: plugin byte -> cursor_move_to_offset -> cursor_offset()
     // -> SetCursorByte.
@@ -4252,7 +4400,7 @@ fn wysiwyg_navigation_sends_snapped_cursor_byte_to_plugin() {
     let mut app = App::new(None);
     let emoji = "👨\u{200D}👩\u{200D}👧";
     let content = format!("x{emoji}y");
-    let doc = DocumentView::new(vec![content.clone()], 80, 10.0);
+    let doc = DocumentFixture::new(vec![content.clone()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
@@ -4282,7 +4430,7 @@ fn wysiwyg_navigation_sends_snapped_cursor_byte_to_plugin() {
     assert_eq!(
         recorded.cursor_byte,
         Some(snapped_byte),
-        "SetCursorByte should receive DocumentView's cursor_offset after move"
+        "SetCursorByte should receive DocumentFixture's cursor_offset after move"
     );
 }
 
@@ -4306,7 +4454,7 @@ fn wysiwyg_vertical_navigation_preserves_starting_target_x_across_short_line() {
         ..Default::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec![content.to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec![content.to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
@@ -4348,7 +4496,7 @@ fn wysiwyg_move_down_scrolls_to_reveal_cursor_below_viewport() {
         ..Default::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec![content.to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec![content.to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
@@ -4381,7 +4529,7 @@ fn wysiwyg_move_up_scrolls_to_reveal_cursor_above_viewport() {
         ..Default::default()
     }));
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(vec![content.to_string()], 80, 10.0);
+    let mut doc = DocumentFixture::new(vec![content.to_string()], 80, 10.0);
     doc.cursor_move_to_offset(content.find("second").expect("fixture should contain second line"));
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
@@ -4407,7 +4555,7 @@ fn wysiwyg_document_boundary_navigation_reveals_the_actual_markdown_caret() {
     let source = "中文段落 English é 👩🏽‍💻\n\n---\n\n```rust\nlet value = 1;\n```\n\n".repeat(80);
     for extend_selection in [false, true] {
         let mut app = App::new(None);
-        let document = DocumentView::new(vec![source.clone()], 80, 10.0);
+        let document = DocumentFixture::new(vec![source.clone()], 80, 10.0);
         app.push_entry_for_test(
             document,
             Box::new(textora_markdown::view::MarkdownEditorView::new()),
@@ -4444,7 +4592,7 @@ fn wysiwyg_document_boundary_navigation_reveals_the_actual_markdown_caret() {
 fn wysiwyg_edit_at_an_offscreen_caret_reveals_the_actual_markdown_caret() {
     let source = "paragraph\n\n---\n\n```rust\nlet value = 1;\n```\n\n".repeat(80);
     let mut app = App::new(None);
-    let document = DocumentView::new(vec![source.clone()], 80, 10.0);
+    let document = DocumentFixture::new(vec![source.clone()], 80, 10.0);
     app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
     app.sync_plugin_state();
@@ -4539,7 +4687,7 @@ fn wysiwyg_soft_wrap_line_end_preserves_the_visible_caret_row() {
         let mut app = App::new(None);
         app.update_scale_factor(dpi);
         app.push_entry_for_test(
-            DocumentView::new(vec![source.clone()], 80, 10.0),
+            DocumentFixture::new(vec![source.clone()], 80, 10.0),
             Box::new(textora_markdown::view::MarkdownEditorView::new()),
         );
         app.switch_workspace_for_test(0);
@@ -4611,7 +4759,7 @@ fn wysiwyg_soft_wrap_edit_history_restores_visual_line_end_caret() {
     for (dpi, command) in scenarios {
         let mut app = App::new(None);
         app.update_scale_factor(dpi);
-        let mut document = DocumentView::new(vec![source.clone()], 80, 10.0);
+        let mut document = DocumentFixture::new(vec![source.clone()], 80, 10.0);
         document.cursor_move_to_offset("中文 ".len());
         app.push_entry_for_test(
             document,
@@ -4657,7 +4805,7 @@ fn wysiwyg_mouse_click_preserves_the_requested_soft_wrap_side() {
         let mut app = App::new(None);
         app.update_scale_factor(dpi);
         app.push_entry_for_test(
-            DocumentView::new(vec![source.clone()], 80, 10.0),
+            DocumentFixture::new(vec![source.clone()], 80, 10.0),
             Box::new(textora_markdown::view::MarkdownEditorView::new()),
         );
         app.switch_workspace_for_test(0);
@@ -4671,13 +4819,13 @@ fn wysiwyg_mouse_click_preserves_the_requested_soft_wrap_side() {
         let bounds = app.plugin_render_bounds();
         let click_x = bounds.x + before.0;
         let click_y = bounds.y + before.1 + before.3 * 0.5;
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             winit::event::ElementState::Pressed,
             click_x,
             click_y,
             None,
         );
-        app.dispatch_editor_mouse_input(
+        let _ = app.dispatch_editor_mouse_input(
             winit::event::ElementState::Released,
             click_x,
             click_y,
@@ -4813,7 +4961,7 @@ fn wysiwyg_move_down_does_not_scroll_when_cursor_already_visible() {
         ..Default::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec![content.to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec![content.to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
@@ -4839,7 +4987,7 @@ fn wysiwyg_extend_down_scrolls_to_reveal_cursor_below_viewport() {
         ..Default::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec![content.to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec![content.to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
@@ -4869,7 +5017,7 @@ fn wysiwyg_extend_right_preserves_anchor_and_notifies_plugin_selection() {
         ..Default::default()
     }));
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+    let mut doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
     doc.cursor_move_to_offset(2);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
@@ -4899,7 +5047,7 @@ fn wysiwyg_page_down_clears_plugin_selection_bytes() {
         ..RecordingWysiwygState::default()
     }));
     let mut app = App::new(None);
-    let mut doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+    let mut doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
     doc.cursor_mut().selection_anchor = Some(1);
     doc.cursor_move_to_offset(4);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
@@ -4923,11 +5071,11 @@ fn wysiwyg_single_click_uses_snapped_byte_for_selection_anchor() {
         ..RecordingWysiwygState::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec![content], 80, 10.0);
+    let doc = DocumentFixture::new(vec![content], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
 
     let tab = app.active_tab_session().expect("active tab should exist");
     let snapped = tab.cursor_offset().to_usize();
@@ -4945,14 +5093,14 @@ fn wysiwyg_double_click_selects_word_at_hit_byte() {
         ..Default::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
 
     let tab = app.active_tab_session().expect("active tab");
     assert_eq!(tab.selection_range(), Some((6, 11)));
@@ -4969,12 +5117,12 @@ fn wysiwyg_single_click_moves_cursor_without_leaving_empty_selection() {
         ..Default::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
-    app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
 
     let tab = app.active_tab_session().expect("active tab");
     assert_eq!(tab.cursor_offset().to_usize(), 5);
@@ -4994,7 +5142,7 @@ fn wysiwyg_cursor_window_rect_adds_plugin_render_bounds() {
         ..Default::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
@@ -5026,7 +5174,7 @@ fn ime_cursor_area_uses_nonzero_plugin_render_bounds_origin() {
         ..Default::default()
     }));
     let mut app = App::new(None);
-    let doc = DocumentView::new(vec!["hello world".to_string()], 80, 10.0);
+    let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
@@ -5075,7 +5223,7 @@ fn wysiwyg_preedit_cursor_rect_resolves_with_cursor_window_rect() {
         ..RecordingWysiwygState::default()
     }));
     let mut app = App::new(None);
-    let mut document = DocumentView::new(vec!["ni hao".to_string()], 80, 10.0);
+    let mut document = DocumentFixture::new(vec!["ni hao".to_string()], 80, 10.0);
     document.cursor_move_to_offset(3);
     app.push_entry_for_test(document, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
@@ -5206,7 +5354,7 @@ fn markdown_paragraph_transactions_restore_source_and_cursor_through_history() {
         let fixture_path = fixture_directory.path().join("paragraph-history.md");
         std::fs::write(&fixture_path, case.source).expect("write exact paragraph fixture bytes");
         let mut app = App::new(None);
-        let mut document = DocumentView::from_file(&fixture_path, 80, 10.0)
+        let mut document = DocumentFixture::from_file(&fixture_path, 80, 10.0)
             .expect("load paragraph fixture with its original newline encoding");
         document.cursor_move_to_offset(case.cursor_prefix.len());
         document.cursor_mut().selection_anchor =
@@ -5217,7 +5365,7 @@ fn markdown_paragraph_transactions_restore_source_and_cursor_through_history() {
         );
         app.switch_workspace_for_test(0);
         app.sync_plugin_state();
-        app.dispatch_transactional_edit_for_test(case.command);
+        let _ = app.dispatch_transactional_edit_for_test(case.command);
         {
             let mut tab = app.active_tab_session_mut().expect("active Markdown tab");
             assert_eq!(tab.full_text(), case.expected, "original source: {:?}", case.source);

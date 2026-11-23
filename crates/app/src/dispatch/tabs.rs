@@ -523,7 +523,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
     use crate::workspace::ViewportDimensions;
 
@@ -539,15 +539,15 @@ mod tests {
 
     fn app_with_file_stub_and_active_document(file_path: &std::path::Path) -> App {
         let mut app = App::new(None);
-        let mut stub = DocumentView::new(vec![String::new()], 10, 160.0);
+        let mut stub = DocumentFixture::new(vec![String::new()], 10, 160.0);
         stub.file_path = Some(file_path.to_owned());
         app.push_entry_for_test(stub, Box::new(EditorPlugin::new()));
-        let active = DocumentView::new(vec!["active".to_owned()], 10, 160.0);
+        let active = DocumentFixture::new(vec!["active".to_owned()], 10, 160.0);
         app.push_entry_for_test(active, Box::new(EditorPlugin::new()));
         let switch_effect = app
             .activate_editor_tab(app.editor_tab_id_at(1).expect("active tab index"))
             .expect("tab switch should produce an effect");
-        app.apply_workspace_effect(switch_effect);
+        let _ = app.apply_workspace_effect(switch_effect);
         app
     }
 
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn copy_path_for_untitled_tab_is_a_noop() {
         let mut app = App::new(None);
-        app.new_untitled_doc();
+        let _ = app.new_untitled_doc();
         let tab_id = app.active_tab_id().expect("untitled tab should have an ID");
 
         let effect =
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn toggle_pin_context_action_applies_workspace_navigation_effect() {
         let mut app = App::new(None);
-        app.new_untitled_doc();
+        let _ = app.new_untitled_doc();
         let tab_id = app.active_tab_id().expect("untitled tab should have an ID");
 
         let effect =
@@ -672,7 +672,7 @@ mod tests {
             app.editor_runtime_tab_ids()
         );
 
-        app.new_untitled_doc();
+        let _ = app.new_untitled_doc();
         let len_before_reopen = app.editor_tab_count();
         std::fs::remove_file(&path).expect("existing-tab reopen must not need the source file");
         let reopen_effect = app.open_file(&path).expect("existing file should reactivate");
@@ -702,8 +702,8 @@ mod tests {
         let path = directory.path().join("startup.txt");
         std::fs::write(&path, "startup").expect("startup fixture should be writable");
         let mut app = App::new(None);
-        app.new_untitled_doc();
-        app.new_untitled_doc();
+        let _ = app.new_untitled_doc();
+        let _ = app.new_untitled_doc();
         let forward_target = app.active_tab_id();
         let back_effect = app.navigate_editor_back();
         let _ = app.handle_nav_effect(back_effect);
@@ -772,7 +772,7 @@ mod tests {
             app.editor_runtime_tab_ids()
         );
 
-        app.execute_batch_close(&[0, 2]);
+        let _ = app.execute_batch_close(&[0, 2]);
 
         assert!(app.tab_runtime(first_id).is_none());
         assert!(app.tab_runtime(second_id).is_some());
@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn closing_the_last_tab_creates_an_editable_default_document() {
         let mut app = App::new(None);
-        app.new_untitled_doc();
+        let _ = app.new_untitled_doc();
         let closed_id = app.active_tab_id().expect("the original tab should have an ID");
         assert!(app.tab_runtime(closed_id).is_some());
 
@@ -861,7 +861,7 @@ mod tests {
 
         for (kind, expected_name) in cases {
             let mut app = App::new(None);
-            app.new_typed_untitled_doc(kind);
+            let _ = app.new_typed_untitled_doc(kind);
             app.active_tab_session_mut().expect("typed entry exists").document.dirty = true;
 
             let target = app.editor_tab_id_at(0).and_then(|tab_id| app.editor_save_context(tab_id));
@@ -922,7 +922,7 @@ mod tests {
 
         // A stale index-based close of "index 1" would now remove the wrong tab.
         // Closing by ID must still remove the originally targeted tab.
-        app.try_close_entry_with_prompt(target_id);
+        let _ = app.try_close_entry_with_prompt(target_id);
 
         assert!(
             app.editor_tab_index(target_id).is_none(),

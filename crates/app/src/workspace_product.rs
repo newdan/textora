@@ -107,7 +107,7 @@ mod tests {
 
     use super::{copy_tab_path_with, detach_deleted_document, history_entry, hydrate_active_stub};
     use crate::app_init::build_product_workspace;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
     use crate::tab_runtime::{TabRuntime, TabRuntimeStore};
     use crate::workspace::Workspace;
@@ -115,7 +115,7 @@ mod tests {
     fn append_document(
         workspace: &mut Workspace,
         runtimes: &mut TabRuntimeStore,
-        document: DocumentView,
+        document: DocumentFixture,
     ) {
         let (document, presentation) = document.into_parts();
         let prepared = PreparedTab::new(
@@ -133,7 +133,7 @@ mod tests {
             .expect("hydration fixture should be written");
         let mut workspace = build_product_workspace();
         let mut runtimes = TabRuntimeStore::default();
-        let mut stub = DocumentView::new(vec![String::new()], 10, 160.0);
+        let mut stub = DocumentFixture::new(vec![String::new()], 10, 160.0);
         stub.file_path = Some(file_path);
         stub.dirty = true;
         stub.cursor_mut().snapshot_offset = Some(8);
@@ -142,7 +142,7 @@ mod tests {
         let inactive_path = directory.path().join("inactive.txt");
         std::fs::write(&inactive_path, "inactive content")
             .expect("inactive hydration fixture should be written");
-        let mut inactive_stub = DocumentView::new(vec![String::new()], 10, 160.0);
+        let mut inactive_stub = DocumentFixture::new(vec![String::new()], 10, 160.0);
         inactive_stub.file_path = Some(inactive_path);
         append_document(&mut workspace, &mut runtimes, inactive_stub);
 
@@ -165,7 +165,7 @@ mod tests {
         let missing_path = directory.path().join("missing.txt");
         let mut workspace = build_product_workspace();
         let mut runtimes = TabRuntimeStore::default();
-        let mut stub = DocumentView::new(vec![String::new()], 10, 160.0);
+        let mut stub = DocumentFixture::new(vec![String::new()], 10, 160.0);
         stub.file_path = Some(missing_path.clone());
         append_document(&mut workspace, &mut runtimes, stub);
 
@@ -180,7 +180,8 @@ mod tests {
         let original_path = std::path::Path::new("/notes/review.md");
         let mut workspace = build_product_workspace();
         let mut runtimes = TabRuntimeStore::default();
-        let document = DocumentView::from_external_content(original_path, "local edits", 10, 160.0);
+        let document =
+            DocumentFixture::from_external_content(original_path, "local edits", 10, 160.0);
         append_document(&mut workspace, &mut runtimes, document);
 
         detach_deleted_document(&mut workspace, 0, original_path);
@@ -200,7 +201,7 @@ mod tests {
         let mut workspace = build_product_workspace();
         let mut runtimes = TabRuntimeStore::default();
         let mut document =
-            DocumentView::from_external_content(file_path, "first\nsecond", 10, 160.0);
+            DocumentFixture::from_external_content(file_path, "first\nsecond", 10, 160.0);
         document.set_cursor_offset_synced(8);
         append_document(&mut workspace, &mut runtimes, document);
         let scroll_anchor = ui::viewport::ScrollAnchor::new(1, 7.5);
@@ -222,7 +223,7 @@ mod tests {
         let file_path = std::path::Path::new("/notes/copied.txt");
         let mut workspace = build_product_workspace();
         let mut runtimes = TabRuntimeStore::default();
-        let document = DocumentView::from_external_content(file_path, "copy", 10, 160.0);
+        let document = DocumentFixture::from_external_content(file_path, "copy", 10, 160.0);
         append_document(&mut workspace, &mut runtimes, document);
         let mut copied_text = None;
 
@@ -259,6 +260,7 @@ mod tests {
             "crate::app_init",
             "crate::plugins",
             "DocumentView",
+            "DocumentFixture",
             "NewDocumentKind",
             "arboard",
             "textora_markdown",

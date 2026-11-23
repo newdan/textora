@@ -93,9 +93,9 @@ impl SidebarState {
         &mut self,
         delta_px: f32,
         total_tabs: usize,
-        _metrics: &crate::settings::UiMetrics,
+        metrics: &crate::settings::UiMetrics,
     ) {
-        let dpi = 1.0;
+        let dpi = metrics.dpi;
         let row_h = ROW_H * dpi;
         let visible_h =
             self.layout.as_ref().map(|l| l.list_clip.h).filter(|&h| h > 0.0).unwrap_or(400.0 * dpi);
@@ -184,10 +184,10 @@ impl SidebarState {
         &mut self,
         screen_w: f32,
         screen_h: f32,
-        _metrics: &crate::settings::UiMetrics,
+        metrics: &crate::settings::UiMetrics,
         input: &SidebarSettingsInput,
     ) {
-        let dpi = 1.0;
+        let dpi = metrics.dpi;
         let item_h = constants::ROW_HEIGHT * dpi;
         let menu_w = 200.0 * dpi;
 
@@ -442,7 +442,7 @@ impl SidebarState {
         screen_w: f32,
         _screen_h: f32,
         cfg: &SidebarConfig,
-        _metrics: &crate::settings::UiMetrics,
+        metrics: &crate::settings::UiMetrics,
     ) -> bool {
         let prev = self.hovered_button;
         let mut btn_hover = SidebarHoverButton::None;
@@ -461,8 +461,7 @@ impl SidebarState {
         }
         self.hovered_button = btn_hover;
 
-        let dpi = 1.0;
-        let hot_band = HOT_BAND_LOGICAL * dpi;
+        let hot_band = HOT_BAND_LOGICAL * metrics.dpi;
         let in_left_hot = px >= 0.0 && px <= hot_band;
         // Hamburger button as trigger zone (via layout)
         let on_hamburger =
@@ -838,6 +837,57 @@ mod tests {
         };
         state.update_layout(&input, &cfg, &metrics);
         (state, metrics)
+    }
+
+    #[test]
+    fn high_dpi_sidebar_scroll_reaches_the_last_row() {
+        const TAB_COUNT: usize = 80;
+        let (mut state, metrics) = laid_out_sidebar_state(2.0);
+        let visible_height = state.current_layout().expect("sidebar layout").list_clip.h;
+
+        state.on_scroll(10_000.0, TAB_COUNT, &metrics);
+
+        assert_eq!(
+            state.list_scroll_offset(),
+            TAB_COUNT as f32 * ROW_H * metrics.dpi - visible_height,
+        );
+    }
+
+    #[test]
+    fn high_dpi_settings_menu_scales_width_and_row_height() {
+        let (mut state, metrics) = laid_out_sidebar_state(2.0);
+
+        state.open_settings_menu(
+            1200.0 * metrics.dpi,
+            800.0 * metrics.dpi,
+            &metrics,
+            &SidebarSettingsInput::default(),
+        );
+
+        let menu = state.open_menu().expect("settings menu must be open");
+        assert_eq!(menu.menu_rect.w, 200.0 * metrics.dpi);
+        assert_eq!(menu.item_rects[0].h, ROW_H * metrics.dpi);
+    }
+
+    #[test]
+    fn high_dpi_sidebar_hover_accepts_scaled_left_edge() {
+        let dpi = 2.0;
+        let cfg = SidebarConfig { pinned: false, ..SidebarConfig::new_default(dpi) };
+        let metrics =
+            crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), dpi);
+        let mut state = SidebarState::new(&cfg);
+
+        state.on_mouse_move(
+            HOT_BAND_LOGICAL * 1.5,
+            300.0 * dpi,
+            1200.0 * dpi,
+            800.0 * dpi,
+            &cfg,
+            &metrics,
+        );
+        state.tick(Instant::now(), &cfg, &metrics);
+
+        assert_eq!(state.visibility(), Visibility::HoverPeek);
     }
 
     #[test]

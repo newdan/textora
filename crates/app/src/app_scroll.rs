@@ -298,7 +298,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document_view::DocumentView;
+    use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
     use crate::snap_tree::DisplayLineEntry;
 
@@ -313,7 +313,7 @@ mod tests {
         app.update_scale_factor(2.0);
         app.mouse.pos = (500.0, 400.0);
 
-        let dv = DocumentView::new((0..100).map(|i| format!("line {i}")).collect(), 10, 10.0);
+        let dv = DocumentFixture::new((0..100).map(|i| format!("line {i}")).collect(), 10, 10.0);
         app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
         app.active_tab_session_mut()
             .unwrap()
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn line_scroll_uses_app_metrics_line_height() {
         let mut app = App::new(None);
-        let dv = DocumentView::new((0..100).map(|i| format!("line {i}")).collect(), 80, 10.0);
+        let dv = DocumentFixture::new((0..100).map(|i| format!("line {i}")).collect(), 80, 10.0);
         app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
         app.switch_workspace_for_test(0);
         app.active_tab_session_mut().unwrap().display_mut().display_map.set_entries(
@@ -347,7 +347,7 @@ mod tests {
         app.update_scale_factor(2.0);
         app.mouse.pos = (400.0, 300.0);
         let line_height = app.ui_metrics().line_height;
-        app.handle_scroll(MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(
+        let _ = app.handle_scroll(MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(
             0.0,
             -(line_height as f64),
         )));
@@ -359,8 +359,11 @@ mod tests {
     #[test]
     fn page_down_returns_redraw_without_applying() {
         let mut app = App::new(None);
-        let dv =
-            DocumentView::new((0..100).map(|index| format!("line {index}")).collect(), 20, 200.0);
+        let dv = DocumentFixture::new(
+            (0..100).map(|index| format!("line {index}")).collect(),
+            20,
+            200.0,
+        );
         app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
         app.switch_workspace_for_test(0);
         app.needs_redraw = false;
@@ -451,7 +454,7 @@ mod tests {
         let mut app = App::new(None);
         app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
         app.update_scale_factor(1.0);
-        let dv = DocumentView::new(vec!["hello".to_string()], 80, 10.0);
+        let dv = DocumentFixture::new(vec!["hello".to_string()], 80, 10.0);
         app.push_entry_for_test(dv, Box::new(ReadingPlugin::new(content_height)));
         app.switch_workspace_for_test(0);
         app
@@ -462,7 +465,7 @@ mod tests {
         let mut app = App::new(None);
         app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
         app.update_scale_factor(1.0);
-        let document = DocumentView::new(vec!["hello".to_string()], 80, 10.0);
+        let document = DocumentFixture::new(vec!["hello".to_string()], 80, 10.0);
         let tab_id = app.push_entry_for_test(document, Box::new(EditorPlugin::new()));
         app.switch_workspace_for_test(0);
         app.tab_runtime_mut(tab_id).expect("test tab runtime must exist").plugin =
@@ -493,11 +496,11 @@ mod tests {
     fn plugin_page_up_scrolls_back() {
         let mut app = make_reading_app(5000.0);
         // Scroll down first.
-        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
+        let _ = app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
         let y_after_down = app.active_tab_session().unwrap().scroll_y();
         assert!(y_after_down > 0.0);
         // Scroll back up.
-        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageUp);
+        let _ = app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageUp);
         let y_after_up = app.active_tab_session().unwrap().scroll_y();
         assert!(y_after_up < y_after_down, "PageUp should reduce scroll_y");
     }
@@ -505,7 +508,7 @@ mod tests {
     #[test]
     fn plugin_move_down_scrolls_small_amount() {
         let mut app = make_reading_app(5000.0);
-        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveDown);
+        let _ = app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveDown);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y > 0.0 && y < 100.0, "MoveDown should scroll a small amount, got {y}");
     }
@@ -514,10 +517,11 @@ mod tests {
     fn plugin_move_to_doc_start_resets_scroll() {
         let mut app = make_reading_app(5000.0);
         // Scroll down first.
-        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
-        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
+        let _ = app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
+        let _ = app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
         // Go to start.
-        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveToDocStart);
+        let _ =
+            app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveToDocStart);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y.abs() < 1.0, "MoveToDocStart should reset scroll_y to 0, got {y}");
     }
@@ -525,7 +529,8 @@ mod tests {
     #[test]
     fn plugin_move_to_doc_end_scrolls_to_bottom() {
         let mut app = make_reading_app(5000.0);
-        app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveToDocEnd);
+        let _ =
+            app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::MoveToDocEnd);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y > 0.0, "MoveToDocEnd should scroll near bottom, got {y}");
     }
@@ -543,7 +548,7 @@ mod tests {
     fn plugin_scroll_clamps_at_content_end() {
         let mut app = make_reading_app(500.0);
         // Try to scroll way past the end.
-        app.plugin_scroll_by_pixels(9999.0);
+        let _ = app.plugin_scroll_by_pixels(9999.0);
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y <= 500.0, "scroll_y should clamp at content_height, got {y}");
     }
@@ -552,11 +557,11 @@ mod tests {
     fn plugin_scroll_noop_for_standard_editor() {
         let mut app = App::new(None);
         app.update_scale_factor(1.0);
-        let dv = DocumentView::new(vec!["hello".to_string()], 80, 10.0);
+        let dv = DocumentFixture::new(vec!["hello".to_string()], 80, 10.0);
         app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
         app.switch_workspace_for_test(0);
         // Standard editor: allows_editing=true, handles_own_rendering=false.
-        // Plugin scroll is a no-op; scrolling falls through to DocumentView.
+        // Plugin scroll is a no-op; scrolling falls through to DocumentFixture.
         let effect =
             app.plugin_scroll_by_command(&appkit_shell::input_mapper::EditCommand::PageDown);
         assert_eq!(effect, AppEffect::NONE);
@@ -642,7 +647,7 @@ mod tests {
         let mut app = App::new(None);
         app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
         app.update_scale_factor(1.0);
-        let dv = DocumentView::new(vec!["hello **world**".to_string()], 80, 10.0);
+        let dv = DocumentFixture::new(vec!["hello **world**".to_string()], 80, 10.0);
         app.push_entry_for_test(dv, Box::new(WysiwygPlugin::new(content_height)));
         app.switch_workspace_for_test(0);
         app
@@ -658,12 +663,12 @@ mod tests {
         // Plugin ScrollY increased.
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!((y - 200.0).abs() < 1.0, "scroll_y should be ~200, got {y}");
-        // DocumentView scroll_top unchanged.
+        // DocumentFixture scroll_top unchanged.
         let scroll_top_after =
             app.active_tab_session().unwrap().runtime.presentation.display.viewport.scroll_top;
         assert!(
             (scroll_top_after - scroll_top_before).abs() < 0.01,
-            "DocumentView scroll_top should not change for WYSIWYG scroll"
+            "DocumentFixture scroll_top should not change for WYSIWYG scroll"
         );
     }
 
@@ -691,12 +696,12 @@ mod tests {
         // Plugin ScrollY increased.
         let y = app.active_tab_session().unwrap().scroll_y();
         assert!(y > 0.0, "plugin ScrollY should increase on ScrollViewportBy, got {y}");
-        // DocumentView scroll_top unchanged.
+        // DocumentFixture scroll_top unchanged.
         let scroll_top_after =
             app.active_tab_session().unwrap().runtime.presentation.display.viewport.scroll_top;
         assert!(
             (scroll_top_after - scroll_top_before).abs() < 0.01,
-            "DocumentView scroll_top should not change for WYSIWYG ScrollViewportBy"
+            "DocumentFixture scroll_top should not change for WYSIWYG ScrollViewportBy"
         );
     }
 
@@ -719,7 +724,7 @@ mod tests {
             app.active_tab_session().unwrap().runtime.presentation.display.viewport.scroll_top;
         assert!(
             (scroll_top_after - scroll_top_before).abs() < 0.01,
-            "DocumentView scroll_top should not change for WYSIWYG wheel scroll"
+            "DocumentFixture scroll_top should not change for WYSIWYG wheel scroll"
         );
     }
 
@@ -751,7 +756,7 @@ mod tests {
         app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
         app.mouse.pos = (400.0, 300.0);
 
-        let document = DocumentView::new(vec!["canvas".to_string()], 80, 10.0);
+        let document = DocumentFixture::new(vec!["canvas".to_string()], 80, 10.0);
         app.push_entry_for_test(document, Box::new(CanvasScrollPlugin));
         app.switch_workspace_for_test(0);
 
@@ -771,7 +776,7 @@ mod tests {
     #[test]
     fn canvas_pixel_scroll_follows_natural_touchpad_on_both_axes() {
         let mut app = app_with_prepared_canvas_viewport();
-        app.apply_canvas_viewport_action(CanvasViewportAction::PanBy(
+        let _ = app.apply_canvas_viewport_action(CanvasViewportAction::PanBy(
             ui::canvas::CanvasPoint::new(200.0, 200.0),
         ));
         let before = app
@@ -865,9 +870,10 @@ mod tests {
     #[test]
     fn canvas_shift_scroll_converts_vertical_line_delta_to_horizontal_pan() {
         let mut app = app_with_prepared_canvas_viewport();
-        app.apply_canvas_viewport_action(crate::canvas_viewport::CanvasViewportAction::PanBy(
-            ui::canvas::CanvasPoint::new(100.0, 100.0),
-        ));
+        let _ =
+            app.apply_canvas_viewport_action(crate::canvas_viewport::CanvasViewportAction::PanBy(
+                ui::canvas::CanvasPoint::new(100.0, 100.0),
+            ));
         let before = app
             .active_tab_session()
             .expect("test canvas tab must be active")
