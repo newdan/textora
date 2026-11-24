@@ -1,7 +1,11 @@
 pub(crate) use super::layout::EMPTY_TITLE_PLACEHOLDER;
-pub(in crate::mmf::canvas) use super::layout::{HitMap, LayoutConstants, LayoutNode, LayoutTree};
+pub(in crate::mmf::canvas) use super::layout::{
+    HitMap, LayoutConstants, LayoutNode, LayoutTree, VisibleNodeIdx,
+};
+pub(in crate::mmf::canvas) use super::model::MindmapFocus;
 pub(in crate::mmf::canvas) use super::model::Node;
-pub(in crate::mmf::canvas) use crate::mindmap_view::MindmapFocus;
+
+pub(in crate::mmf::canvas) type NodeLookup<'a> = dyn Fn(usize) -> Option<&'a Node> + 'a;
 pub(in crate::mmf::canvas) use std::borrow::Cow;
 pub(in crate::mmf::canvas) use std::ops::Range;
 pub(in crate::mmf::canvas) use std::sync::Arc;
@@ -42,8 +46,6 @@ pub(in crate::mmf::canvas) const CONTROL_CIRCLE_RADIUS_RATIO: f32 = 0.5;
 pub(in crate::mmf::canvas) const CONTROL_RING_INSET_DP: f32 = 2.0;
 pub(in crate::mmf::canvas) const CONTROL_FONT_SIZE_MULTIPLIER: f32 = 1.0;
 pub(in crate::mmf::canvas) const MIN_CONTROL_LABEL_GLYPH_ADVANCE: f32 = 1.0;
-pub(in crate::mmf::canvas) const CONTROL_LABEL_SUBPIXEL_PHASE_COUNT: u8 = 4;
-pub(in crate::mmf::canvas) const CONTROL_LABEL_SUBPIXEL_STEP: f32 = 0.25;
 pub(in crate::mmf::canvas) const EXPANDED_CONTROL_BAR_WIDTH_DP: f32 = 12.0;
 pub(in crate::mmf::canvas) const EXPANDED_CONTROL_BAR_HEIGHT_DP: f32 = 2.0;
 pub(crate) const CONTROL_HOVER_LIGHTEN_FACTOR: f32 = 0.35;
@@ -214,10 +216,10 @@ pub(in crate::mmf::canvas) fn get_node_style(
 pub fn render_cards(
     dl: &mut DrawList,
     layout: &LayoutTree,
-    visible_node_indices: &[usize],
+    visible_node_indices: &[VisibleNodeIdx],
     theme: &MindmapRenderTheme<'_>,
     constants: &LayoutConstants,
-    nodes: &[&Node],
+    node_at: &NodeLookup<'_>,
     preview: Option<&CanvasDragPreview>,
     viewport: CanvasViewportSnapshot,
 ) {
@@ -227,7 +229,7 @@ pub fn render_cards(
         visible_node_indices,
         theme,
         constants,
-        nodes,
+        node_at,
         preview,
         viewport,
         None,
@@ -251,10 +253,10 @@ pub(in crate::mmf::canvas) fn pointer_hits_node_or_control(
 pub(in crate::mmf::canvas) fn render_cards_with_hover(
     dl: &mut DrawList,
     layout: &LayoutTree,
-    visible_node_indices: &[usize],
+    visible_node_indices: &[VisibleNodeIdx],
     theme: &MindmapRenderTheme<'_>,
     constants: &LayoutConstants,
-    nodes: &[&Node],
+    node_at: &NodeLookup<'_>,
     preview: Option<&CanvasDragPreview>,
     viewport: CanvasViewportSnapshot,
     hit_map: Option<&HitMap>,
@@ -263,8 +265,8 @@ pub(in crate::mmf::canvas) fn render_cards_with_hover(
 ) {
     let pointer = pointer.map(|point| viewport.screen_to_content(point));
     for &i in visible_node_indices {
-        let ln = &layout.nodes[i];
-        let Some(node) = nodes.get(ln.source_node_index) else {
+        let ln = &layout.nodes[i.0];
+        let Some(node) = node_at(ln.source_node_index.0) else {
             continue;
         };
         let rect = viewport.content_rect_to_screen(layout_rect(ln));
@@ -273,12 +275,12 @@ pub(in crate::mmf::canvas) fn render_cards_with_hover(
         let control_bounds = hit_map.and_then(|map| {
             map.controls
                 .iter()
-                .find(|control| control.source_node_index == ln.source_node_index)
+                .find(|control| control.source_node_index == ln.source_node_index.0)
                 .map(|control| control.bounds)
         });
         let uses_hover_visuals =
             pointer_hits_node_or_control(layout_rect(ln), control_bounds, pointer)
-                || editing_node_index == Some(ln.source_node_index);
+                || editing_node_index == Some(ln.source_node_index.0);
         let fill = if uses_hover_visuals {
             with_alpha(style.fill, opacity * HOVER_FILL_ALPHA_MULTIPLIER)
         } else {
@@ -304,7 +306,7 @@ pub(in crate::mmf::canvas) fn render_controls(
     dl: &mut DrawList,
     layout: &LayoutTree,
     hit_map: &HitMap,
-    nodes: &[&Node],
+    node_at: &NodeLookup<'_>,
     theme: &MindmapRenderTheme<'_>,
     shaper: &mut shaping::Shaper,
     projection: &MindmapRenderProjection<'_>,
@@ -317,7 +319,7 @@ pub(in crate::mmf::canvas) fn render_controls(
     let pointer = projection.canvas_pointer.map(|point| viewport.screen_to_content(point));
     let font_size = shaper.font_size() * viewport.zoom * CONTROL_FONT_SIZE_MULTIPLIER;
     for control in &hit_map.controls {
-        let Some(node) = nodes.get(control.source_node_index) else {
+        let Some(node) = node_at(control.source_node_index) else {
             continue;
         };
         if !control_is_visible(node, layout, control, pointer) {
@@ -515,8 +517,8 @@ pub(in crate::mmf::canvas) fn best_control_label_phase_position(
     shaper: &mut shaping::Shaper,
 ) -> Option<ControlLabelPhasePlacement> {
     let mut best_position: Option<ControlLabelPhasePlacement> = None;
-    for phase in 0..CONTROL_LABEL_SUBPIXEL_PHASE_COUNT {
-        let candidate_x = phase as f32 * CONTROL_LABEL_SUBPIXEL_STEP;
+    for phase in 0..render::GlyphAtlas::SUBPIXEL_PHASES {
+        let candidate_x = render::subpixel_offset(phase);
         let Some(relative_center) =
             control_label_visual_center(shaped, font_size, candidate_x, 0.0, shaper)
         else {
@@ -551,7 +553,7 @@ pub(in crate::mmf::canvas) fn control_label_visual_center(
 
     for cluster in &shaped.clusters {
         let (_, subpixel_phase) = render::split_subpixel(x_cursor);
-        let subpixel_x = subpixel_phase as f32 * CONTROL_LABEL_SUBPIXEL_STEP;
+        let subpixel_x = render::subpixel_offset(subpixel_phase);
         if let Some(bitmap) = shaper.rasterize_glyph(
             cluster.font_id,
             cluster.glyph_id as u16,

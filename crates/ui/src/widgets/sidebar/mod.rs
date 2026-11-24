@@ -86,7 +86,7 @@ fn make_style_from_theme(theme: &crate::theme::Theme) -> ListStyle {
 impl SidebarWidget {
     pub fn new(cfg: SidebarConfig, metrics: crate::settings::UiMetrics) -> Self {
         let mut cfg = cfg;
-        cfg.clamp_width(metrics.dpi);
+        cfg.clamp_width();
         let state = SidebarState::new(&cfg);
         let list = ListWidget::new(
             ListStyle {
@@ -323,14 +323,13 @@ impl SidebarWidget {
 
     /// SidebarConfig.width 访问
     pub fn sidebar_width(&self) -> f32 {
-        self.cfg.width
+        self.cfg.width_px(self.metrics.dpi)
     }
 
     /// SidebarConfig.width 设置（含 clamp）
     pub fn set_sidebar_width(&mut self, w: f32) {
-        self.cfg.width = w;
-        let dpi = self.metrics.dpi;
-        self.cfg.clamp_width(dpi);
+        self.cfg.width = w / self.metrics.dpi.max(f32::EPSILON);
+        self.cfg.clamp_width();
     }
 
     /// 当前布局引用
@@ -358,8 +357,7 @@ impl SidebarWidget {
 impl Widget for SidebarWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = Rect::new(0.0, 0.0, rect.w, rect.h);
-        let dpi = ctx.dpi;
-        self.cfg.clamp_width(dpi);
+        self.cfg.clamp_width();
         let input = types::SidebarInput {
             tabs: &self.tabs,
             active_index: self.active_index,
@@ -472,7 +470,7 @@ impl Widget for SidebarWidget {
             types::Visibility::HoverPeek => {
                 if let Some(start) = self.state.hover_peek_start() {
                     let t = (start.elapsed().as_secs_f32() / 0.15).clamp(0.0, 1.0);
-                    -self.cfg.width * (1.0 - t).powi(3)
+                    -self.cfg.width_px(ctx.dpi) * (1.0 - t).powi(3)
                 } else {
                     0.0
                 }
@@ -480,7 +478,7 @@ impl Widget for SidebarWidget {
             types::Visibility::HoverPeekFadingOut => {
                 if let Some(leave_start) = self.state.hover_peek_leave_start() {
                     let t = (leave_start.elapsed().as_secs_f32() / 0.15).clamp(0.0, 1.0);
-                    -self.cfg.width * (1.0 - (1.0 - t).powi(3))
+                    -self.cfg.width_px(ctx.dpi) * (1.0 - (1.0 - t).powi(3))
                 } else {
                     0.0
                 }
@@ -707,7 +705,7 @@ impl Widget for SidebarWidget {
 
 fn is_new_document_menu(menu: &crate::widgets::popup_menu::PopupMenu) -> bool {
     menu.items.iter().any(|item| {
-        matches!(item.action, crate::widgets::popup_menu::PopupMenuAction::NewDocument(_))
+        matches!(item.command(), Some(crate::widgets::popup_menu::PopupMenuAction::NewDocument(_)))
     })
 }
 

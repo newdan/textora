@@ -8,7 +8,7 @@ use ui::view_mode::ViewMode;
 
 /// Default sidebar width in logical pixels (before DPI scaling).
 fn default_sidebar_width() -> f32 {
-    220.0
+    ui::sidebar::SidebarConfig::DEFAULT_WIDTH_LOGICAL
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,12 +431,12 @@ mod tests {
     }
 
     #[test]
-    fn physical_sidebar_width_roundtrips_as_logical_value() {
+    fn logical_sidebar_width_persists_independently_of_window_dpi() {
         let mut app = crate::App::new(None);
         app.update_scale_factor(2.0);
-        app.ui_shell.sidebar_cfg_mut().width = 440.0;
+        app.ui_shell.set_sidebar_width_logical(220.0);
         let persisted = PersistedSettings {
-            sidebar_width: app.sidebar_width_for_persistence(),
+            sidebar_width: app.ui_shell.sidebar_width_logical(),
             ..PersistedSettings::default()
         };
 

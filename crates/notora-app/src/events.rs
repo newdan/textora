@@ -70,11 +70,11 @@ pub fn editor_input_context(state: &NotoraState, window_focused: bool) -> Editor
 
 impl ApplicationHandler<ShellEvent> for NotoraApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        self.runtime_mut().handle_resumed(event_loop);
+        self.handle_resumed(event_loop);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ShellEvent) {
-        self.runtime_mut().handle_user_event(event_loop, event);
+        self.handle_user_event(event_loop, event);
     }
 
     fn window_event(
@@ -83,11 +83,11 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        self.runtime_mut().handle_window_event(event_loop, window_id, event);
+        self.handle_window_event(event_loop, window_id, event);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.runtime_mut().handle_about_to_wait(event_loop);
+        self.handle_about_to_wait(event_loop);
     }
 }
 

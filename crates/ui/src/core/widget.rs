@@ -43,6 +43,24 @@ pub enum MouseButton {
 const MULTI_CLICK_MAXIMUM_INTERVAL: Duration = Duration::from_millis(500);
 const MULTI_CLICK_MAXIMUM_DISTANCE_PX_SQUARED: f32 = 25.0;
 
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum PointerClickTiming {
+    #[default]
+    Precise,
+    WholeMilliseconds,
+}
+
+impl PointerClickTiming {
+    fn contains(self, elapsed: Duration) -> bool {
+        match self {
+            Self::Precise => elapsed <= MULTI_CLICK_MAXIMUM_INTERVAL,
+            Self::WholeMilliseconds => {
+                elapsed.as_millis() <= MULTI_CLICK_MAXIMUM_INTERVAL.as_millis()
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PointerClickKind {
     Single,
@@ -69,9 +87,18 @@ struct RecordedPointerClick {
 #[derive(Clone, Debug, Default)]
 pub struct PointerClickTracker {
     previous: Option<RecordedPointerClick>,
+    timing: PointerClickTiming,
 }
 
 impl PointerClickTracker {
+    pub fn with_timing(timing: PointerClickTiming) -> Self {
+        Self { previous: None, timing }
+    }
+
+    pub fn last_press(&self) -> Option<((f32, f32), PointerClickKind)> {
+        self.previous.map(|previous| (previous.position, previous.kind))
+    }
+
     pub fn record_press(&mut self, position: (f32, f32)) -> PointerClickKind {
         self.record_press_at(Instant::now(), position)
     }
@@ -82,7 +109,7 @@ impl PointerClickTracker {
             let vertical_distance = position.1 - previous.position.1;
             let distance_squared =
                 horizontal_distance * horizontal_distance + vertical_distance * vertical_distance;
-            pressed_at.duration_since(previous.pressed_at) <= MULTI_CLICK_MAXIMUM_INTERVAL
+            self.timing.contains(pressed_at.duration_since(previous.pressed_at))
                 && distance_squared <= MULTI_CLICK_MAXIMUM_DISTANCE_PX_SQUARED
         });
         let kind = kind.map_or(PointerClickKind::Single, |previous| previous.kind.next());
@@ -143,8 +170,6 @@ pub struct PaintCtx<'a> {
     pub list: &'a mut DrawList,
     pub theme: &'a Theme,
     pub dpi: f32,
-    /// 容器维护的累计坐标偏移，(dx, dy)。widget 不修改此字段。
-    pub offset: (f32, f32),
     /// 全局透明度（0.0–1.0）。默认 1.0；用于后续淡入淡出动画（如 sidebar HoverPeek fade）。
     pub global_alpha: f32,
     /// Harfbuzz shaper for building UiTextLayout in paint.
@@ -155,7 +180,26 @@ pub struct PaintCtx<'a> {
 impl<'a> PaintCtx<'a> {
     /// Convenience constructor for tests (no shaper).
     pub fn new(list: &'a mut DrawList, theme: &'a Theme, dpi: f32) -> Self {
-        Self { list, theme, dpi, offset: (0.0, 0.0), global_alpha: 1.0, shaper: None }
+        Self { list, theme, dpi, global_alpha: 1.0, shaper: None }
+    }
+
+    /// Paint a child in local coordinates on the same draw list.
+    pub fn with_offset<R>(
+        &mut self,
+        x: f32,
+        y: f32,
+        paint: impl FnOnce(&mut PaintCtx<'_>) -> R,
+    ) -> R {
+        let Self { list, theme, dpi, global_alpha, shaper } = self;
+        list.with_offset(x, y, |list| {
+            paint(&mut PaintCtx {
+                list,
+                theme,
+                dpi: *dpi,
+                global_alpha: *global_alpha,
+                shaper: shaper.as_deref_mut(),
+            })
+        })
     }
 
     /// Shape and emit text via harfbuzz. No-op when shaper is None.
@@ -432,6 +476,7 @@ impl ControlAction {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WidgetAction {
     Control(ControlAction),
+    EditorToolbar(crate::widgets::editor_toolbar::EditorToolbarAction),
     Overlay(OverlayAction),
     Settings(SettingsViewAction),
     Sidebar(crate::widgets::sidebar::SidebarAction),
@@ -580,6 +625,27 @@ mod tests {
         assert_eq!(tracker.record_press_at(after_limit, position), PointerClickKind::Single);
     }
 
+    #[test]
+    fn pointer_click_tracker_can_preserve_the_whole_millisecond_cutoff() {
+        let start = Instant::now();
+        let mut tracker = PointerClickTracker::with_timing(PointerClickTiming::WholeMilliseconds);
+        let cutoff = Duration::from_millis(500);
+        let fractional_limit = Duration::from_micros(500_999);
+        let beyond_cutoff = Duration::from_millis(501);
+        let position = (10.0, 20.0);
+        let third_press = start + cutoff + fractional_limit;
+
+        assert_eq!(tracker.record_press_at(start, position), PointerClickKind::Single);
+        assert_eq!(tracker.record_press_at(start + cutoff, position), PointerClickKind::Double);
+        assert_eq!(tracker.record_press_at(third_press, position), PointerClickKind::Triple);
+        assert_eq!(tracker.record_press_at(third_press, position), PointerClickKind::Triple);
+        assert_eq!(tracker.last_press(), Some((position, PointerClickKind::Triple)));
+        assert_eq!(
+            tracker.record_press_at(third_press + beyond_cutoff, position),
+            PointerClickKind::Single,
+        );
+    }
+
     struct OwnershipTrackingClipboard {
         text: Option<String>,
         returned_allocation: Option<usize>,
@@ -646,14 +712,8 @@ mod tests {
         let w = TestWidget { rect: Rect::new(0.0, 0.0, 100.0, 100.0) };
         let theme = dummy_theme();
         let mut dl = DrawList::new();
-        let mut ctx = PaintCtx {
-            global_alpha: 1.0,
-            list: &mut dl,
-            theme: &theme,
-            dpi: 1.0,
-            offset: (0.0, 0.0),
-            shaper: None,
-        };
+        let mut ctx =
+            PaintCtx { global_alpha: 1.0, list: &mut dl, theme: &theme, dpi: 1.0, shaper: None };
         w.paint(&mut ctx);
         assert_eq!(dl.cmds.len(), 1);
         assert!(matches!(dl.cmds[0], DrawCmd::FillRect { .. }));

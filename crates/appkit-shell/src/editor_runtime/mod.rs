@@ -16,13 +16,14 @@ mod model_session;
 mod render_session;
 #[allow(dead_code, reason = "ER3-1 wires reshape results into the App lifecycle")]
 mod reshape_session;
+mod source_pointer;
 
 pub use crate::pointer_capture::MouseCapture;
 pub use contract::{
     CloseConfirmation, DocumentTextEditError, DocumentTextReplacement, DocumentTextSnapshot,
     EditorDocumentSummary, EditorFocus, EditorInputContext, EditorNotification, EditorOutcome,
     EditorPointerOutcome, EditorRuntimeConfig, EditorRuntimeError, EditorTabSnapshot,
-    EditorWorkspaceSnapshot, OpenDisposition,
+    EditorWorkspaceSnapshot, OpenDisposition, RestoredEditorTab,
 };
 pub use document_save::{
     PreparedDocumentSave, SaveCompletion, SavePayloadTransform, SavePrepareError,
@@ -37,10 +38,12 @@ pub use editor_navigation::{
     set_wysiwyg_visual_caret_and_selection,
 };
 pub use editor_painter::{
-    EditorPaintStyle, EditorSurfacePaint, PluginContentTarget, PreeditAdvanceMeasure,
-    SearchHighlightStyle, ShapedTextSurface, TextSurfaceLayout,
+    EditorPaintOptions, EditorSurfacePaint, PreeditAdvanceMeasure, PreparedPluginContent,
+    SearchHighlightStyle, TextCaretReveal, TextHighlightLayer,
 };
+pub use editor_pointer::{PluginPointerPolicy, PointerClickFocusLoss};
 pub use file_safety_session::{FileSafetyCandidate, FileSafetyObservation};
+pub use source_pointer::SourcePointerPolicy;
 pub const RESHAPE_AHEAD_LINES: usize = reshape_session::RESHAPE_AHEAD_LINES;
 
 /// Product semantic editing result; unsupported commands are explicit and never
@@ -62,10 +65,8 @@ use std::sync::{Arc, Mutex};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
-use crate::editor_tab_set::EditorTabSet;
 use crate::prepared_tab::PreparedTab;
 use crate::reshape_worker::{ReshapeResult, ReshapeWorker};
-use crate::tab_runtime::TabRuntimeStore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClipboardCommand {
@@ -166,7 +167,12 @@ pub struct EditorRuntime {
     active_cursor_paint_enabled: bool,
     plain_text_preedit_advance_px: f32,
     pointer_click_tracker: ui::core::widget::PointerClickTracker,
+    pointer_click_focus_loss: PointerClickFocusLoss,
+    plugin_pointer_policy: PluginPointerPolicy,
+    source_pointer_policy: SourcePointerPolicy,
     painted_editor_bounds: PaintedEditorBounds,
+    painted_editor_content:
+        Option<(appkit_core::tab_set::types::TabId, editor_painter::EditorContentGeometry)>,
     ui_shaper: Option<Arc<Mutex<shaping::Shaper>>>,
 }
 
@@ -191,7 +197,11 @@ impl EditorRuntime {
             active_cursor_paint_enabled: true,
             plain_text_preedit_advance_px: 0.0,
             pointer_click_tracker: ui::core::widget::PointerClickTracker::default(),
+            pointer_click_focus_loss: PointerClickFocusLoss::default(),
+            plugin_pointer_policy: PluginPointerPolicy::default(),
+            source_pointer_policy: SourcePointerPolicy::default(),
             painted_editor_bounds: Rc::new(Cell::new(None)),
+            painted_editor_content: None,
             ui_shaper: None,
         })
     }
@@ -212,21 +222,10 @@ impl EditorRuntime {
         suggested_file_name: Option<String>,
         disposition: OpenDisposition,
     ) -> EditorOutcome {
+        let cancel = self.cancel_pointer_capture();
         let effect =
             self.model_session.install_prepared_tab(prepared, suggested_file_name, disposition);
-        self.outcome_for_workspace_effect(effect)
-    }
-
-    pub fn install_prepared_tab_for_product(
-        &mut self,
-        prepared: PreparedTab,
-        suggested_file_name: Option<String>,
-        disposition: OpenDisposition,
-    ) -> crate::editor_tab_set::WorkspaceEffect {
-        let effect =
-            self.model_session.install_prepared_tab(prepared, suggested_file_name, disposition);
-        let _ = self.outcome_for_workspace_effect(effect);
-        effect
+        cancel.merge(self.outcome_for_workspace_effect(effect))
     }
 
     pub fn append_prepared_tab(
@@ -237,23 +236,42 @@ impl EditorRuntime {
         self.model_session.append_prepared_tab(prepared, suggested_file_name)
     }
 
-    pub fn replace_model_state(&mut self, workspace: EditorTabSet, runtimes: TabRuntimeStore) {
-        self.model_session.replace_parts(workspace, runtimes);
+    pub fn append_restored_tab(
+        &mut self,
+        tab: RestoredEditorTab<'_>,
+    ) -> appkit_core::tab_set::types::TabId {
+        self.model_session.append_restored_tab(tab)
+    }
+
+    /// 恢复已经持久化的活动标签，完成首帧所需的光标定位。
+    pub fn finish_workspace_restore(&mut self, active_index: usize, line_height: f32) {
+        let target = active_index.min(self.tab_count().saturating_sub(1));
+        let Some(tab_id) = self.tab_id_at(target) else {
+            return;
+        };
+        let _ = self.model_session.activate(tab_id);
+        if let Some(mut tab) = self.tab_session_mut(tab_id) {
+            tab.ensure_cursor_visible(line_height);
+        }
     }
 
     pub fn activate(&mut self, tab_id: appkit_core::tab_set::types::TabId) -> EditorOutcome {
-        self.model_session
-            .activate(tab_id)
-            .map_or_else(EditorOutcome::default, |effect| self.outcome_for_workspace_effect(effect))
+        let cancel = self.cancel_pointer_before_activating(tab_id);
+        let activated =
+            self.model_session.activate(tab_id).map_or_else(EditorOutcome::default, |effect| {
+                self.outcome_for_workspace_effect(effect)
+            });
+        cancel.merge(activated)
     }
 
-    pub fn activate_for_product(
+    fn cancel_pointer_before_activating(
         &mut self,
         tab_id: appkit_core::tab_set::types::TabId,
-    ) -> Option<crate::editor_tab_set::WorkspaceEffect> {
-        let effect = self.model_session.activate(tab_id)?;
-        let _ = self.outcome_for_workspace_effect(effect);
-        Some(effect)
+    ) -> EditorOutcome {
+        if self.active_tab_id() != Some(tab_id) && self.tab_index(tab_id).is_some() {
+            return self.cancel_pointer_capture();
+        }
+        EditorOutcome::default()
     }
 
     pub fn request_close(&mut self, tab_id: appkit_core::tab_set::types::TabId) -> EditorOutcome {
@@ -261,12 +279,7 @@ impl EditorRuntime {
             return EditorOutcome::default();
         };
         if decision == crate::editor_tab_set::CloseTabDecision::CanClose {
-            return self
-                .model_session
-                .close(tab_id)
-                .map_or_else(EditorOutcome::default, |effect| {
-                    self.outcome_for_workspace_effect(effect)
-                });
+            return self.confirm_close(tab_id, CloseConfirmation::Saved);
         }
         EditorOutcome {
             shell_effect: crate::event::ShellEffect::REDRAW,
@@ -282,18 +295,24 @@ impl EditorRuntime {
         tab_id: appkit_core::tab_set::types::TabId,
         confirmation: CloseConfirmation,
     ) -> EditorOutcome {
-        self.model_session
+        let Some(decision) = self.model_session.close_decision(tab_id) else {
+            return EditorOutcome::default();
+        };
+        if !confirmation.accepts(decision) {
+            return EditorOutcome::default();
+        }
+        let cancel = if self.active_tab_id() == Some(tab_id) {
+            self.cancel_pointer_capture()
+        } else {
+            EditorOutcome::default()
+        };
+        let closed = self
+            .model_session
             .confirm_close(tab_id, confirmation)
-            .map_or_else(EditorOutcome::default, |effect| self.outcome_for_workspace_effect(effect))
-    }
-
-    pub fn close_for_product(
-        &mut self,
-        tab_id: appkit_core::tab_set::types::TabId,
-    ) -> Option<crate::editor_tab_set::WorkspaceEffect> {
-        let effect = self.model_session.close(tab_id)?;
-        let _ = self.outcome_for_workspace_effect(effect);
-        Some(effect)
+            .map_or_else(EditorOutcome::default, |effect| {
+                self.outcome_for_workspace_effect(effect)
+            });
+        cancel.merge(closed)
     }
 
     pub fn active_tab_id(&self) -> Option<appkit_core::tab_set::types::TabId> {
@@ -379,6 +398,7 @@ impl EditorRuntime {
     }
 
     pub fn switch_active_plugin(&mut self) {
+        let _ = self.cancel_pointer_capture();
         self.model_session.switch_active_plugin();
     }
 
@@ -670,6 +690,7 @@ impl EditorRuntime {
 
     pub fn begin_frame(&mut self) -> Result<EditorFrame, RenderError> {
         self.painted_editor_bounds.set(None);
+        self.painted_editor_content = None;
         let theme = self.theme.clone();
         let dpi = self.render_session.scale_factor() as f32;
         Ok(EditorFrame::new_for_backend(
@@ -682,6 +703,10 @@ impl EditorRuntime {
 
     pub fn update_theme(&mut self, theme: ui::Theme) {
         self.theme = theme;
+    }
+
+    pub fn theme(&self) -> &ui::Theme {
+        &self.theme
     }
 
     /// Runs a render operation with the frame resources and restores them on scope exit.
@@ -784,7 +809,10 @@ impl EditorRuntime {
     pub fn set_window_focus(&mut self, focused: bool) {
         let canvas_pointer_changed = !focused && self.clear_active_canvas_pointer();
         if !focused {
-            self.pointer_click_tracker.reset();
+            let _ = self.cancel_pointer_capture();
+            if self.pointer_click_focus_loss == PointerClickFocusLoss::Reset {
+                self.pointer_click_tracker.reset();
+            }
             self.input_session.focus_lost();
         }
         if self.render_session.window_focused() != focused || canvas_pointer_changed {
@@ -826,11 +854,7 @@ impl EditorRuntime {
             let cursor_byte = tab.document.cursor_offset().to_usize();
             let (cursor_x, cursor_y, cursor_width, cursor_height) =
                 tab.query_cursor_screen_rect(cursor_byte)?;
-            let bounds = editor_painter::plugin_bounds(
-                editor_bounds,
-                self.scale_factor() as f32,
-                tab.is_canvas(),
-            );
+            let bounds = self.plugin_input_bounds(editor_bounds, tab.is_canvas());
             return Some(ui::Rect::new(
                 bounds.x + cursor_x,
                 bounds.y + cursor_y,
@@ -1079,8 +1103,7 @@ impl EditorRuntime {
         let Some(editor_bounds) = self.painted_editor_bounds() else {
             return EditorOutcome::default();
         };
-        let plugin_viewport_height =
-            editor_painter::plugin_bounds(editor_bounds, self.scale_factor() as f32, false).h;
+        let plugin_viewport_height = self.plugin_input_bounds(editor_bounds, false).h;
         self.model_session.scroll_active_document(
             pixels,
             plugin_viewport_height,
@@ -1148,8 +1171,7 @@ impl EditorRuntime {
         }
 
         let vertical = if tab.handles_own_rendering() {
-            let viewport_height =
-                editor_painter::plugin_bounds(editor_bounds, self.scale_factor() as f32, false).h;
+            let viewport_height = self.plugin_input_bounds(editor_bounds, false).h;
             editor_scrollbar_input(viewport_height, tab.content_height(), tab.scroll_y())
         } else {
             editor_scrollbar_input(
@@ -1221,8 +1243,7 @@ impl EditorRuntime {
         }
 
         let line_height = self.editor_line_height();
-        let plugin_viewport_height =
-            editor_painter::plugin_bounds(editor_rect, self.scale_factor() as f32, false).h;
+        let plugin_viewport_height = self.plugin_input_bounds(editor_rect, false).h;
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return EditorOutcome::default();
         };
@@ -1335,10 +1356,6 @@ impl EditorRuntime {
 
     pub(crate) fn initial_text_selection_range(&self) -> Option<std::ops::Range<usize>> {
         self.input_session.initial_text_selection_range()
-    }
-
-    pub fn begin_canvas_drag(&mut self, context: EditorInputContext) -> bool {
-        self.input_session.start_canvas_drag(context)
     }
 
     pub fn end_pointer_capture(&mut self) {
@@ -1458,6 +1475,23 @@ impl EditorRuntime {
         self.reshape_session.take_skip_next_submit()
     }
 
+    pub fn settings(&self) -> &ui::settings::Settings {
+        &self.settings
+    }
+
+    /// Commits one settings revision when any setting value changes.
+    pub fn edit_settings(&mut self, edit: impl FnOnce(&mut ui::settings::Settings)) -> bool {
+        let mut settings = self.settings.clone();
+        edit(&mut settings);
+        settings.version = self.settings.version;
+        if settings == self.settings {
+            return false;
+        }
+        settings.version += 1;
+        self.update_settings(settings);
+        true
+    }
+
     pub fn update_settings(&mut self, settings: ui::settings::Settings) {
         let ui_font_family_changed = settings.ui_font_family != self.settings.ui_font_family;
         self.settings = settings;
@@ -1507,6 +1541,9 @@ impl EditorRuntime {
         &mut self,
         effect: crate::editor_tab_set::WorkspaceEffect,
     ) -> EditorOutcome {
+        if effect == crate::editor_tab_set::WorkspaceEffect::None {
+            return EditorOutcome::default();
+        }
         if let crate::editor_tab_set::WorkspaceEffect::Closed { closed, .. } = effect {
             self.reshape_session.invalidate();
             self.file_safety_session.forget_tab(closed);
@@ -1523,7 +1560,8 @@ impl EditorRuntime {
                     .notifications
                     .push(EditorNotification::ActiveDocumentChanged { tab_id: Some(tab_id) });
             }
-            crate::editor_tab_set::WorkspaceEffect::Closed { activated, .. } => {
+            crate::editor_tab_set::WorkspaceEffect::Closed { closed, activated } => {
+                outcome.notifications.push(EditorNotification::TabClosed { tab_id: closed });
                 if activated.is_some() || self.active_tab_id().is_none() {
                     outcome
                         .notifications
@@ -1577,7 +1615,7 @@ mod tests {
 
     struct WysiwygInputProbePlugin {
         scroll_y: Rc<Cell<f32>>,
-        hit_test_count: Rc<Cell<usize>>,
+        pointer_origins: Rc<RefCell<Vec<(f32, f32)>>>,
     }
 
     struct CanvasViewportProbePlugin;
@@ -1886,12 +1924,12 @@ mod tests {
             &self,
             _x: f32,
             _y: f32,
-            _offset_x: f32,
-            _offset_y: f32,
+            offset_x: f32,
+            offset_y: f32,
         ) -> Option<ui::plugin::VisualCaretPosition> {
-            let query_index = self.hit_test_count.get();
-            self.hit_test_count.set(query_index + 1);
-            let byte_offset = if query_index == 0 { 2 } else { 3 };
+            let mut pointer_origins = self.pointer_origins.borrow_mut();
+            let byte_offset = if pointer_origins.is_empty() { 2 } else { 3 };
+            pointer_origins.push((offset_x, offset_y));
             Some(ui::plugin::VisualCaretPosition {
                 byte_offset,
                 affinity: ui::plugin::CursorAffinity::Downstream,
@@ -2221,7 +2259,6 @@ mod tests {
         frame
             .paint_editor(ui::Rect::new(16.0, 24.0, 320.0, 240.0))
             .expect("headless editor rect should paint");
-        frame.present().expect("headless frame should present");
     }
 
     #[test]
@@ -2965,7 +3002,7 @@ mod tests {
         runtime.tab_session_mut(tab_id).expect("active tab should have a runtime").replace_plugin(
             Box::new(WysiwygInputProbePlugin {
                 scroll_y: scroll_y.clone(),
-                hit_test_count: Rc::new(Cell::new(0)),
+                pointer_origins: Rc::default(),
             }),
         );
         let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
@@ -2985,7 +3022,7 @@ mod tests {
         runtime.tab_session_mut(tab_id).expect("active tab should have a runtime").replace_plugin(
             Box::new(WysiwygInputProbePlugin {
                 scroll_y: Rc::new(Cell::new(0.0)),
-                hit_test_count: Rc::new(Cell::new(0)),
+                pointer_origins: Rc::default(),
             }),
         );
         let editor_rect = ui::Rect::new(100.0, 200.0, 640.0, 480.0);
@@ -3053,12 +3090,12 @@ mod tests {
     #[test]
     fn wysiwyg_pointer_press_rehits_after_expanding_the_candidate_cursor() {
         let mut runtime = runtime_with_clean_tab();
-        let hit_test_count = Rc::new(Cell::new(0));
+        let pointer_origins = Rc::new(RefCell::new(Vec::new()));
         let tab_id = runtime.active_tab_id().expect("test runtime should have an active tab");
         runtime.tab_session_mut(tab_id).expect("active tab should have a runtime").replace_plugin(
             Box::new(WysiwygInputProbePlugin {
                 scroll_y: Rc::new(Cell::new(0.0)),
-                hit_test_count: hit_test_count.clone(),
+                pointer_origins: Rc::clone(&pointer_origins),
             }),
         );
         let context = EditorInputContext { focus: EditorFocus::Active, modal_blocked: false };
@@ -3069,7 +3106,7 @@ mod tests {
             &ui::Event::MouseDown { px: 180.0, py: 260.0, button: ui::MouseButton::Left },
         );
 
-        assert_eq!(hit_test_count.get(), 2);
+        assert_eq!(pointer_origins.borrow().len(), 2);
         assert_eq!(runtime.workspace_snapshot().tabs[0].cursor_offset, 3);
     }
 
@@ -3096,6 +3133,73 @@ mod tests {
         );
 
         assert_eq!(runtime.workspace_snapshot().tabs[0].cursor_offset, 2);
+    }
+
+    #[test]
+    fn editor_pointer_uses_the_text_origin_from_the_painted_frame() {
+        let mut runtime = runtime_with_clean_tab();
+        let tab_id = runtime.active_tab_id().expect("测试需要活动标签");
+        runtime.tab_session_mut(tab_id).expect("标签需要视图状态").display_mut().advance_cache =
+            vec![ui::render_geom::AdvanceCacheEntry {
+                doc_line: 0,
+                vl_byte_start: 0,
+                vl_grapheme_start: 0,
+                clusters: vec![(1, 300.0, 0), (2, 320.0, 1)],
+            }];
+        let mut frame = runtime.begin_frame().expect("应能创建无窗口帧");
+        runtime
+            .paint_active_editor_with(
+                &mut frame,
+                &mut RenderResources::default(),
+                ui::Rect::new(100.0, 200.0, 640.0, 480.0),
+                EditorPaintOptions { text_left_margin: Some(280.0), ..Default::default() },
+            )
+            .expect("应能记录源码绘制位置");
+
+        runtime.handle_pointer_event(
+            EditorInputContext { focus: EditorFocus::Active, modal_blocked: false },
+            &ui::Event::MouseDown { px: 275.0, py: 205.0, button: ui::MouseButton::Left },
+        );
+
+        assert_eq!(runtime.workspace_snapshot().tabs[0].cursor_offset, 0);
+    }
+
+    #[test]
+    fn editor_pointer_and_ime_share_the_prepared_plugin_origin() {
+        let mut runtime = runtime_with_clean_tab();
+        let pointer_origins = Rc::new(RefCell::new(Vec::new()));
+        let tab_id = runtime.active_tab_id().expect("测试需要活动标签");
+        runtime.tab_session_mut(tab_id).expect("标签需要视图状态").replace_plugin(Box::new(
+            WysiwygInputProbePlugin {
+                scroll_y: Rc::new(Cell::new(0.0)),
+                pointer_origins: Rc::clone(&pointer_origins),
+            },
+        ));
+        let editor_rect = ui::Rect::new(100.0, 200.0, 640.0, 480.0);
+        let plugin_rect = ui::Rect::new(240.0, 260.0, 420.0, 400.0);
+        let mut frame = runtime.begin_frame().expect("应能创建无窗口帧");
+        runtime
+            .paint_active_editor_with(
+                &mut frame,
+                &mut RenderResources::default(),
+                editor_rect,
+                EditorPaintOptions {
+                    plugin_content: Some(PreparedPluginContent::Bounds(plugin_rect)),
+                    ..Default::default()
+                },
+            )
+            .expect("应能记录插件绘制位置");
+
+        runtime.handle_pointer_event(
+            EditorInputContext { focus: EditorFocus::Active, modal_blocked: false },
+            &ui::Event::MouseDown { px: 300.0, py: 285.0, button: ui::MouseButton::Left },
+        );
+        assert_eq!(&*pointer_origins.borrow(), &[(plugin_rect.x, plugin_rect.y); 2]);
+
+        assert_eq!(
+            runtime.active_editor_ime_cursor_rect(),
+            Some(ui::Rect::new(plugin_rect.x + 24.0, plugin_rect.y + 12.0, 2.0, 18.0)),
+        );
     }
 
     #[test]

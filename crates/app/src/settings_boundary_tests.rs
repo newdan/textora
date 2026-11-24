@@ -10,6 +10,24 @@ fn is_test_only(attributes: &[syn::Attribute]) -> bool {
     })
 }
 
+fn is_self_field(expression: &syn::Expr, field_name: &str) -> bool {
+    matches!(
+        expression,
+        syn::Expr::Field(field)
+            if matches!(&field.member, syn::Member::Named(name) if name == field_name)
+                && matches!(field.base.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self"))
+    )
+}
+
+fn is_editor_settings(expression: &syn::Expr) -> bool {
+    is_self_field(expression, "settings")
+        || matches!(
+            expression,
+            syn::Expr::MethodCall(call)
+                if call.method == "settings" && is_self_field(call.receiver.as_ref(), "editor_runtime")
+        )
+}
+
 #[derive(Default)]
 struct LogicalDimensionAccesses(Vec<String>);
 
@@ -41,9 +59,7 @@ impl<'ast> Visit<'ast> for LogicalDimensionAccesses {
     fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
         if let syn::Member::Named(dimension) = &field.member
             && LOGICAL_DIMENSIONS.iter().any(|name| dimension == name)
-            && let syn::Expr::Field(settings) = field.base.as_ref()
-            && matches!(&settings.member, syn::Member::Named(name) if name == "settings")
-            && matches!(settings.base.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self"))
+            && is_editor_settings(field.base.as_ref())
         {
             self.0.push(dimension.to_string());
         }
@@ -66,16 +82,16 @@ fn settings_check_finds_production_access_after_test_items() {
 
         #[cfg(test)]
         mod tests {
-            impl App { fn fixture(&self) { let _ = self.settings.line_height; } }
+            impl App { fn fixture(&self) { let _ = self.editor_runtime.settings().line_height; } }
         }
 
         impl App {
             #[cfg(test)]
-            fn fixture(&self) { let _ = self.settings.status_bar_height; }
+            fn fixture(&self) { let _ = self.editor_runtime.settings().status_bar_height; }
 
             fn render(&self) {
-                let _ = self . settings . font_size;
-                let _ = "self.settings.gutter_padding";
+                let _ = self . editor_runtime . settings() . font_size;
+                let _ = "self.editor_runtime.settings().gutter_padding";
             }
         }
     "#;
@@ -92,8 +108,10 @@ fn physical_consumers_do_not_read_logical_dimensions_directly() {
         ("app_renderer.rs", include_str!("app_renderer.rs")),
         ("app_reshape.rs", include_str!("app_reshape.rs")),
         ("app_scroll.rs", include_str!("app_scroll.rs")),
-        ("app_search.rs", include_str!("app_search.rs")),
-        ("app_dispatch.rs", include_str!("app_dispatch.rs")),
+        ("dispatch/search.rs", include_str!("dispatch/search.rs")),
+        ("dispatch/mod.rs", include_str!("dispatch/mod.rs")),
+        ("dispatch/settings.rs", include_str!("dispatch/settings.rs")),
+        ("dispatch/viewport.rs", include_str!("dispatch/viewport.rs")),
         ("render_pipeline.rs", include_str!("../../appkit-shell/src/render_pipeline.rs")),
         ("mouse.rs", include_str!("mouse.rs")),
         ("dispatch/editor.rs", include_str!("dispatch/editor.rs")),

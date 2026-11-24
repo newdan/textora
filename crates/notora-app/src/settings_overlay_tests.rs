@@ -171,7 +171,6 @@ fn close_icon_is_visible_and_section_text_stays_below_header() {
             list: &mut draws,
             theme: &theme,
             dpi: 2.0,
-            offset: (0.0, 0.0),
             global_alpha: 1.0,
             shaper: Some(&mut shaper),
         });

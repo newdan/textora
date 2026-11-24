@@ -178,6 +178,10 @@ pub enum DocumentCompletion {
         content_revision: u64,
         result: Result<crate::external_files::CanonicalExternalPath, String>,
     },
+    ExternalConflictCopyCompleted {
+        identity: notora_core::DocumentIdentity,
+        result: Result<(), String>,
+    },
     ConflictReloadCompleted {
         identity: notora_core::DocumentIdentity,
         tab_id: appkit_core::tab_set::types::TabId,

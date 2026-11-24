@@ -1,12 +1,115 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+/// Position in the complete source tree's DFS order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SourceNodeIdx(pub usize);
+
 /// 思维导图 AST——MMF 源码的结构化投影（只读）。
 #[derive(Debug, Clone)]
 pub struct Tree {
     pub version: u32,
-    pub root: Node,
+    root: Node,
     pub global_props: HashMap<String, String>,
+    pub global_property_source: Option<GlobalPropertySource>,
+    node_index: Vec<NodePosition>,
+}
+
+#[derive(Debug, Clone)]
+struct NodePosition {
+    parent: Option<usize>,
+    sibling_slot: usize,
+    subtree_end: usize,
+}
+
+impl Tree {
+    pub(super) fn new(
+        root: Node,
+        global_props: HashMap<String, String>,
+        global_property_source: Option<GlobalPropertySource>,
+    ) -> Self {
+        let mut node_index = Vec::new();
+        index_subtree(&root, None, 0, &mut node_index);
+        Self { version: 1, root, global_props, global_property_source, node_index }
+    }
+
+    pub fn root(&self) -> &Node {
+        &self.root
+    }
+
+    pub(crate) fn node(&self, index: usize) -> Option<&Node> {
+        let position = self.node_index.get(index)?;
+        let Some(parent) = position.parent else {
+            return Some(self.root());
+        };
+        self.node(parent)?.children.get(position.sibling_slot)
+    }
+
+    pub(crate) fn nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + ExactSizeIterator {
+        self.nodes_in(0..self.node_index.len())
+    }
+
+    pub(crate) fn subtree_nodes(&self, index: usize) -> impl ExactSizeIterator<Item = &Node> {
+        self.nodes_in(self.subtree_indices(index).unwrap_or_default())
+    }
+
+    fn nodes_in(
+        &self,
+        indices: Range<usize>,
+    ) -> impl DoubleEndedIterator<Item = &Node> + ExactSizeIterator {
+        indices
+            .map(|index| self.node(index).expect("DFS index entries refer to immutable tree nodes"))
+    }
+
+    pub(crate) fn subtree_index(&self, range: &Range<usize>) -> Option<usize> {
+        self.nodes().position(|node| &node.subtree_source_range == range)
+    }
+
+    pub(crate) fn parent_index(&self, index: usize) -> Option<usize> {
+        self.node_index.get(index)?.parent
+    }
+
+    pub(crate) fn subtree_indices(&self, index: usize) -> Option<Range<usize>> {
+        Some(index..self.node_index.get(index)?.subtree_end)
+    }
+
+    pub(crate) fn child_indices(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
+        let descendants = self
+            .subtree_indices(index)
+            .map_or(index..index, |range| range.start.saturating_add(1)..range.end);
+        let first_child = (!descendants.is_empty()).then_some(descendants.start);
+        std::iter::successors(first_child, move |&child| {
+            let next = self.node_index[child].subtree_end;
+            (next < descendants.end).then_some(next)
+        })
+    }
+
+    pub(crate) fn sibling_slot(&self, index: usize) -> Option<usize> {
+        let position = self.node_index.get(index)?;
+        position.parent.map(|_| position.sibling_slot)
+    }
+}
+
+fn index_subtree(
+    node: &Node,
+    parent: Option<usize>,
+    sibling_slot: usize,
+    index: &mut Vec<NodePosition>,
+) {
+    let node_index = index.len();
+    index.push(NodePosition { parent, sibling_slot, subtree_end: node_index + 1 });
+    for (slot, child) in node.children.iter().enumerate() {
+        index_subtree(child, Some(node_index), slot, index);
+    }
+    index[node_index].subtree_end = index.len();
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MindmapFocus {
+    None,
+    NodeSelected { node_index: usize },
+    TitleEditing { node_index: usize, cursor_byte: usize },
+    TitleTextSelected { node_index: usize, range: Range<usize> },
 }
 
 #[derive(Debug, Clone)]

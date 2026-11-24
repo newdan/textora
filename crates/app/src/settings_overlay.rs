@@ -33,19 +33,20 @@ impl SettingsPersistenceState {
 
 impl App {
     pub(crate) fn settings_view_input(&self) -> ui::settings_view::SettingsViewInput {
+        let settings = self.editor_runtime.settings();
         ui::settings_view::SettingsViewInput {
-            theme_mode: self.settings.theme_mode,
-            font_family: self.settings.font_family.clone(),
-            font_size: self.settings.font_size,
-            line_height_ratio: self.settings.line_height_ratio,
-            word_wrap: self.settings.word_wrap,
-            markdown_first_line_indent: self.settings.markdown_first_line_indent,
-            text_spacing_mode: self.settings.text_spacing_mode,
-            show_line_numbers: self.settings.show_line_numbers,
-            tab_width: self.settings.tab_width,
-            view_mode: self.settings.view_mode,
-            show_status_bar: self.settings.show_status_bar,
-            persistence: self.settings_persistence.to_view(),
+            theme_mode: settings.theme_mode,
+            font_family: settings.font_family.clone(),
+            font_size: settings.font_size,
+            line_height_ratio: settings.line_height_ratio,
+            word_wrap: settings.word_wrap,
+            markdown_first_line_indent: settings.markdown_first_line_indent,
+            text_spacing_mode: settings.text_spacing_mode,
+            show_line_numbers: settings.show_line_numbers,
+            tab_width: settings.tab_width,
+            view_mode: settings.view_mode,
+            show_status_bar: settings.show_status_bar,
+            persistence: self.settings_ui.persistence().to_view(),
         }
     }
 
@@ -132,13 +133,10 @@ impl App {
 
     pub(crate) fn record_settings_persistence_result(&mut self, result: std::io::Result<()>) {
         let failed = result.is_err();
-        self.settings_persistence = match result {
-            Ok(()) => SettingsPersistenceState::Saved,
-            Err(error) => SettingsPersistenceState::SaveFailed { message: error.to_string() },
-        };
+        self.settings_ui.record_persistence(result);
         self.refresh_settings_overlay();
         if failed {
-            self.needs_redraw = true;
+            self.platform.schedule_redraw();
             if let Some(window) = self.editor_runtime.window() {
                 window.request_redraw();
             }
@@ -245,8 +243,11 @@ mod tests {
             "permission denied",
         )));
 
-        assert_eq!(app.settings.font_size, 20.0);
-        assert!(matches!(app.settings_persistence, SettingsPersistenceState::SaveFailed { .. }));
+        assert_eq!(app.editor_runtime.settings().font_size, 20.0);
+        assert!(matches!(
+            app.settings_ui.persistence(),
+            SettingsPersistenceState::SaveFailed { .. }
+        ));
         assert!(matches!(
             app.settings_view_input().persistence,
             ui::settings_view::SettingsPersistenceView::SaveFailed { .. }

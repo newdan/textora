@@ -4,7 +4,7 @@ use super::*;
 use std::ops::Range;
 
 pub(super) fn render_engine(
-    engine: &mut BlockViewEngine,
+    engine: &mut BlockViewLayout,
     source: &MarkdownSource<'_>,
     composing_range: Option<Range<usize>>,
     bounds: ui::Rect,
@@ -58,7 +58,7 @@ pub(super) fn render_engine(
 }
 
 fn draw_editor_cursor(
-    engine: &BlockViewEngine,
+    engine: &BlockViewLayout,
     commands: &mut DrawList,
     bounds: ui::Rect,
     theme: &Theme,
@@ -96,7 +96,7 @@ fn empty_heading_level(blocks: &[crate::builder::BlockNode], cursor: usize) -> O
 }
 
 fn empty_heading_placeholder_target(
-    engine: &BlockViewEngine,
+    engine: &BlockViewLayout,
 ) -> Option<(u8, &crate::layout::FlatLine)> {
     let context = engine.edit_ctx.as_ref()?;
     if context.preedit_text.as_ref().is_some_and(|text| !text.is_empty())
@@ -119,7 +119,7 @@ fn empty_heading_placeholder_target(
 }
 
 fn draw_empty_heading_placeholder(
-    engine: &BlockViewEngine,
+    engine: &BlockViewLayout,
     commands: &mut DrawList,
     bounds: ui::Rect,
     style: &MarkdownStyle,

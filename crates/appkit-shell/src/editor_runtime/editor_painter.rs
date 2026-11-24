@@ -20,14 +20,15 @@ fn search_overlay_colors(theme: &ui::Theme) -> ([f32; 4], [f32; 4]) {
     (active, inactive)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub enum PreeditAdvanceMeasure {
+    #[default]
     NonNegative,
     AtLeastOnePixel,
 }
 
 impl PreeditAdvanceMeasure {
-    pub fn measure(self, shaper: &mut shaping::Shaper, preedit_text: &str, font_size: f32) -> f32 {
+    fn measure(self, shaper: &mut shaping::Shaper, preedit_text: &str, font_size: f32) -> f32 {
         if preedit_text.is_empty() {
             return 0.0;
         }
@@ -80,108 +81,96 @@ pub enum EditorSurfacePaint {
     },
 }
 
-pub struct EditorPaintStyle<'a> {
-    pub theme: &'a ui::Theme,
-    pub settings: &'a ui::Settings,
-    pub metrics: &'a ui::UiMetrics,
+#[derive(Clone, Copy)]
+struct EditorPaintStyle<'a> {
+    theme: &'a ui::Theme,
+    settings: &'a ui::Settings,
+    metrics: &'a ui::UiMetrics,
 }
 
 #[derive(Clone, Copy)]
-pub struct TextSurfaceLayout {
-    pub screen: ui::Screen,
-    pub left_margin: f32,
-    pub top: f32,
-    pub gutter_width: f32,
+struct TextSurfaceLayout {
+    screen: ui::Screen,
+    left_margin: f32,
+    top: f32,
+    gutter_width: f32,
 }
 
-pub struct ShapedTextSurface {
-    pub vertices: Vec<GlyphVertex>,
-    pub tree_dirty: bool,
-    pub preedit_advance_px: f32,
+struct ShapedTextSurface {
+    vertices: Vec<GlyphVertex>,
+    tree_dirty: bool,
+    preedit_advance_px: f32,
 }
 
-pub enum PluginContentTarget<'a> {
+/// 本帧内容绘制和命中测试共用的窗口物理坐标。
+#[derive(Clone, Copy)]
+pub(super) enum EditorContentGeometry {
+    Source { text_left: f32 },
+    Plugin(ui::Rect),
+}
+
+/// 插件已经同步源文本与交互状态，使用产品布局提供的内容几何。
+#[derive(Clone, Copy)]
+pub enum PreparedPluginContent<'a> {
     Bounds(ui::Rect),
-    EditorRect(ui::Rect),
-    PreparedCanvas(&'a CanvasViewportSnapshot),
+    Canvas(&'a CanvasViewportSnapshot),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub enum SearchHighlightStyle {
     Theme,
+    #[default]
     TranslucentWhilePanelVisible,
 }
 
+#[derive(Clone, Copy, Default)]
+pub enum TextHighlightLayer {
+    BelowGlyphs,
+    #[default]
+    AboveGlyphs,
+}
+
+#[derive(Clone, Copy, Default)]
+pub enum TextCaretReveal {
+    SourceLine,
+    #[default]
+    VisualRow,
+}
+
+#[derive(Default)]
+pub struct EditorPaintOptions<'a> {
+    pub plugin_content: Option<PreparedPluginContent<'a>>,
+    /// 文本起点的窗口物理坐标，包含侧栏、目录和行号栏。
+    pub text_left_margin: Option<f32>,
+    pub gutter_background: bool,
+    pub search_highlights: SearchHighlightStyle,
+    pub text_highlight_layer: TextHighlightLayer,
+    /// 查找栏取得焦点时，编辑器保留压暗后的光标并停止绘制预编辑内容。
+    pub search_caret_opacity: Option<f32>,
+    pub preedit_advance: PreeditAdvanceMeasure,
+    /// 光标滚出视口时，预编辑文字可使用产品指定的窗口物理坐标。
+    pub preedit_fallback_origin: Option<(f32, f32)>,
+    pub caret_reveal: TextCaretReveal,
+    /// 启用源文本后台预排版，宽度与产品视口的换行宽度一致。
+    pub reshape_ahead_width: Option<f32>,
+}
+
 impl EditorRuntime {
-    /// 在产品完成源同步和窗口布局后绘制活动插件内容。
-    pub fn render_active_plugin_content(
-        &mut self,
-        source: PluginContentTarget<'_>,
-        style: &EditorPaintStyle<'_>,
-        shaper: Option<&mut shaping::Shaper>,
-    ) -> Option<ui::DrawList> {
-        let tab_id = self.active_tab_id()?;
-        let cursor_paint_enabled = self.active_cursor_paint_enabled();
-        let mut tab = self.tab_session_mut(tab_id)?;
-        Some(render_plugin_content(&mut tab, source, style, shaper, cursor_paint_enabled))
-    }
-
-    /// 按内容、选区、搜索的顺序将活动插件的绘制命令转换为顶点。
-    pub fn paint_active_plugin_layers(
-        &self,
-        content: ui::DrawList,
-        resources: &mut RenderResources,
-        screen: ui::Screen,
-        theme: &ui::Theme,
-        search_highlights: SearchHighlightStyle,
-        vertices: &mut Vec<GlyphVertex>,
-    ) {
-        let Some(tab) = self.active_tab_id().and_then(|tab_id| self.tab_session(tab_id)) else {
-            return;
-        };
-        paint_plugin_layers(&tab, content, resources, screen, theme, search_highlights, vertices);
-    }
-
-    /// 整形活动纯文本视口，并维护显示行和光标缓存。
-    pub fn shape_active_text_surface(
-        &mut self,
-        resources: &mut RenderResources,
-        layout: TextSurfaceLayout,
-        style: &EditorPaintStyle<'_>,
-        preedit_text: &str,
-        preedit_measure: PreeditAdvanceMeasure,
-    ) -> Option<ShapedTextSurface> {
-        let tab_id = self.active_tab_id()?;
-        let mut tab = self.tab_session_mut(tab_id)?;
-        shape_text_surface(&mut tab, resources, layout, style, preedit_text, preedit_measure)
-    }
-
-    pub fn active_text_selection_vertices(
-        &self,
-        layout: TextSurfaceLayout,
-        style: &EditorPaintStyle<'_>,
-    ) -> Vec<GlyphVertex> {
-        self.active_tab_id()
-            .and_then(|tab_id| self.tab_session(tab_id))
-            .map_or_else(Vec::new, |tab| text_selection_vertices(&tab, layout, style))
-    }
-
-    pub fn active_text_search_vertices(
-        &self,
-        layout: TextSurfaceLayout,
-        style: &EditorPaintStyle<'_>,
-        highlights: SearchHighlightStyle,
-    ) -> Vec<GlyphVertex> {
-        self.active_tab_id()
-            .and_then(|tab_id| self.tab_session(tab_id))
-            .map_or_else(Vec::new, |tab| text_search_vertices(&tab, layout, style, highlights))
-    }
-
     pub fn paint_active_editor(
         &mut self,
         frame: &mut EditorFrame,
         resources: &mut RenderResources,
         editor_rect: ui::Rect,
+    ) -> Result<EditorSurfacePaint, RenderError> {
+        self.paint_active_editor_with(frame, resources, editor_rect, EditorPaintOptions::default())
+    }
+
+    pub fn paint_active_editor_with(
+        &mut self,
+        frame: &mut EditorFrame,
+        resources: &mut RenderResources,
+        editor_rect: ui::Rect,
+        options: EditorPaintOptions<'_>,
     ) -> Result<EditorSurfacePaint, RenderError> {
         let Some(tab_id) = self.active_tab_id() else {
             return Ok(EditorSurfacePaint::Empty);
@@ -195,36 +184,66 @@ impl EditorRuntime {
         let theme = self.theme.clone();
         let dpi = self.render_session.scale_factor() as f32;
         let metrics = ui::settings::UiMetrics::from_settings(&settings, dpi);
-        let preedit = self.preedit();
+        let style = EditorPaintStyle { theme: &theme, settings: &settings, metrics: &metrics };
         let screen = editor_screen(resources, editor_rect);
-        let handles_own_rendering =
-            self.tab_session(tab_id).is_some_and(|tab| tab.handles_own_rendering());
-        let mut vertices = if handles_own_rendering {
-            self.plain_text_preedit_advance_px = 0.0;
+        self.plain_text_preedit_advance_px = 0.0;
+        let Some(tab) = self.tab_session(tab_id) else {
+            return Ok(EditorSurfacePaint::Empty);
+        };
+        let mut vertices = Vec::new();
+        let content_geometry = if tab.handles_own_rendering() {
+            let bounds = match options.plugin_content {
+                Some(PreparedPluginContent::Bounds(bounds)) => bounds,
+                Some(PreparedPluginContent::Canvas(snapshot)) => snapshot.viewport,
+                None => plugin_bounds(editor_rect, dpi, tab.is_canvas()),
+            };
             paint_plugin_editor(
                 self,
                 tab_id,
                 resources,
-                editor_rect,
+                bounds,
                 screen,
-                &EditorPaintStyle { theme: &theme, settings: &settings, metrics: &metrics },
-                preedit,
-            )
+                &style,
+                &options,
+                &mut vertices,
+            );
+            EditorContentGeometry::Plugin(bounds)
         } else {
-            paint_text_editor(
+            let layout = text_surface_layout(&tab, editor_rect, screen, style, &options);
+            paint_source_surface(
                 self,
                 tab_id,
                 resources,
                 editor_rect,
-                screen,
-                &theme,
-                &settings,
-                &metrics,
-            )
+                layout,
+                &style,
+                &options,
+                &mut vertices,
+            );
+            EditorContentGeometry::Source { text_left: layout.left_margin }
         };
         let vertex_count = vertices.len();
-        frame.paint_editor_vertices(editor_rect, vertices.drain(..))?;
+        frame.paint_editor_vertices(editor_rect, vertices)?;
+        self.painted_editor_content = Some((tab_id, content_geometry));
         Ok(EditorSurfacePaint::Document { vertex_count })
+    }
+    fn active_editor_content_geometry(&self) -> Option<EditorContentGeometry> {
+        let (painted_tab, geometry) = self.painted_editor_content?;
+        (Some(painted_tab) == self.active_tab_id()).then_some(geometry)
+    }
+
+    pub(super) fn plugin_input_bounds(&self, editor_rect: ui::Rect, is_canvas: bool) -> ui::Rect {
+        match self.active_editor_content_geometry() {
+            Some(EditorContentGeometry::Plugin(bounds)) => bounds,
+            _ => plugin_bounds(editor_rect, self.scale_factor() as f32, is_canvas),
+        }
+    }
+
+    pub(super) fn source_input_left(&self) -> Option<f32> {
+        match self.active_editor_content_geometry() {
+            Some(EditorContentGeometry::Source { text_left }) => Some(text_left),
+            _ => None,
+        }
     }
 }
 
@@ -232,52 +251,50 @@ fn paint_plugin_editor(
     runtime: &mut EditorRuntime,
     tab_id: appkit_core::tab_set::types::TabId,
     resources: &mut RenderResources,
-    editor_rect: ui::Rect,
+    bounds: ui::Rect,
     screen: ui::Screen,
     style: &EditorPaintStyle<'_>,
-    preedit: (String, Option<(usize, usize)>),
-) -> Vec<GlyphVertex> {
+    options: &EditorPaintOptions<'_>,
+    vertices: &mut Vec<GlyphVertex>,
+) {
     let (Some(text), Some(_)) = (resources.text.as_mut(), resources.gpu.as_ref()) else {
-        return Vec::new();
+        return;
     };
     let cursor_paint_enabled = runtime.active_cursor_paint_enabled();
+    let preedit = options.plugin_content.is_none().then(|| runtime.preedit());
     let Some(mut tab) = runtime.tab_session_mut(tab_id) else {
-        return Vec::new();
+        return;
     };
-    let preedit_active = !preedit.0.is_empty();
-    synchronize_plugin_document(&mut tab, preedit);
-    if preedit_active {
-        tab.invalidate_cursor_visibility();
+    if let Some(preedit) = preedit {
+        let preedit_active = !preedit.0.is_empty();
+        synchronize_plugin_document(&mut tab, preedit);
+        if preedit_active {
+            tab.invalidate_cursor_visibility();
+        }
     }
-    let content = render_plugin_content(
-        &mut tab,
-        PluginContentTarget::EditorRect(editor_rect),
-        style,
-        Some(&mut text.shaper),
-        cursor_paint_enabled,
-    );
+    configure_plugin_paint(&mut tab, style, cursor_paint_enabled);
+    let content = match options.plugin_content {
+        Some(prepared) => render_prepared_plugin(&mut tab, prepared, style, &mut text.shaper),
+        None => render_plugin_in_editor(&mut tab, bounds, style, &mut text.shaper),
+    };
     let tab = TabSession::new(tab.id, tab.document, tab.runtime);
-    let mut vertices = Vec::new();
     paint_plugin_layers(
         &tab,
         content,
         resources,
         screen,
         style.theme,
-        SearchHighlightStyle::TranslucentWhilePanelVisible,
-        &mut vertices,
+        options.search_highlights,
+        vertices,
     );
-    vertices
 }
 
-fn render_plugin_content(
+fn configure_plugin_paint(
     tab: &mut TabSessionMut<'_>,
-    source: PluginContentTarget<'_>,
     style: &EditorPaintStyle<'_>,
-    shaper: Option<&mut shaping::Shaper>,
     cursor_paint_enabled: bool,
-) -> ui::DrawList {
-    let EditorPaintStyle { theme, settings, metrics } = style;
+) {
+    let EditorPaintStyle { settings, metrics, .. } = style;
     let dpi = metrics.dpi;
     tab.set_view_render_settings(ui::plugin::ViewRenderSettings {
         font_family: settings.font_family.clone(),
@@ -290,28 +307,40 @@ fn render_plugin_content(
     let cursor_visible = cursor_paint_enabled
         && super::cursor_blink_phase(tab.cursor_blink_instant(), Instant::now()).visible;
     tab.set_cursor_visible(cursor_visible);
+}
 
-    let Some(shaper) = shaper else {
-        return ui::DrawList::new();
-    };
-    match source {
-        PluginContentTarget::Bounds(bounds) => tab.render_plugin(bounds, theme, shaper, dpi),
-        PluginContentTarget::EditorRect(editor_rect) => {
-            let is_canvas = tab.is_canvas();
-            let bounds = plugin_bounds(editor_rect, dpi, is_canvas);
-            if !is_canvas {
-                return render_plugin_with_visible_cursor(tab, bounds, theme, shaper, dpi);
-            }
-            tab.prepare_canvas_plugin(theme, shaper, dpi)
-                .and_then(|metrics| tab.prepare_canvas_viewport(metrics, bounds, dpi))
-                .map_or_else(ui::DrawList::new, |snapshot| {
-                    tab.render_canvas_plugin(&snapshot, theme, shaper, dpi)
-                })
+fn render_prepared_plugin(
+    tab: &mut TabSessionMut<'_>,
+    prepared: PreparedPluginContent<'_>,
+    style: &EditorPaintStyle<'_>,
+    shaper: &mut shaping::Shaper,
+) -> ui::DrawList {
+    let dpi = style.metrics.dpi;
+    match prepared {
+        PreparedPluginContent::Bounds(bounds) => {
+            tab.render_plugin(bounds, style.theme, shaper, dpi)
         }
-        PluginContentTarget::PreparedCanvas(snapshot) => {
-            tab.render_canvas_plugin(snapshot, theme, shaper, dpi)
+        PreparedPluginContent::Canvas(snapshot) => {
+            tab.render_canvas_plugin(snapshot, style.theme, shaper, dpi)
         }
     }
+}
+
+fn render_plugin_in_editor(
+    tab: &mut TabSessionMut<'_>,
+    bounds: ui::Rect,
+    style: &EditorPaintStyle<'_>,
+    shaper: &mut shaping::Shaper,
+) -> ui::DrawList {
+    let dpi = style.metrics.dpi;
+    if !tab.is_canvas() {
+        return render_plugin_with_visible_cursor(tab, bounds, style.theme, shaper, dpi);
+    }
+    tab.prepare_canvas_plugin(style.theme, shaper, dpi)
+        .and_then(|metrics| tab.prepare_canvas_viewport(metrics, bounds, dpi))
+        .map_or_else(ui::DrawList::new, |snapshot| {
+            tab.render_canvas_plugin(&snapshot, style.theme, shaper, dpi)
+        })
 }
 
 fn paint_plugin_layers(
@@ -443,71 +472,155 @@ fn synchronize_plugin_document(
     tab.set_preedit(preedit.0, preedit.1);
 }
 
+fn text_surface_layout(
+    tab: &TabSession<'_>,
+    editor_rect: ui::Rect,
+    screen: ui::Screen,
+    style: EditorPaintStyle<'_>,
+    options: &EditorPaintOptions<'_>,
+) -> TextSurfaceLayout {
+    let gutter_width = style.settings.gutter_width(tab.document.line_count()) * style.metrics.dpi;
+    let left_margin = options
+        .text_left_margin
+        .unwrap_or_else(|| editor_rect.x + style.metrics.content_left_margin.max(gutter_width));
+    TextSurfaceLayout { screen, left_margin, top: editor_rect.y, gutter_width }
+}
+
+fn paint_source_surface(
+    runtime: &mut EditorRuntime,
+    tab_id: appkit_core::tab_set::types::TabId,
+    resources: &mut RenderResources,
+    editor_rect: ui::Rect,
+    layout: TextSurfaceLayout,
+    style: &EditorPaintStyle<'_>,
+    options: &EditorPaintOptions<'_>,
+    vertices: &mut Vec<GlyphVertex>,
+) {
+    if options.gutter_background && layout.gutter_width > 0.0 {
+        let mut gutter = ui::DrawList::new();
+        gutter.fill(
+            ui::Rect::new(
+                layout.left_margin - layout.gutter_width,
+                layout.top,
+                layout.gutter_width,
+                editor_rect.h,
+            ),
+            style.theme.editor.gutter_bg,
+        );
+        crate::paint_backend::drain_into(gutter, layout.screen, None, None, vertices);
+    }
+    if options.reshape_ahead_width.is_some() && runtime.apply_active_reshape_results() {
+        runtime.request_redraw();
+    }
+
+    paint_text_editor(runtime, tab_id, resources, editor_rect, layout, style, options, vertices);
+    if matches!(options.caret_reveal, TextCaretReveal::SourceLine)
+        && runtime.reveal_active_caret_after_shape()
+    {
+        runtime.request_redraw();
+    }
+    if let Some(width) = options.reshape_ahead_width {
+        runtime.submit_active_reshape_ahead(width);
+    }
+}
+
 fn paint_text_editor(
     runtime: &mut EditorRuntime,
     tab_id: appkit_core::tab_set::types::TabId,
     resources: &mut RenderResources,
     editor_rect: ui::Rect,
-    screen: ui::Screen,
-    theme: &ui::Theme,
-    settings: &ui::settings::Settings,
-    metrics: &ui::settings::UiMetrics,
-) -> Vec<GlyphVertex> {
-    runtime.plain_text_preedit_advance_px = 0.0;
+    layout: TextSurfaceLayout,
+    style: &EditorPaintStyle<'_>,
+    options: &EditorPaintOptions<'_>,
+    vertices: &mut Vec<GlyphVertex>,
+) {
     let (preedit_text, _) = runtime.preedit();
-    let (visible_rows, viewport_height) =
-        editor_viewport_dimensions(editor_rect.h, metrics.line_height);
-    {
-        let Some(mut tab) = runtime.tab_session_mut(tab_id) else {
-            return Vec::new();
-        };
-        tab.resize_and_refresh_presentation(visible_rows, viewport_height, metrics.line_height);
-    }
-
+    let preedit_text = if options.search_caret_opacity.is_some() { "" } else { &preedit_text };
+    let line_height = style.metrics.line_height;
+    let (visible_rows, viewport_height) = editor_viewport_dimensions(editor_rect.h, line_height);
     let Some(mut tab) = runtime.tab_session_mut(tab_id) else {
-        return Vec::new();
+        return;
     };
-    let gutter_width = settings.gutter_width(tab.document.line_count()) * metrics.dpi;
-    let left_margin = editor_rect.x + metrics.content_left_margin.max(gutter_width);
-    let layout = TextSurfaceLayout { screen, left_margin, top: editor_rect.y, gutter_width };
-    let style = EditorPaintStyle { theme, settings, metrics };
-    let Some(ShapedTextSurface { mut vertices, tree_dirty, preedit_advance_px }) =
-        shape_text_surface(
-            &mut tab,
-            resources,
-            layout,
-            &style,
-            &preedit_text,
-            PreeditAdvanceMeasure::NonNegative,
-        )
-    else {
-        return Vec::new();
+    tab.resize_and_refresh_presentation(visible_rows, viewport_height, line_height);
+    let Some(shaped) = shape_text_surface(
+        &mut tab,
+        resources,
+        layout,
+        style,
+        preedit_text,
+        options.preedit_advance,
+    ) else {
+        return;
     };
-    if tree_dirty {
-        tab.derive_scroll_top(metrics.line_height);
+    if shaped.tree_dirty {
+        tab.derive_scroll_top(line_height);
     }
     let tab_view = TabSession::new(tab.id, tab.document, tab.runtime);
-    vertices.extend(text_selection_vertices(&tab_view, layout, &style));
-    vertices.extend(text_search_vertices(
+    paint_text_layers(&tab_view, layout, style, options, shaped.vertices, vertices);
+    paint_text_caret(
         &tab_view,
+        resources,
         layout,
-        &style,
-        SearchHighlightStyle::TranslucentWhilePanelVisible,
-    ));
-    let preedit_origin = plain_text_preedit_origin(
-        &preedit_text,
-        tab_view.cursor_visual_line(),
-        tab_view.cursor_pixel_x(),
-        editor_rect.y,
-        metrics.line_height,
-        tab_view.sub_line_pixel_offset(metrics.line_height),
+        style,
+        options,
+        preedit_text,
+        shaped.preedit_advance_px,
+        vertices,
     );
+    let cursor_scroll_changed = matches!(options.caret_reveal, TextCaretReveal::VisualRow)
+        && tab.ensure_cursor_visual_row_visible(line_height);
+    runtime.plain_text_preedit_advance_px = shaped.preedit_advance_px;
+    if cursor_scroll_changed || (shaped.tree_dirty && options.reshape_ahead_width.is_some()) {
+        runtime.request_redraw();
+    }
+}
+
+fn paint_text_layers(
+    tab: &TabSession<'_>,
+    layout: TextSurfaceLayout,
+    style: &EditorPaintStyle<'_>,
+    options: &EditorPaintOptions<'_>,
+    mut glyphs: Vec<GlyphVertex>,
+    vertices: &mut Vec<GlyphVertex>,
+) {
+    if matches!(options.text_highlight_layer, TextHighlightLayer::AboveGlyphs) {
+        vertices.append(&mut glyphs);
+    }
+    vertices.extend(text_selection_vertices(tab, layout, style));
+    vertices.extend(text_search_vertices(tab, layout, style, options.search_highlights));
+    vertices.append(&mut glyphs);
+}
+
+fn paint_text_caret(
+    tab: &TabSession<'_>,
+    resources: &mut RenderResources,
+    layout: TextSurfaceLayout,
+    style: &EditorPaintStyle<'_>,
+    options: &EditorPaintOptions<'_>,
+    preedit_text: &str,
+    preedit_advance_px: f32,
+    vertices: &mut Vec<GlyphVertex>,
+) {
+    let EditorPaintStyle { metrics, theme, .. } = style;
+    let screen = layout.screen;
+    let cursor_line = tab.cursor_visual_line();
+    let cursor_x = tab.cursor_pixel_x();
+    let sub_line_offset = tab.sub_line_pixel_offset(metrics.line_height);
+    let preedit_origin = plain_text_preedit_origin(
+        preedit_text,
+        cursor_line,
+        cursor_x,
+        layout.top,
+        metrics.line_height,
+        sub_line_offset,
+    )
+    .or_else(|| options.preedit_fallback_origin.filter(|_| !preedit_text.is_empty()));
     if let Some((preedit_x, preedit_y)) = preedit_origin
         && let (Some(text), Some(gpu)) = (resources.text.as_mut(), resources.gpu.as_ref())
     {
         vertices.extend(crate::render_pipeline::preedit_text_vertices(
             metrics,
-            &preedit_text,
+            preedit_text,
             preedit_x,
             preedit_y,
             text,
@@ -519,22 +632,16 @@ fn paint_text_editor(
     }
     vertices.extend(ui::decorations::cursor_vertices(
         theme,
-        tab_view.cursor_visual_line(),
-        editor_rect.y,
-        tab_view.cursor_pixel_x() + preedit_advance_px,
-        tab_view.cursor_blink_instant(),
+        cursor_line,
+        layout.top,
+        cursor_x + preedit_advance_px,
+        tab.cursor_blink_instant(),
         metrics,
         screen.w,
         screen.h,
-        tab_view.sub_line_pixel_offset(metrics.line_height),
-        None,
+        sub_line_offset,
+        options.search_caret_opacity,
     ));
-    let cursor_scroll_changed = tab.ensure_cursor_visual_row_visible(metrics.line_height);
-    runtime.plain_text_preedit_advance_px = preedit_advance_px;
-    if cursor_scroll_changed {
-        runtime.request_redraw();
-    }
-    vertices
 }
 
 fn shape_text_surface(
@@ -564,25 +671,26 @@ fn shape_text_surface(
         preedit_advance_px,
         preedit_cursor_col: tab.document.cursor_column(),
     };
-    let mut tree_dirty = false;
-    let vertices = tab.with_presentation(|document, presentation| {
+    let shaped = tab.with_presentation(|document, presentation| {
         crate::render_pipeline::shape_visible_lines(
-            metrics,
-            settings.text_spacing_mode,
-            settings.version,
-            &context,
+            crate::render_pipeline::SourceLayoutOptions {
+                metrics,
+                text_spacing_mode: settings.text_spacing_mode,
+                render_context: &context,
+                word_wrap: settings.word_wrap,
+            },
             document,
             presentation,
             text,
             gpu,
-            &mut resources.frame_cache.cluster_pool,
-            &mut resources.frame_cache.first_line,
-            &mut resources.frame_cache.last_line,
-            &mut tree_dirty,
-            settings.word_wrap,
+            &mut resources.frame_cache,
         )
     });
-    Some(ShapedTextSurface { vertices, tree_dirty, preedit_advance_px })
+    Some(ShapedTextSurface {
+        vertices: shaped.vertices,
+        tree_dirty: shaped.tree_dirty,
+        preedit_advance_px,
+    })
 }
 
 fn text_selection_vertices(

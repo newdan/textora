@@ -1,57 +1,7 @@
-//! Visual grapheme map for WYSIWYG editor coordinates.
-//!
-//! Converts char-indexed source-byte maps (produced by [`super::edit::materialize_line`])
-//! into grapheme-cluster-indexed maps so that cursor, hit-test, and selection
-//! never split a UAX#29 grapheme cluster (combining marks, ZWJ emoji, etc.).
+//! Grapheme boundaries shared by source and visual coordinates.
 
 pub(crate) use textora_core::unicode::grapheme_byte_boundaries;
 use textora_core::unicode::grapheme_start_indices;
-
-/// Maps visual grapheme indices to absolute source byte offsets.
-///
-/// Index `g` holds the source byte at the *start* of the `g`-th grapheme
-/// cluster.  One-past-end sentinel is included so that `.len()` returns the
-/// grapheme count and `source_byte_at(grapheme_count)` returns the total byte
-/// length.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VisualGraphemeMap {
-    source_bytes_by_grapheme: Vec<usize>,
-}
-
-impl VisualGraphemeMap {
-    /// Number of grapheme clusters (excluding the one-past-end sentinel).
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.source_bytes_by_grapheme.len().saturating_sub(1)
-    }
-
-    /// Source byte at the start of grapheme `grapheme_index`.
-    #[cfg(test)]
-    pub(crate) fn source_byte_at(&self, grapheme_index: usize) -> Option<usize> {
-        self.source_bytes_by_grapheme.get(grapheme_index).copied()
-    }
-
-    /// Grapheme index whose byte range contains `source_byte`.
-    ///
-    /// Returns `None` only when the map is empty.  Bytes before the first
-    /// grapheme snap to 0; bytes at or past the end snap to `len()-1`.
-    #[cfg(test)]
-    pub(crate) fn byte_to_grapheme(&self, source_byte: usize) -> Option<usize> {
-        if self.source_bytes_by_grapheme.len() <= 1 {
-            return None;
-        }
-        // Find the largest grapheme boundary ≤ source_byte.
-        match self.source_bytes_by_grapheme.binary_search(&source_byte) {
-            Ok(i) => Some(i.min(self.len().saturating_sub(1))),
-            Err(i) => Some(i.saturating_sub(1).min(self.len().saturating_sub(1))),
-        }
-    }
-
-    /// Raw slice including the one-past-end sentinel.
-    pub(crate) fn as_slice(&self) -> &[usize] {
-        &self.source_bytes_by_grapheme
-    }
-}
 
 /// Count grapheme clusters in `text` up to (but not including) `target_byte`.
 ///
@@ -78,27 +28,6 @@ pub(crate) fn grapheme_slices(text: &str) -> impl Iterator<Item = &str> {
         })
 }
 
-/// Build a [`VisualGraphemeMap`] from a visual text string and a parallel
-/// char-indexed source-byte array (as produced by materialized-line source
-/// maps).
-///
-/// `source_bytes_by_char` must have `text.chars().count() + 1` entries
-/// (the last entry is the one-past-end sentinel).
-pub(crate) fn build_visual_grapheme_map(
-    text: &str,
-    source_bytes_by_char: &[usize],
-) -> VisualGraphemeMap {
-    let total_bytes = source_bytes_by_char.last().copied().unwrap_or(text.len());
-    let source_bytes_by_grapheme = grapheme_start_indices(text)
-        .map(|(char_index, byte_offset)| {
-            source_bytes_by_char.get(char_index).copied().unwrap_or(byte_offset)
-        })
-        .chain(std::iter::once(total_bytes))
-        .collect();
-
-    VisualGraphemeMap { source_bytes_by_grapheme }
-}
-
 /// Count grapheme clusters in `text` using UAX#29 extended grapheme cluster rules.
 pub(crate) fn grapheme_count(text: &str) -> usize {
     grapheme_start_indices(text).count()
@@ -115,11 +44,12 @@ pub(crate) fn byte_at_grapheme_index(text: &str, target_grapheme: usize) -> usiz
 mod tests {
     use super::*;
 
-    /// Build a source_bytes_by_char array from a string for testing.
-    fn char_sentinel_map(text: &str) -> Vec<usize> {
-        let mut v: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
-        v.push(text.len());
-        v
+    fn direct_source_boundaries(text: &str) -> Vec<usize> {
+        crate::projection::ProjectedText::direct(text, 0)
+            .boundaries
+            .iter()
+            .map(|anchor| anchor.byte.get())
+            .collect()
     }
 
     #[test]
@@ -144,7 +74,7 @@ mod tests {
                 assert_eq!(grapheme_index_at_byte(text, byte), index, "text: {text:?}");
             }
             assert_eq!(
-                build_visual_grapheme_map(text, &char_sentinel_map(text)).as_slice(),
+                direct_source_boundaries(text).as_slice(),
                 expected,
                 "identity source map for text: {text:?}"
             );
@@ -156,25 +86,13 @@ mod tests {
     #[test]
     fn grapheme_map_ascii_one_grapheme_per_char() {
         let text = "abc";
-        let source_by_char = char_sentinel_map(text);
-        let map = build_visual_grapheme_map(text, &source_by_char);
+        let boundaries = direct_source_boundaries(text);
 
-        assert_eq!(map.len(), 3);
-        assert_eq!(map.source_byte_at(0), Some(0));
-        assert_eq!(map.source_byte_at(1), Some(1));
-        assert_eq!(map.source_byte_at(2), Some(2));
-        assert_eq!(map.source_byte_at(3), Some(3)); // sentinel
-    }
-
-    #[test]
-    fn grapheme_map_byte_to_grapheme_ascii() {
-        let text = "abc";
-        let source_by_char = char_sentinel_map(text);
-        let map = build_visual_grapheme_map(text, &source_by_char);
-
-        assert_eq!(map.byte_to_grapheme(0), Some(0));
-        assert_eq!(map.byte_to_grapheme(1), Some(1));
-        assert_eq!(map.byte_to_grapheme(2), Some(2));
+        assert_eq!(boundaries.len() - 1, 3);
+        assert_eq!(boundaries.first().copied(), Some(0));
+        assert_eq!(boundaries.get(1).copied(), Some(1));
+        assert_eq!(boundaries.get(2).copied(), Some(2));
+        assert_eq!(boundaries.get(3).copied(), Some(3)); // sentinel
     }
 
     // ── NFD combining mark ─────────────────────────────────────────────
@@ -182,18 +100,17 @@ mod tests {
     #[test]
     fn grapheme_map_treats_nfd_combining_as_one_position() {
         let text = "xe\u{0301}y";
-        let source_by_char = char_sentinel_map(text);
-        let map = build_visual_grapheme_map(text, &source_by_char);
+        let boundaries = direct_source_boundaries(text);
 
         // "x" (1 char), "é" (2 chars: e + combining acute), "y" (1 char) = 3 graphemes
         // combining acute \u{0301} is 2 bytes (0xCC 0x81), so 'y' starts at byte 4
-        assert_eq!(map.len(), 3);
-        assert_eq!(map.source_byte_at(0), Some(0)); // 'x'
-        assert_eq!(map.source_byte_at(1), Some(1)); // 'e' + combining
-        assert_eq!(map.source_byte_at(2), Some(4)); // 'y'
-        assert_eq!(map.source_byte_at(3), Some(5)); // sentinel
-        assert_eq!(map.byte_to_grapheme(2), Some(1)); // combining mark → same grapheme as 'e'
-        assert_eq!(map.byte_to_grapheme(3), Some(1)); // byte inside combining mark
+        assert_eq!(boundaries.len() - 1, 3);
+        assert_eq!(boundaries.first().copied(), Some(0)); // 'x'
+        assert_eq!(boundaries.get(1).copied(), Some(1)); // 'e' + combining
+        assert_eq!(boundaries.get(2).copied(), Some(4)); // 'y'
+        assert_eq!(boundaries.get(3).copied(), Some(5)); // sentinel
+        assert_eq!(grapheme_index_at_byte(text, 2), 1); // combining mark → same grapheme as 'e'
+        assert_eq!(grapheme_index_at_byte(text, 3), 1); // byte inside combining mark
     }
 
     // ── ZWJ emoji ──────────────────────────────────────────────────────
@@ -202,29 +119,13 @@ mod tests {
     fn grapheme_map_treats_zwj_emoji_as_one_position() {
         let emoji = "👨\u{200D}👩\u{200D}👧";
         let text = format!("x{emoji}y");
-        let source_by_char = char_sentinel_map(&text);
-        let map = build_visual_grapheme_map(&text, &source_by_char);
+        let boundaries = direct_source_boundaries(&text);
 
         // "x" (1), ZWJ emoji (1), "y" (1) = 3 graphemes
-        assert_eq!(map.len(), 3);
-        assert_eq!(map.source_byte_at(0), Some(0)); // 'x'
-        assert_eq!(map.source_byte_at(1), Some(1)); // ZWJ emoji start
-        assert_eq!(map.source_byte_at(2), Some(1 + emoji.len())); // 'y'
-    }
-
-    #[test]
-    fn grapheme_map_byte_to_grapheme_inside_zwj_returns_cluster_start() {
-        let emoji = "👨\u{200D}👩\u{200D}👧";
-        let text = format!("x{emoji}y");
-        let source_by_char = char_sentinel_map(&text);
-        let map = build_visual_grapheme_map(&text, &source_by_char);
-
-        // Any byte within the emoji cluster should belong to grapheme 1.
-        let emoji_start = 1;
-        let emoji_end = emoji_start + emoji.len();
-        assert_eq!(map.byte_to_grapheme(emoji_start), Some(1));
-        assert_eq!(map.byte_to_grapheme(emoji_start + 3), Some(1));
-        assert_eq!(map.byte_to_grapheme(emoji_end - 1), Some(1));
+        assert_eq!(boundaries.len() - 1, 3);
+        assert_eq!(boundaries.first().copied(), Some(0)); // 'x'
+        assert_eq!(boundaries.get(1).copied(), Some(1)); // ZWJ emoji start
+        assert_eq!(boundaries.get(2).copied(), Some(1 + emoji.len())); // 'y'
     }
 
     // ── Variation selector ─────────────────────────────────────────────
@@ -232,14 +133,16 @@ mod tests {
     #[test]
     fn grapheme_map_treats_variation_selector_as_one_position() {
         let text = format!("x{}\u{FE0F}y", '\u{2708}'); // ✈ + VS16
-        let source_by_char = char_sentinel_map(&text);
-        let map = build_visual_grapheme_map(&text, &source_by_char);
+        let boundaries = direct_source_boundaries(&text);
 
         // "x", "✈️" (2 chars: airplane + VS16), "y" = 3 graphemes
-        assert_eq!(map.len(), 3);
-        assert_eq!(map.source_byte_at(0), Some(0));
-        assert_eq!(map.source_byte_at(1), Some(1));
-        assert_eq!(map.source_byte_at(2), Some(1 + '\u{2708}'.len_utf8() + '\u{FE0F}'.len_utf8()));
+        assert_eq!(boundaries.len() - 1, 3);
+        assert_eq!(boundaries.first().copied(), Some(0));
+        assert_eq!(boundaries.get(1).copied(), Some(1));
+        assert_eq!(
+            boundaries.get(2).copied(),
+            Some(1 + '\u{2708}'.len_utf8() + '\u{FE0F}'.len_utf8())
+        );
     }
 
     // ── CJK (should be 1:1 char→grapheme still) ────────────────────────
@@ -247,14 +150,13 @@ mod tests {
     #[test]
     fn grapheme_map_cjk_each_char_is_own_grapheme() {
         let text = "你好世界";
-        let source_by_char = char_sentinel_map(text);
-        let map = build_visual_grapheme_map(text, &source_by_char);
+        let boundaries = direct_source_boundaries(text);
 
-        assert_eq!(map.len(), 4);
-        assert_eq!(map.source_byte_at(0), Some(0));
-        assert_eq!(map.source_byte_at(1), Some(3));
-        assert_eq!(map.source_byte_at(2), Some(6));
-        assert_eq!(map.source_byte_at(3), Some(9));
+        assert_eq!(boundaries.len() - 1, 4);
+        assert_eq!(boundaries.first().copied(), Some(0));
+        assert_eq!(boundaries.get(1).copied(), Some(3));
+        assert_eq!(boundaries.get(2).copied(), Some(6));
+        assert_eq!(boundaries.get(3).copied(), Some(9));
     }
 
     #[test]
@@ -289,11 +191,10 @@ mod tests {
     #[test]
     fn grapheme_map_empty_string() {
         let text = "";
-        let source_by_char = char_sentinel_map(text);
-        let map = build_visual_grapheme_map(text, &source_by_char);
+        let boundaries = direct_source_boundaries(text);
 
-        assert_eq!(map.len(), 0);
-        assert_eq!(map.as_slice(), &[0]);
+        assert_eq!(boundaries.len() - 1, 0);
+        assert_eq!(boundaries.as_slice(), &[0]);
     }
 
     // ── grapheme_count ───────────────────────────────────────────────────
@@ -367,13 +268,12 @@ mod tests {
     fn segment_source_map_has_grapheme_count_plus_one() {
         // Simulate a line "abcde" split at wrap point byte 3 → ["abc", "de"]
         let text = "abcde";
-        let source_by_char = char_sentinel_map(text);
-        let map = build_visual_grapheme_map(text, &source_by_char);
+        let boundaries = direct_source_boundaries(text);
 
         // Segment "abc": byte range [0, 3)
         let g_start = grapheme_index_at_byte(text, 0); // byte 0 → grapheme 0
         let g_end = grapheme_index_at_byte(text, 3); // byte 3 → grapheme 3
-        let seg = &map.as_slice()[g_start..=g_end];
+        let seg = &boundaries.as_slice()[g_start..=g_end];
         // "abc" has 3 graphemes, map should have 3 + 1 = 4 entries
         assert_eq!(seg.len(), 4, "segment slice should have grapheme_count + 1 entries");
         assert_eq!(seg[0], 0); // 'a'
@@ -387,15 +287,14 @@ mod tests {
     #[test]
     fn sentinel_equals_next_segment_first_byte() {
         let text = "abcdef";
-        let source_by_char = char_sentinel_map(text);
-        let map = build_visual_grapheme_map(text, &source_by_char);
+        let boundaries = direct_source_boundaries(text);
 
         // Split at byte 3 → seg0 = "abc" [0,3), seg1 = "def" [3,6)
         let g0_end = grapheme_index_at_byte(text, 3); // byte 3 → grapheme 3
-        let seg0_last = map.as_slice()[g0_end]; // sentinel of seg0
+        let seg0_last = boundaries.as_slice()[g0_end]; // sentinel of seg0
         // Seg1 starts at the same grapheme index as seg0's sentinel position.
         let seg1_start = grapheme_index_at_byte(text, 3); // byte 3 → grapheme 3
-        let seg1_first = map.source_byte_at(seg1_start).unwrap();
+        let seg1_first = boundaries.get(seg1_start).copied().unwrap();
         assert_eq!(seg1_first, 3); // first grapheme of "def" is at byte 3
         // The sentinel of seg0 equals the first entry of seg1.
         assert_eq!(seg0_last, seg1_first);
@@ -452,13 +351,12 @@ mod tests {
     #[test]
     fn segment_source_map_cjk_has_correct_sentinel() {
         let text = "hello你好world";
-        let source_by_char = char_sentinel_map(text);
-        let map = build_visual_grapheme_map(text, &source_by_char);
+        let boundaries = direct_source_boundaries(text);
 
         // Segment "你好": byte range [5, 11)
         let g_start = grapheme_index_at_byte(text, 5); // byte 5 → grapheme 5 (你)
         let g_end = grapheme_index_at_byte(text, 11); // byte 11 → grapheme 7 (w)
-        let seg = &map.as_slice()[g_start..=g_end];
+        let seg = &boundaries.as_slice()[g_start..=g_end];
 
         // 2 graphemes (你, 好) + 1 sentinel = 3 entries
         assert_eq!(seg.len(), 3);
@@ -472,13 +370,12 @@ mod tests {
     #[test]
     fn segment_sentinel_at_end_of_full_text() {
         let text = "abc";
-        let source_by_char = char_sentinel_map(text);
-        let map = build_visual_grapheme_map(text, &source_by_char);
+        let boundaries = direct_source_boundaries(text);
 
         // Segment covering the whole text: byte range [0, 3)
         let g_start = grapheme_index_at_byte(text, 0);
         let g_end = grapheme_index_at_byte(text, 3);
-        let seg = &map.as_slice()[g_start..=g_end];
+        let seg = &boundaries.as_slice()[g_start..=g_end];
 
         // 3 graphemes + 1 sentinel = 4 entries
         assert_eq!(seg.len(), 4);

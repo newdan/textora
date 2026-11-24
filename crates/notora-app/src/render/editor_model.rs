@@ -8,6 +8,7 @@ use notora_core::{DocumentIdentity, NavigationScope};
 use crate::NotoraState;
 use crate::action::{MetadataMutation, NotoraAction};
 use crate::editor_pane::{EditorPaneInput, EditorPaneMode};
+use crate::state::ActiveEditorMetadata;
 
 use super::DOCUMENT_SEARCH_COMMAND_KEY;
 use super::card_model::{RenderCard, format_created_time, format_modified_time};
@@ -58,21 +59,6 @@ pub(super) fn editor_pane_input(state: &NotoraState, cards: &[RenderCard]) -> Ed
             EditorPaneMode::WorkspaceNote => "无标题".to_owned(),
             EditorPaneMode::ExternalFile | EditorPaneMode::Empty => "未命名".to_owned(),
         });
-    let starred = selected_card.is_some_and(|card| card.tag_summary.starts_with('★'));
-    let tags = selected_card
-        .map(|card| {
-            card.tag_summary
-                .split_whitespace()
-                .filter_map(|tag| tag.strip_prefix('#'))
-                .enumerate()
-                .map(|(index, label)| ui::tag_editor::TagChipInput {
-                    chip_key: format!("tag-{index}"),
-                    label: label.to_owned(),
-                    removable: true,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     let location_directories = if mode == EditorPaneMode::WorkspaceNote {
         let mut directories = vec![ui::location_picker::LocationDirectoryInput {
             row_key: EDITOR_ROOT_DIRECTORY_ROW_KEY.to_owned(),
@@ -118,7 +104,7 @@ pub(super) fn editor_pane_input(state: &NotoraState, cards: &[RenderCard]) -> Ed
                 EditorPaneMode::WorkspaceNote => "已保存".to_owned(),
                 EditorPaneMode::Empty => String::new(),
             },
-            starred,
+            starred: false,
             star_enabled: mode == EditorPaneMode::WorkspaceNote,
             encryption: match mode {
                 EditorPaneMode::ExternalFile => ui::editor_header::EncryptionStatusInput::Hidden,
@@ -142,15 +128,13 @@ pub(super) fn editor_pane_input(state: &NotoraState, cards: &[RenderCard]) -> Ed
             ..ui::location_picker::LocationPickerInput::default()
         },
         tags: ui::tag_editor::TagEditorInput {
-            chips: tags,
             enabled: mode == EditorPaneMode::WorkspaceNote,
             ..ui::tag_editor::TagEditorInput::default()
         },
         toolbar: editor_toolbar_input(mode),
     };
-    if let Some(snapshot) = state.library.active_editor_metadata.as_ref()
-        && snapshot.identity == identity
-    {
+    if let Some(snapshot) = metadata_for_selection(state, identity) {
+        input.header.starred = snapshot.metadata.starred;
         input.header.created_at_text = format_created_time(snapshot.metadata.created_at);
         input.header.modified_at_text =
             format_modified_time(snapshot.metadata.modified_at, SystemTime::now());
@@ -189,6 +173,16 @@ pub(super) fn editor_pane_input(state: &NotoraState, cards: &[RenderCard]) -> Ed
     input
 }
 
+pub(super) fn metadata_for_selection(
+    state: &NotoraState,
+    identity: DocumentIdentity,
+) -> Option<&ActiveEditorMetadata> {
+    state.library.active_editor_metadata.as_ref().filter(|snapshot| {
+        snapshot.identity == identity
+            && snapshot.selection_generation == state.library.selected_document_generation
+    })
+}
+
 pub(super) fn editor_action_maps(
     state: &NotoraState,
 ) -> (HashMap<String, NotoraAction>, HashMap<String, NotoraAction>) {
@@ -212,30 +206,24 @@ pub(super) fn editor_action_maps(
             NotoraAction::MoveRequested { note_id, target_directory: directory.clone() },
         );
     }
-    let mut tag_actions: HashMap<String, NotoraAction> = state
-        .library
-        .active_editor_metadata
-        .as_ref()
-        .filter(|snapshot| {
-            snapshot.identity == DocumentIdentity::Note(note_id)
-                && snapshot.selection_generation == state.library.selected_document_generation
-        })
-        .map(|snapshot| {
-            snapshot
-                .tags
-                .iter()
-                .map(|tag| {
-                    (
-                        tag.tag_id.to_string(),
-                        NotoraAction::MetadataMutationRequested(MetadataMutation::DetachTag {
-                            note_id,
-                            tag_id: tag.tag_id,
-                        }),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut tag_actions: HashMap<String, NotoraAction> =
+        metadata_for_selection(state, DocumentIdentity::Note(note_id))
+            .map(|snapshot| {
+                snapshot
+                    .tags
+                    .iter()
+                    .map(|tag| {
+                        (
+                            tag.tag_id.to_string(),
+                            NotoraAction::MetadataMutationRequested(MetadataMutation::DetachTag {
+                                note_id,
+                                tag_id: tag.tag_id,
+                            }),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
     tag_actions.extend(state.library.navigation_tree.tags.iter().map(|tag| {
         (
             editor_tag_suggestion_key(tag.tag_id),

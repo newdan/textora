@@ -18,7 +18,7 @@ pub fn parse(source: &str) -> Result<Tree, MmfDiagnostic> {
 
     // 2. 栈式解析 heading 树
     let root = parse_heading_tree(source, &mut cursor)?;
-    Ok(Tree { version: 1, root, global_props: global_props_result.properties })
+    Ok(Tree::new(root, global_props_result.properties, global_props_result.property_source))
 }
 
 struct Cursor<'a> {
@@ -356,18 +356,6 @@ fn line_end(source: &str, start: usize, limit: usize) -> (usize, bool) {
     (start + relative_end, true)
 }
 
-pub(crate) fn parse_global_property_source(
-    source: &str,
-) -> Result<Option<GlobalPropertySource>, MmfDiagnostic> {
-    let lines: Vec<&str> = source.lines().collect();
-    if lines.is_empty() || source.trim().is_empty() {
-        return Ok(None);
-    }
-    let mut cursor = Cursor { lines, idx: 0 };
-    let result = parse_global_props(source, &mut cursor)?;
-    Ok(result.property_source)
-}
-
 fn find_quoted_value_range(
     source: &str,
     body_range: Range<usize>,
@@ -542,11 +530,11 @@ mod tests {
     fn parse_minimal_mmf() {
         let src = "# 产品规划\n\n## 数据同步\n\n## AI 生成\n";
         let tree = parse(src).expect("parse minimal mmf");
-        assert_eq!(tree.root.title, "产品规划");
-        assert_eq!(tree.root.heading_level, 1);
-        assert_eq!(tree.root.children.len(), 2);
-        assert_eq!(tree.root.children[0].title, "数据同步");
-        assert_eq!(tree.root.children[0].heading_level, 2);
+        assert_eq!(tree.root().title, "产品规划");
+        assert_eq!(tree.root().heading_level, 1);
+        assert_eq!(tree.root().children.len(), 2);
+        assert_eq!(tree.root().children[0].title, "数据同步");
+        assert_eq!(tree.root().children[0].heading_level, 2);
     }
 
     #[test]
@@ -566,7 +554,7 @@ Some note here.
 ### SubTask
 ";
         let tree = parse(src).expect("parse with props");
-        let tasks = &tree.root.children[0];
+        let tasks = &tree.root().children[0];
         assert_eq!(tasks.title, "Tasks");
         let props = tasks.props.as_ref().expect("should have props");
         assert_eq!(props.priority.as_deref(), Some("P1"));
@@ -580,7 +568,7 @@ Some note here.
     fn property_source_records_existing_collapsed_value() {
         let source = "# Root\n## Child\n```toml node\ncollapsed = false\npriority = \"P1\"\n```\n";
         let tree = parse(source).expect("fixture must parse");
-        let child = &tree.root.children[0];
+        let child = &tree.root().children[0];
         let property_source = child.property_source.as_ref().expect("property source");
         let body_start = source.find("collapsed = false").expect("collapsed field");
         let body_end = source.find("```\n").expect("closing fence");
@@ -596,7 +584,7 @@ Some note here.
     fn node_retains_property_source_and_heading_end() {
         let source = "# Root\n## Child\n```toml node\ncollapsed = false\n```\n";
         let tree = parse(source).expect("fixture must parse");
-        let child = &tree.root.children[0];
+        let child = &tree.root().children[0];
         let property_source = child.property_source.as_ref().expect("property source");
         let body_start = source.find("collapsed = false").expect("collapsed field");
         let body_end = source.find("```\n").expect("closing fence");
@@ -609,16 +597,16 @@ Some note here.
     fn property_source_does_not_cross_into_child_nodes() {
         let source = "# Root\n## Parent\n### Child\n```toml node\ncollapsed = true\n```\n";
         let tree = parse(source).expect("fixture must parse");
-        let parent = &tree.root.children[0];
+        let parent = &tree.root().children[0];
         assert!(parent.property_source.is_none());
-        assert!(tree.root.children[0].children[0].property_source.is_some());
+        assert!(tree.root().children[0].children[0].property_source.is_some());
     }
 
     #[test]
     fn property_source_preserves_crlf_ranges() {
         let source = "# Root\r\n## Child\r\n```toml node\r\ncollapsed = false\r\n```\r\n";
         let tree = parse(source).expect("fixture must parse");
-        let child = &tree.root.children[0];
+        let child = &tree.root().children[0];
         let property_source = child.property_source.as_ref().expect("property source");
         let body_start = source.find("collapsed = false").expect("collapsed field");
         let body_end = source.find("```\r\n").expect("closing fence");
@@ -634,7 +622,7 @@ Some note here.
     fn property_source_records_missing_collapsed_field() {
         let source = "# Root\n## Child\n```toml node\npriority = \"P1\"\n```\n";
         let tree = parse(source).expect("fixture must parse");
-        let child = &tree.root.children[0];
+        let child = &tree.root().children[0];
         let property_source = child.property_source.as_ref().expect("property source");
         assert!(property_source.collapsed_value_range.is_none());
     }
@@ -643,7 +631,7 @@ Some note here.
     fn property_source_is_absent_without_a_property_block() {
         let source = "# Root\n## Child\n";
         let tree = parse(source).expect("fixture must parse");
-        let child = &tree.root.children[0];
+        let child = &tree.root().children[0];
         assert!(child.property_source.is_none());
     }
 
@@ -665,8 +653,9 @@ layout = \"auto\"
     #[test]
     fn global_property_source_records_theme_literal_range() {
         let source = "```toml mindmap\nversion = 1\ntheme = \"dawn\"\n```\n\n# Root\n";
-        let property_source = parse_global_property_source(source)
+        let property_source = parse(source)
             .expect("valid mmap metadata")
+            .global_property_source
             .expect("global property source");
         let value_start = source.find("\"dawn\"").expect("theme literal");
         assert_eq!(property_source.theme_value_range, Some(value_start..value_start + 6));
@@ -676,8 +665,9 @@ layout = \"auto\"
     #[test]
     fn global_property_source_records_single_quoted_theme_literal_range() {
         let source = "```toml mindmap\nversion = 1\ntheme = 'dawn'\n```\n\n# Root\n";
-        let property_source = parse_global_property_source(source)
+        let property_source = parse(source)
             .expect("valid metadata")
+            .global_property_source
             .expect("global property source");
         let range = property_source.theme_value_range.expect("theme range");
         assert_eq!(&source[range], "'dawn'");
@@ -686,8 +676,9 @@ layout = \"auto\"
     #[test]
     fn global_property_source_records_single_line_triple_quoted_theme_literal_range() {
         let source = "```toml mindmap\nversion = 1\ntheme = \"\"\"dawn\"\"\"\n```\n\n# Root\n";
-        let property_source = parse_global_property_source(source)
+        let property_source = parse(source)
             .expect("valid metadata")
+            .global_property_source
             .expect("global property source");
         let range = property_source.theme_value_range.expect("theme range");
         assert_eq!(&source[range], "\"\"\"dawn\"\"\"");
@@ -696,8 +687,9 @@ layout = \"auto\"
     #[test]
     fn global_property_source_records_single_line_triple_literal_theme_range() {
         let source = "```toml mindmap\nversion = 1\ntheme = '''dawn'''\n```\n\n# Root\n";
-        let property_source = parse_global_property_source(source)
+        let property_source = parse(source)
             .expect("valid metadata")
+            .global_property_source
             .expect("global property source");
         let range = property_source.theme_value_range.expect("theme range");
         assert_eq!(&source[range], "'''dawn'''");
@@ -713,8 +705,9 @@ layout = \"auto\"
     #[test]
     fn global_property_source_preserves_crlf_ranges() {
         let source = "```toml mindmap\r\nversion = 1\r\ntheme = \"tide\"\r\n```\r\n# Root\r\n";
-        let range = parse_global_property_source(source)
+        let range = parse(source)
             .expect("valid CRLF mmap metadata")
+            .global_property_source
             .expect("global property source")
             .theme_value_range
             .expect("theme range");
@@ -733,15 +726,16 @@ layout = \"auto\"
         let src = "# 产品\n\n## 数据同步\n";
         let tree = parse(src).expect("parse");
         // "# 产品\n" → title starts after "# "
-        assert_eq!(&src[tree.root.title_byte_range.clone()], "产品");
+        assert_eq!(&src[tree.root().title_byte_range.clone()], "产品");
         // "## 数据同步\n" → title starts after "## "
-        assert_eq!(&src[tree.root.children[0].title_byte_range.clone()], "数据同步");
+        assert_eq!(&src[tree.root().children[0].title_byte_range.clone()], "数据同步");
     }
 
     #[test]
     fn empty_heading_keeps_zero_length_title_range() {
         let source = "# Root\n##\n";
-        let child = &parse(source).expect("empty title is valid").root.children[0];
+        let tree = parse(source).expect("empty title is valid");
+        let child = &tree.root().children[0];
         assert_eq!(child.title, "");
         assert_eq!(child.title_byte_range.start, child.title_byte_range.end);
         assert_eq!(&source[child.heading_marker_range.clone()], "##");
@@ -751,8 +745,8 @@ layout = \"auto\"
     fn fenced_hash_line_is_note_content_not_a_child() {
         let source = "# Root\n\n```text\n## not a node\n```\n\n## Child\n";
         let tree = parse(source).expect("parse fenced note");
-        assert_eq!(tree.root.children.len(), 1);
-        assert_eq!(tree.root.children[0].title, "Child");
+        assert_eq!(tree.root().children.len(), 1);
+        assert_eq!(tree.root().children[0].title, "Child");
     }
 
     #[test]
@@ -760,7 +754,7 @@ layout = \"auto\"
         let source =
             "# Root\nroot note\n## Parent\nparent note\n### Existing\nchild note\n## Next\n";
         let tree = parse(source).expect("parse ranges");
-        let parent = &tree.root.children[0];
+        let parent = &tree.root().children[0];
         assert_eq!(
             parent.child_insertion_byte,
             source.find("### Existing").expect("existing child heading")
@@ -776,7 +770,7 @@ layout = \"auto\"
     fn leaf_with_note_inserts_children_at_subtree_end() {
         let source = "# Root\n## Leaf\nleaf note\n";
         let tree = parse(source).expect("parse leaf note");
-        let leaf = &tree.root.children[0];
+        let leaf = &tree.root().children[0];
         assert!(leaf.children.is_empty());
         assert_eq!(leaf.child_insertion_byte, leaf.subtree_source_range.end);
         assert_eq!(leaf.child_insertion_byte, source.len());

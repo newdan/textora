@@ -17,13 +17,13 @@ use crate::app::App;
 use crate::app_effect::AppEffect;
 use crate::input_mapper::key_to_app_command;
 use crate::menu_handler::AppCommand;
-use crate::source_pointer::hit_test_with_sub_line_offset as mouse_hit_test;
 use appkit_core::tab_set::types::TabId;
 use appkit_shell::editor_runtime::MouseCapture;
 use appkit_shell::window_input::{
     command_allowed_during_preedit, is_ime_process_key, ui_modifiers,
 };
 use ui::core::widget::{Event, EventCtx, MouseButton as WidgetMouseButton, WidgetAction};
+#[cfg(any(feature = "markdown", test))]
 use ui::plugin::EditHitTarget;
 
 pub(crate) const WINDOW_RESIZE_MARGIN_LOGICAL: f32 = 6.0;
@@ -62,33 +62,6 @@ fn resize_direction_for_bounds(
         (_, _, true, _) => Some(ResizeDirection::North),
         (_, _, _, true) => Some(ResizeDirection::South),
         _ => None,
-    }
-}
-
-fn mmap_cursor_icon(app: &mut App, px: f32, py: f32) -> Option<CursorIcon> {
-    let is_mmap = app.active_tab_session().is_some_and(|tab| {
-        tab.plugin_name() == ui::plugin::PLUGIN_MINDMAP
-            && tab.handles_own_rendering()
-            && tab.allows_editing()
-    });
-    if !is_mmap {
-        return None;
-    }
-
-    if app.editor_runtime.pointer_capture() == MouseCapture::CanvasDrag
-        || app.mouse.canvas_drag.as_ref().is_some_and(|session| session.started)
-    {
-        return Some(CursorIcon::Grabbing);
-    }
-
-    if app.hit_test_canvas_control(px, py).is_some() {
-        return Some(CursorIcon::Pointer);
-    }
-    let target = app.query_plugin_edit_hit_target(px, py)?;
-    match target {
-        Some(EditHitTarget::TextCaret { .. }) => Some(CursorIcon::Text),
-        Some(EditHitTarget::SourceObject { .. }) => Some(CursorIcon::Grab),
-        Some(EditHitTarget::ClearFocus) | None => Some(CursorIcon::Default),
     }
 }
 
@@ -232,7 +205,7 @@ pub(crate) fn handle_scroll(_app: &App, delta: MouseScrollDelta) -> Vec<AppActio
 /// event and it should not fall through to the editor.
 fn dispatch_mouse(app: &mut App, ev: Event) -> (Vec<AppAction>, bool, Option<CursorIcon>) {
     let metrics = app.ui_metrics();
-    let mut ctx = EventCtx::new(&app.current_theme, metrics.dpi);
+    let mut ctx = EventCtx::new(app.editor_runtime.theme(), metrics.dpi);
     let mut actions = Vec::new();
 
     let widget_action = app.ui_shell.dispatch(&ev, &mut ctx);
@@ -263,16 +236,16 @@ fn dispatch_mouse(app: &mut App, ev: Event) -> (Vec<AppAction>, bool, Option<Cur
 
 fn dispatch_lifecycle_to_ui(app: &mut App, event: Event) {
     let metrics = app.ui_metrics();
-    let mut context = EventCtx::new(&app.current_theme, metrics.dpi);
+    let mut context = EventCtx::new(app.editor_runtime.theme(), metrics.dpi);
     let _ = app.ui_shell.dispatch(&event, &mut context);
 }
 
 pub(crate) fn handle_pointer_leave(app: &mut App) -> Vec<AppAction> {
     dispatch_lifecycle_to_ui(app, Event::PointerLeave);
-    app.mouse.last_hover_redraw_pos = None;
+    app.platform.mouse_mut().last_hover_redraw_pos = None;
 
     let mut actions = Vec::new();
-    if app.mouse.last_hover_tab.take().is_some() {
+    if app.platform.mouse_mut().last_hover_tab.take().is_some() {
         actions.push(AppAction::HoverTab(None));
     }
     actions.push(AppAction::SetCursor(CursorIcon::Default));
@@ -282,13 +255,10 @@ pub(crate) fn handle_pointer_leave(app: &mut App) -> Vec<AppAction> {
 
 pub(crate) fn handle_interaction_cancel(app: &mut App) -> AppEffect {
     dispatch_lifecycle_to_ui(app, Event::InteractionCancel);
-    let effect = app.cancel_canvas_drag();
+    let effect = app.cancel_editor_pointer_capture();
     app.editor_runtime.focus_lost();
-    app.mouse.is_down = false;
-    app.mouse.down_byte_offset = None;
-    app.mouse.wysiwyg_selection_scope = None;
-    app.mouse.last_hover_redraw_pos = None;
-    app.mouse.last_hover_tab = None;
+    app.platform.mouse_mut().last_hover_redraw_pos = None;
+    app.platform.mouse_mut().last_hover_tab = None;
     if let Some(window) = app.editor_runtime.window() {
         window.set_cursor(CursorIcon::Default);
     }
@@ -302,7 +272,7 @@ pub(crate) fn translate_widget_action(
     actions: &mut Vec<AppAction>,
 ) {
     match action {
-        WidgetAction::Control(_) => {}
+        WidgetAction::Control(_) | WidgetAction::EditorToolbar(_) => {}
         WidgetAction::Overlay(overlay_action) => translate_overlay_action(overlay_action, actions),
         WidgetAction::Settings(settings_action) => {
             actions.push(AppAction::Settings(settings_action.clone()));
@@ -348,6 +318,7 @@ fn widget_action_consumes_editor_fallthrough(action: &WidgetAction) -> bool {
     matches!(
         action,
         WidgetAction::Control(_)
+            | WidgetAction::EditorToolbar(_)
             | WidgetAction::Overlay(_)
             | WidgetAction::Settings(_)
             | WidgetAction::Sidebar(_)
@@ -408,7 +379,7 @@ fn translate_toc_action(ta: &ui::toc::TocAction, actions: &mut Vec<AppAction>) {
 pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAction> {
     let mut actions = vec![AppAction::UpdateMousePos(px as f64, py as f64)];
 
-    if !app.mouse.is_down
+    if app.editor_runtime.pointer_capture() == MouseCapture::None
         && let Some(direction) = window_resize_direction(app, px, py)
     {
         actions.push(AppAction::SetCursor(direction.into()));
@@ -423,7 +394,8 @@ pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAct
     // so subsequent frames can dedupe HoverTab(None) pushes (方案 2026-07-06 阶段 4a).
     for a in &widget_actions {
         if let AppAction::HoverTab(id_opt) = a {
-            app.mouse.last_hover_tab = id_opt.and_then(|id| app.editor_tab_index(id));
+            app.platform.mouse_mut().last_hover_tab =
+                id_opt.and_then(|id| app.editor_tab_index(id));
         }
     }
     actions.extend(widget_actions);
@@ -436,7 +408,7 @@ pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAct
 
     // During an editor drag (mouse button held), don't let widgets consume
     // the event — the editor must receive EditorCursorMoved for selection.
-    let dragging = app.mouse.is_down || app.editor_runtime.pointer_capture() != MouseCapture::None;
+    let dragging = app.editor_runtime.pointer_capture() != MouseCapture::None;
 
     if !dragging && consumed {
         // Widget consumed the event (sidebar click, scrollbar, etc.) — stop here.
@@ -451,53 +423,12 @@ pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAct
     // Clear tab hover when outside tab bar area. Dedupe: only push None when
     // last state was Some(_) — otherwise mouse move over the editor area spams
     // HoverTab(None) → chrome dispatch → REDRAW every frame (方案 2026-07-06 阶段 4a).
-    if app.mouse.last_hover_tab.is_some() {
+    if app.platform.mouse().last_hover_tab.is_some() {
         actions.push(AppAction::HoverTab(None));
-        app.mouse.last_hover_tab = None;
+        app.platform.mouse_mut().last_hover_tab = None;
     }
 
-    // 4. Editor hit-test fallthrough
-    let content_top = app.content_top_offset();
-    let line_count = app.active_document_line_count();
-    let left_margin = app.editor_left_margin(line_count);
-    let gutter_w = app.settings.gutter_width(line_count) * app.ui_metrics().dpi;
-    let hit = {
-        let metrics = app.ui_metrics();
-        app.active_tab_session().map(|tab| (tab, metrics)).and_then(|(tab, metrics)| {
-            let document = tab.document();
-            let li = &document.line_index;
-            mouse_hit_test(
-                px,
-                py,
-                tab.advance_cache(),
-                &metrics,
-                left_margin,
-                content_top,
-                tab.sub_line_pixel_offset(metrics.line_height),
-                li,
-            )
-        })
-    };
-    actions.push(AppAction::EditorCursorMoved { px, py, hit });
-    if cursor_hint.is_none() {
-        if let Some(icon) = mmap_cursor_icon(app, px, py) {
-            actions.push(AppAction::SetCursor(icon));
-        } else if app.active_allows_editing() {
-            let bounds = app.plugin_render_bounds();
-            if px < bounds.x || px > bounds.x + bounds.w {
-                actions.push(AppAction::SetCursor(CursorIcon::Default));
-            } else {
-                actions.push(AppAction::SetCursor(CursorIcon::Text));
-            }
-        } else {
-            let in_gutter = gutter_w > 0.0 && px >= left_margin - gutter_w && px < left_margin;
-            if in_gutter {
-                actions.push(AppAction::SetCursor(CursorIcon::Default));
-            } else {
-                actions.push(AppAction::SetCursor(CursorIcon::Text));
-            }
-        }
-    }
+    actions.push(AppAction::EditorCursorMoved { px, py, use_editor_cursor: cursor_hint.is_none() });
 
     // 5. Overlay hover highlight — already routed by dispatch_mouse above;
     //    if overlays exist and consumed, we returned early.
@@ -505,8 +436,9 @@ pub(crate) fn handle_cursor_moved(app: &mut App, px: f32, py: f32) -> Vec<AppAct
     //    when the mouse has moved past a jitter threshold since the last
     //    overlay-triggered redraw (方案 2026-07-06 阶段 4a). This eliminates
     //    per-frame redraw spam under a stationary cursor with any overlay open.
-    if app.ui_shell.overlays_count() > 0 && app.mouse.overlay_hover_needs_redraw(px, py) {
-        app.mouse.last_hover_redraw_pos = Some((px, py));
+    if app.ui_shell.overlays_count() > 0 && app.platform.mouse().overlay_hover_needs_redraw(px, py)
+    {
+        app.platform.mouse_mut().last_hover_redraw_pos = Some((px, py));
         actions.push(AppAction::RequestRedraw);
     }
 
@@ -545,9 +477,8 @@ pub(crate) fn handle_mouse_input_left(
     }
 
     // During an editor drag (mouse button held), don't let widgets consume
-    // MouseUp — the editor must receive it to reset is_down.
-    if consumed && !app.mouse.is_down && app.editor_runtime.pointer_capture() == MouseCapture::None
-    {
+    // MouseUp — the editor must receive it to release the capture.
+    if consumed && app.editor_runtime.pointer_capture() == MouseCapture::None {
         return actions;
     }
 
@@ -566,26 +497,7 @@ pub(crate) fn handle_mouse_input_left(
     if state.is_pressed() && dock_widget_has_focus {
         app.ui_shell.focus_editor();
     }
-    let content_top = app.content_top_offset();
-    let hit = {
-        let metrics = app.ui_metrics();
-        app.active_tab_session().map(|tab| (tab, metrics)).and_then(|(tab, metrics)| {
-            let document = tab.document();
-            let left_margin = app.editor_left_margin(document.line_count());
-            let li = &document.line_index;
-            mouse_hit_test(
-                px,
-                py,
-                tab.advance_cache(),
-                &metrics,
-                left_margin,
-                content_top,
-                tab.sub_line_pixel_offset(metrics.line_height),
-                li,
-            )
-        })
-    };
-    actions.push(AppAction::EditorMouseInput { state, px, py, hit });
+    actions.push(AppAction::EditorMouseInput { state, px, py });
     actions
 }
 
@@ -928,7 +840,7 @@ fn translate_sidebar_action(
         ])),
         S::ToggleViewMode => {
             // Toggle between Sidebar and Tabs
-            let current = app.settings.view_mode;
+            let current = app.editor_runtime.settings().view_mode;
             let next = match current {
                 ui::view_mode::ViewMode::Sidebar => ui::view_mode::ViewMode::Tabs,
                 ui::view_mode::ViewMode::Tabs => ui::view_mode::ViewMode::Sidebar,
@@ -1085,8 +997,11 @@ mod tests {
             (640.0, 480.0),
             1.0,
         );
-        assert!(!header_menu.items[2].enabled, "the header row cannot be deleted");
-        assert!(!header_menu.items[5].enabled, "a one-column table cannot lose its last column");
+        assert!(!header_menu.items[2].is_selectable(), "the header row cannot be deleted");
+        assert!(
+            !header_menu.items[5].is_selectable(),
+            "a one-column table cannot lose its last column"
+        );
 
         let two_columns = "| first | second |\n| --- | --- |\n| left | right |";
         let clicked_cell = two_columns.find("right").expect("second-column body cell exists");
@@ -1102,7 +1017,7 @@ mod tests {
             (640.0, 480.0),
             1.0,
         );
-        let alignment_action = &menu.items[9].action;
+        let alignment_action = menu.items[9].command().expect("column alignment command");
         assert_eq!(
             alignment_action,
             &ui::popup_menu::PopupMenuAction::TableStructure {
@@ -1282,15 +1197,21 @@ mod tests {
         (app, target)
     }
 
-    fn last_cursor_icon(actions: &[AppAction]) -> CursorIcon {
-        actions
+    fn editor_cursor_icon(app: &mut App, px: f32, py: f32) -> CursorIcon {
+        let actions = handle_cursor_moved(app, px, py);
+        let event = actions
             .iter()
-            .rev()
             .find_map(|action| match action {
-                AppAction::SetCursor(icon) => Some(*icon),
+                AppAction::EditorCursorMoved { px, py, use_editor_cursor: true } => {
+                    Some(Event::MouseMove { px: *px, py: *py })
+                }
                 _ => None,
             })
-            .expect("cursor action should be emitted")
+            .expect("编辑区指针动作应采用宿主光标");
+        app.editor_runtime
+            .handle_pointer_event(app.editor_input_context(), &event)
+            .cursor_icon
+            .expect("绘制后的编辑区应提供光标")
     }
 
     fn click_labeled_overlay_control(app: &mut App, label: &str) -> Vec<AppAction> {
@@ -1298,7 +1219,8 @@ mod tests {
         const LABEL_BASELINE_TO_CENTER_RATIO: f32 = 0.5;
 
         let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
-        let draw_list = app.ui_shell.paint_chrome(&app.current_theme, 1.0, Some(&mut shaper));
+        let draw_list =
+            app.ui_shell.paint_chrome(app.editor_runtime.theme(), 1.0, Some(&mut shaper));
         let (x, y_baseline, font_size) = draw_list
             .cmds
             .iter()
@@ -1461,26 +1383,27 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_cursor_moved_sets_text_cursor() {
+    fn editor_hover_delegates_the_cursor_to_the_host() {
         let mut app = App::new(None);
         let actions = handle_cursor_moved(&mut app, 300.0, 100.0);
-        let has_text_cursor =
-            actions.iter().any(|a| matches!(a, AppAction::SetCursor(CursorIcon::Text)));
-        assert!(has_text_cursor, "Mouse hover over editor should set the Text cursor");
+        let delegates_editor_cursor = actions
+            .iter()
+            .any(|a| matches!(a, AppAction::EditorCursorMoved { use_editor_cursor: true, .. }));
+        assert!(delegates_editor_cursor, "编辑区悬停应采用宿主选择的光标");
     }
 
     #[test]
     fn pointer_leave_clears_hover_and_cursor_without_ending_editor_capture() {
         let mut app = App::new(None);
-        app.mouse.is_down = true;
-        app.mouse.last_hover_tab = Some(0);
-        app.mouse.last_hover_redraw_pos = Some((10.0, 20.0));
+        assert!(app.editor_runtime.begin_text_selection(app.editor_input_context()));
+        app.platform.mouse_mut().last_hover_tab = Some(0);
+        app.platform.mouse_mut().last_hover_redraw_pos = Some((10.0, 20.0));
 
         let actions = handle_pointer_leave(&mut app);
 
-        assert!(app.mouse.is_down, "leaving the window must preserve legal pointer capture");
-        assert_eq!(app.mouse.last_hover_tab, None);
-        assert_eq!(app.mouse.last_hover_redraw_pos, None);
+        assert_eq!(app.editor_runtime.pointer_capture(), MouseCapture::TextSelection);
+        assert_eq!(app.platform.mouse().last_hover_tab, None);
+        assert_eq!(app.platform.mouse().last_hover_redraw_pos, None);
         assert!(actions.iter().any(|action| matches!(action, AppAction::HoverTab(None))));
         assert!(
             actions
@@ -1496,80 +1419,61 @@ mod tests {
             byte_offset: 1,
             selection_scope: Some(0..3),
         }));
+        app.prepare_editor_pointer_frame_for_test();
         let pointer = (300.0, 100.0);
 
-        assert_eq!(
-            last_cursor_icon(&handle_cursor_moved(&mut app, pointer.0, pointer.1)),
-            CursorIcon::Text
-        );
+        assert_eq!(editor_cursor_icon(&mut app, pointer.0, pointer.1), CursorIcon::Text);
 
         *target.borrow_mut() = Some(EditHitTarget::SourceObject { source_range: 1..2 });
-        assert_eq!(
-            last_cursor_icon(&handle_cursor_moved(&mut app, pointer.0, pointer.1)),
-            CursorIcon::Grab
-        );
+        assert_eq!(editor_cursor_icon(&mut app, pointer.0, pointer.1), CursorIcon::Grab);
 
-        let source_generation = {
-            let Some(mut entry) = app.active_tab_session_mut() else {
-                panic!("mmap cursor test requires an active entry");
-            };
-            entry.document_mut().cursor_move_to_offset(2);
-            entry.document_mut().cursor_mut().selection_anchor = Some(1);
-            entry.document().generation()
-        };
-        assert_eq!(
-            last_cursor_icon(&handle_cursor_moved(&mut app, pointer.0, pointer.1)),
-            CursorIcon::Grab
+        let bounds = app.plugin_render_bounds();
+        let _ = app.dispatch_editor_mouse_input(
+            ElementState::Pressed,
+            bounds.x + 12.0,
+            bounds.y + 12.0,
         );
-
-        app.mouse.canvas_drag = Some(appkit_shell::pointer_capture::CanvasDragSession {
-            source_range: 1..2,
-            pressed_at: pointer,
-            source_generation,
-            eligibility: appkit_shell::pointer_capture::CanvasDragEligibility::Enabled,
-            started: true,
-        });
-        assert_eq!(
-            last_cursor_icon(&handle_cursor_moved(&mut app, pointer.0, pointer.1)),
-            CursorIcon::Grabbing
-        );
-        app.mouse.canvas_drag = None;
+        assert_eq!(editor_cursor_icon(&mut app, pointer.0, pointer.1), CursorIcon::Grabbing);
+        let _ = app.cancel_editor_pointer_capture();
+        assert_eq!(editor_cursor_icon(&mut app, pointer.0, pointer.1), CursorIcon::Grab,);
 
         *target.borrow_mut() = Some(EditHitTarget::ClearFocus);
-        assert_eq!(
-            last_cursor_icon(&handle_cursor_moved(&mut app, pointer.0, pointer.1)),
-            CursorIcon::Default
-        );
+        assert_eq!(editor_cursor_icon(&mut app, pointer.0, pointer.1), CursorIcon::Default);
     }
 
     #[test]
     fn test_title_bar_area_consumes_cursor_in_sidebar_mode() {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         init_sidebar_widgets(&mut app);
         let title_h = ui::title_bar::title_bar_height(app.ui_metrics().dpi);
         let actions = handle_cursor_moved(&mut app, 300.0, title_h * 0.5);
-        let has_text_cursor =
-            actions.iter().any(|a| matches!(a, AppAction::SetCursor(CursorIcon::Text)));
-        assert!(!has_text_cursor, "Cursor in title bar area should not reach editor");
+        let delegates_editor_cursor = actions
+            .iter()
+            .any(|a| matches!(a, AppAction::EditorCursorMoved { use_editor_cursor: true, .. }));
+        assert!(!delegates_editor_cursor, "Cursor in title bar area should not reach editor");
     }
 
     #[test]
     fn test_cursor_below_title_bar_reaches_editor_in_sidebar_mode() {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         init_sidebar_widgets(&mut app);
         let title_h = ui::title_bar::title_bar_height(app.ui_metrics().dpi);
         let actions = handle_cursor_moved(&mut app, 300.0, title_h + 10.0);
-        let has_text_cursor =
-            actions.iter().any(|a| matches!(a, AppAction::SetCursor(CursorIcon::Text)));
-        assert!(has_text_cursor, "Cursor below title bar should reach editor");
+        let delegates_editor_cursor = actions
+            .iter()
+            .any(|a| matches!(a, AppAction::EditorCursorMoved { use_editor_cursor: true, .. }));
+        assert!(delegates_editor_cursor, "Cursor below title bar should reach editor");
     }
 
     #[test]
     fn test_title_bar_area_consumes_mouse_input_in_sidebar_mode() {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         init_sidebar_widgets(&mut app);
         let title_h = ui::title_bar::title_bar_height(app.ui_metrics().dpi);
         let actions =
@@ -1585,16 +1489,17 @@ mod tests {
     #[test]
     fn test_editor_mouseup_not_consumed_during_drag_in_sidebar_mode() {
         // Bug: TitleBarWidget unconditionally consumes MouseUp, which would
-        // prevent the editor from receiving it and leave is_down stuck at true.
+        // prevent the editor from receiving it and leave the pointer captured.
         // After the fix, MouseUp falls through when the editor is dragging.
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         init_sidebar_widgets(&mut app);
 
         let title_h = ui::title_bar::title_bar_height(app.ui_metrics().dpi);
 
         // ── 场景 1: 编辑器拖拽中 → MouseUp 必须穿透到 editor ──
-        app.mouse.is_down = true;
+        assert!(app.editor_runtime.begin_text_selection(app.editor_input_context()));
         let actions =
             handle_mouse_input_left(&mut app, ElementState::Released, 300.0, title_h + 20.0);
         assert!(
@@ -1607,10 +1512,9 @@ mod tests {
 
         // ── 场景 2: 非编辑器发起的点击 → widget 消费 MouseUp 正常 ──
         let mut app2 = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         init_sidebar_widgets(&mut app2);
-        // is_down = false 表示点击被 widget 处理了（如点击在 title bar 上）
-        app2.mouse.is_down = false;
         let actions =
             handle_mouse_input_left(&mut app2, ElementState::Released, 300.0, title_h + 20.0);
         assert!(
@@ -1623,7 +1527,8 @@ mod tests {
 
         // ── 场景 3: 完整点击流程 ──
         let mut app3 = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         init_sidebar_widgets(&mut app3);
         // MouseDown 到达 editor
         let actions =
@@ -1636,7 +1541,7 @@ mod tests {
             "编辑器区域 MouseDown 应到达 editor"
         );
         // 模拟 dispatch 后的状态
-        app3.mouse.is_down = true;
+        assert!(app3.editor_runtime.begin_text_selection(app3.editor_input_context()));
         // MouseUp 也必须到达 editor（不能被子 widget 截断）
         let actions =
             handle_mouse_input_left(&mut app3, ElementState::Released, 300.0, title_h + 20.0);
@@ -1654,10 +1559,11 @@ mod tests {
         // Tabs 模式下没有 TitleBarWidget，MouseUp 不受影响。
         // 此测试确保修复没有引入 Tabs 模式的回归。
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
 
         // 拖拽中
-        app.mouse.is_down = true;
+        assert!(app.editor_runtime.begin_text_selection(app.editor_input_context()));
         let actions = handle_mouse_input_left(&mut app, ElementState::Released, 300.0, 50.0);
         assert!(
             actions.iter().any(|a| matches!(
@@ -1669,8 +1575,8 @@ mod tests {
 
         // 非拖拽中
         let mut app2 = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
-        app2.mouse.is_down = false;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
         let actions = handle_mouse_input_left(&mut app2, ElementState::Released, 300.0, 50.0);
         assert!(
             actions.iter().any(|a| matches!(
@@ -1684,7 +1590,8 @@ mod tests {
     #[test]
     fn test_title_bar_area_consumes_right_click_in_sidebar_mode() {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         init_sidebar_widgets(&mut app);
         let title_h = ui::title_bar::title_bar_height(app.ui_metrics().dpi);
         let actions =
@@ -1698,11 +1605,13 @@ mod tests {
     #[test]
     fn test_tabs_mode_no_title_bar_interception() {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
         let actions = handle_cursor_moved(&mut app, 300.0, 5.0);
-        let has_text_cursor =
-            actions.iter().any(|a| matches!(a, AppAction::SetCursor(CursorIcon::Text)));
-        assert!(has_text_cursor, "Tabs mode should not intercept cursor near top");
+        let delegates_editor_cursor = actions
+            .iter()
+            .any(|a| matches!(a, AppAction::EditorCursorMoved { use_editor_cursor: true, .. }));
+        assert!(delegates_editor_cursor, "Tabs mode should not intercept cursor near top");
     }
     #[test]
     fn translate_sidebar_settings_action_maps_only_to_sidebar_settings_menu() {
@@ -1817,13 +1726,10 @@ mod tests {
         );
 
         let effect =
-            app.close_editor_tab(closed_id).expect("closing tab 0 should reorder remaining tabs");
+            app.discard_editor_tab(closed_id).expect("closing tab 0 should reorder remaining tabs");
         assert_eq!(
-            effect,
-            appkit_shell::editor_tab_set::WorkspaceEffect::Closed {
-                closed: closed_id,
-                activated: None
-            }
+            effect.notifications.as_slice(),
+            &[appkit_shell::editor_runtime::EditorNotification::TabClosed { tab_id: closed_id }],
         );
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
@@ -1945,7 +1851,8 @@ mod tests {
         // When an overlay covers the sidebar area, sidebar should not receive MouseMove.
         // The overlay's dispatch returns None after consuming, so no sidebar action is produced.
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         init_sidebar_widgets(&mut app);
 
         // Push a fake overlay that covers the entire screen
@@ -1954,7 +1861,7 @@ mod tests {
         app.ui_shell.push_overlay(overlay_widget, overlay_rect);
 
         // Dispatch a MouseMove in the sidebar area
-        let mut ctx = ui::core::widget::EventCtx::new(&app.current_theme, 1.0);
+        let mut ctx = ui::core::widget::EventCtx::new(app.editor_runtime.theme(), 1.0);
         let result = app
             .ui_shell
             .dispatch(&ui::core::widget::Event::MouseMove { px: 50.0, py: 400.0 }, &mut ctx);
@@ -1996,7 +1903,8 @@ mod tests {
     #[test]
     fn test_sidebar_click_produces_switch_tab() {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
 
         // The workspace must contain tabs that correspond to the sidebar items so
         // that the sidebar index can be resolved to a stable TabId.
@@ -2022,7 +1930,7 @@ mod tests {
             },
         ];
         app.ui_shell.set_sidebar_input(
-            ui::sidebar::SidebarConfig::new_default(dpi),
+            ui::sidebar::SidebarConfig::new_default(),
             tabs,
             Some(0),
             (68.0 * dpi, 0.0),
@@ -2123,7 +2031,8 @@ mod tests {
     #[test]
     fn left_click_non_editor_chrome_does_not_clear_search_keyboard_focus() {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         init_sidebar_widgets(&mut app);
         app.ui_shell.focus_widget(ui::core::widget::ids::SEARCH_BAR);
 

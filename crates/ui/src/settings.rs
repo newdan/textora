@@ -56,7 +56,7 @@ impl UiMetrics {
 }
 
 /// User-configurable settings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// Font family name (e.g., "Menlo", "Helvetica").
     pub font_family: String,

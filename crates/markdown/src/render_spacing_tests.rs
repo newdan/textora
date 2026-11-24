@@ -24,7 +24,7 @@ fn assert_render_matches_layout(source: &str, width: f32, render_with_shaper: bo
     };
     for line in lines {
         let mut draw_list = DrawList::new();
-        render_line_with_offset(
+        render_line_with_embedded(
             line,
             &style,
             &mut draw_list,
@@ -32,6 +32,7 @@ fn assert_render_matches_layout(source: &str, width: f32, render_with_shaper: bo
             0.0,
             0.0,
             render_with_shaper.then_some(&mut shaper),
+            None,
         );
         let expected = line.shaped.as_ref().expect("precise layout retains glyph geometry");
         let mut rendered_clusters = Vec::new();

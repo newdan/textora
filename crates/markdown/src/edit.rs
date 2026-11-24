@@ -43,40 +43,6 @@ pub(crate) fn span_marker_len(style: &InlineStyle) -> (usize, usize) {
     }
 }
 
-/// A materialized span in a rendered line, mapping visual text back to source.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MaterializedSpan {
-    pub start: usize,
-    pub len: usize,
-    pub style: InlineStyle,
-    pub source_range: std::ops::Range<usize>,
-}
-
-/// A fully materialized line with source-byte mapping.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MaterializedLine {
-    pub text: String,
-    pub spans: Vec<MaterializedSpan>,
-    visual_grapheme_to_source_byte: Vec<usize>,
-}
-
-impl MaterializedLine {
-    pub fn visual_grapheme_to_source_byte(&self, visual_grapheme: usize) -> Option<usize> {
-        self.visual_grapheme_to_source_byte.get(visual_grapheme).copied()
-    }
-
-    pub fn source_byte_to_visual_grapheme(&self, source_byte: usize) -> Option<usize> {
-        // Find the largest grapheme boundary ≤ source_byte.
-        match self.visual_grapheme_to_source_byte.binary_search(&source_byte) {
-            Ok(i) => Some(i.min(self.visual_grapheme_to_source_byte.len().saturating_sub(2))),
-            Err(i) => Some(
-                i.saturating_sub(1)
-                    .min(self.visual_grapheme_to_source_byte.len().saturating_sub(2)),
-            ),
-        }
-    }
-}
-
 // ===== Block-level marker support =====
 
 /// Describes the block-level syntax marker for an active editing block.
@@ -539,7 +505,7 @@ pub(crate) fn materialized_spans_for_projected_line(
     spans: &[StyleSpan],
     source: &str,
     edit_ctx: Option<&EditContext>,
-) -> Vec<MaterializedSpan> {
+) -> Vec<StyleSpan> {
     let preedit_visual_range = projected.spans.iter().find_map(|span| {
         matches!(span.kind, ProjectionSpanKind::Virtual { .. }).then(|| span.visual_range.clone())
     });
@@ -689,7 +655,7 @@ fn materialized_spans(
     source: &str,
     edit_ctx: Option<&EditContext>,
     preedit_visual_range: Option<Range<usize>>,
-) -> Vec<MaterializedSpan> {
+) -> Vec<StyleSpan> {
     let active_group =
         edit_ctx.and_then(|ctx| active_span_group_range(base, spans, source, ctx.cursor_byte));
     let mut output = Vec::with_capacity(spans.len());
@@ -701,7 +667,7 @@ fn materialized_spans(
             .checked_add_signed(visual_delta)
             .expect("materialized style offsets must remain non-negative after source expansion");
         if active_group.as_ref().is_none_or(|group| !group.contains(&index)) {
-            output.push(MaterializedSpan {
+            output.push(StyleSpan {
                 start: materialized_start,
                 len: span.len,
                 style: span.style.clone(),
@@ -725,7 +691,7 @@ fn materialized_spans(
         }
 
         let Some(expansion) = inline_expansion(base, span, source) else {
-            output.push(MaterializedSpan {
+            output.push(StyleSpan {
                 start: materialized_start,
                 len: span.len,
                 style: span.style.clone(),
@@ -774,19 +740,19 @@ fn materialized_spans(
 }
 
 fn push_non_empty_materialized_span(
-    spans: &mut Vec<MaterializedSpan>,
+    spans: &mut Vec<StyleSpan>,
     start: usize,
     len: usize,
     style: InlineStyle,
     source_range: Range<usize>,
 ) {
     if len > 0 {
-        spans.push(MaterializedSpan { start, len, style, source_range });
+        spans.push(StyleSpan { start, len, style, source_range });
     }
 }
 
 fn shift_materialized_spans_for_preedit(
-    spans: &mut [MaterializedSpan],
+    spans: &mut [StyleSpan],
     preedit_visual_range: Range<usize>,
     active_source_range: Option<&Range<usize>>,
 ) {
@@ -811,52 +777,15 @@ fn shift_materialized_spans_for_preedit(
     }
 }
 
-/// 生成一行的完整物化表示，包含源码字节映射。
-///
-/// 与 `materialize_text()` 不同，该函数返回 `MaterializedLine`，
-/// 其中包含通过 `visual_grapheme_to_source_byte` 和 `source_byte_to_visual_grapheme`
-/// 方法使用的视觉 grapheme 到源码字节的映射表。
-pub fn materialize_line(
-    line_text: &str,
-    spans: &[StyleSpan],
-    source: &str,
-    edit_ctx: Option<&EditContext>,
-) -> MaterializedLine {
-    materialize_line_with_source_context(line_text, spans, source, edit_ctx, None)
-}
-
-pub(crate) fn materialize_line_with_source_context(
-    line_text: &str,
-    spans: &[StyleSpan],
-    source: &str,
-    edit_ctx: Option<&EditContext>,
-    source_line: Option<&SourceLineContext>,
-) -> MaterializedLine {
-    let base = project_folded_line(line_text, spans, source_line);
-    let projected = materialize_projected_line(&base, spans, source, edit_ctx, source_line);
-    let preedit_visual_range = projected.spans.iter().find_map(|span| {
-        matches!(span.kind, ProjectionSpanKind::Virtual { .. }).then(|| span.visual_range.clone())
-    });
-
-    MaterializedLine {
-        text: projected.text,
-        spans: materialized_spans(&base, spans, source, edit_ctx, preedit_visual_range),
-        visual_grapheme_to_source_byte: projected
-            .boundaries
-            .iter()
-            .map(|anchor| anchor.byte.get())
-            .collect(),
-    }
-}
-
-/// 拼接一行的布局用文本（向后兼容的包装器）。
+/// 拼接行内投影中的可见文本。
 pub fn materialize_text(
     line_text: &str,
     spans: &[StyleSpan],
     source: &str,
     edit_ctx: Option<&EditContext>,
 ) -> String {
-    materialize_line(line_text, spans, source, edit_ctx).text
+    let base = project_folded_line(line_text, spans, None);
+    materialize_projected_line(&base, spans, source, edit_ctx, None).text
 }
 
 #[cfg(test)]

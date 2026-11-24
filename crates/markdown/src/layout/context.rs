@@ -183,7 +183,7 @@ pub struct LayoutCtx<'a> {
     /// Shaped runs from the last wrap_text_with_width call, one per input line (split by newline).
     /// Used by layout_text_block to create per-segment text_layout without re-shaping.
     pub(crate) last_wrap_shaped: Vec<Option<shaping::ShapedRun>>,
-    /// Full source text, used by materialize_line for WYSIWYG span expansion.
+    /// Full source text for WYSIWYG source projection.
     pub(crate) source_text: Option<&'a str>,
     /// WYSIWYG edit context; None means pure preview (no cursor span expansion).
     pub(crate) edit_ctx: Option<&'a crate::edit::EditContext>,

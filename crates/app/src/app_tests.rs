@@ -3,7 +3,6 @@ use crate::document_fixture::DocumentFixture;
 use appkit_core::edit_command::EditCommand;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
 use textora_core::types::ByteIndex;
-use textora_core::types::GraphemeOffset;
 use ui::layout::compute_visual_lines;
 use ui::render_geom::{AdvanceCacheEntry, compute_selection_highlight_quads};
 use ui::viewport::Viewport;
@@ -35,8 +34,8 @@ fn active_document_text(app: &App) -> String {
 
 fn close_editor_tab_for_test(app: &mut App, index: usize) {
     let tab_id = app.editor_tab_id_at(index).expect("test tab index should be valid");
-    let effect = app.close_editor_tab(tab_id).expect("test tab should close");
-    let _ = app.apply_workspace_effect(effect);
+    let effect = app.discard_editor_tab(tab_id).expect("test tab should close");
+    let _ = app.apply_editor_tab_outcome(effect);
 }
 
 fn update_runtime_frame_cache(
@@ -166,7 +165,7 @@ fn line_end_enter_invalidates_cache_for_inserted_line() {
 
     let outcome = tab.with_presentation(|document, presentation| {
         let page_step_rows = presentation.display.viewport.visible_rows.saturating_sub(1).max(1);
-        crate::commands::execute_edit_command_v2_with_presentation(
+        appkit_shell::editor_commands::execute_edit_command_with_system_clipboard(
             &EditCommand::InsertNewline,
             document,
             &[],
@@ -208,152 +207,108 @@ fn line_end_enter_invalidates_cache_for_inserted_line() {
     );
 }
 
-#[test]
-fn mouse_drag_creates_range_via_app_state() {
-    let mut app = app_with_content(vec!["hello world"]);
+fn source_pointer_fixture(source: &str) -> (App, impl Fn(usize) -> (f32, f32)) {
+    const ADVANCE_PX: f32 = 12.0;
+    assert!(source.is_ascii(), "定位夹具按 ASCII 字节生成字形位置");
+    let mut app = app_with_content(vec![source]);
+    app.prepare_editor_pointer_frame_for_test();
+    let text_left = app.editor_left_margin(1);
+    let middle_y = app.ui_shell.editor_rect().y + app.ui_metrics().line_height * 0.5;
+    let clusters = (1..=source.len())
+        .map(|end| (end, text_left + end as f32 * ADVANCE_PX, (end - 1) as u32))
+        .collect();
+    app.active_tab_session_mut().expect("测试需要活动源码标签").display_mut().advance_cache =
+        vec![AdvanceCacheEntry { doc_line: 0, vl_byte_start: 0, vl_grapheme_start: 0, clusters }];
+    (app, move |byte| (text_left + byte as f32 * ADVANCE_PX, middle_y))
+}
 
-    // Simulate mouse down at offset 3 (single click)
-    // This is what happens in the MouseInput handler
-    app.active_tab_session_mut()
-        .expect("active tab session")
-        .document_mut()
-        .cursor_move_to_offset(3);
-    app.mouse.down_byte_offset = Some(3);
-    app.mouse.is_down = true;
-
-    // Verify: cursor at 3, no selection yet (anchor cleared by cursor_move_to_offset)
-    {
-        let document = app.active_tab_session().expect("active tab session");
-        assert_eq!(document.document().cursor().offset, ByteIndex(3));
-        assert!(
-            document.document().cursor().selection_anchor.is_none(),
-            "anchor should be None after single click"
-        );
-    }
-
-    // Simulate mouse drag to offset 8
-    // This is what happens in the CursorMoved handler
-    if let Some(anchor) = app.mouse.down_byte_offset.take() {
-        app.active_tab_session_mut()
-            .expect("active tab session")
-            .document_mut()
-            .cursor_mut()
-            .selection_anchor = Some(anchor);
-    }
-    app.active_tab_session_mut()
-        .expect("active tab session")
-        .document_mut()
-        .set_cursor_offset_synced(8);
-
-    // Verify: selection from 3 to 8
-    let (start, end) =
-        app.active_tab_session().expect("active tab session").document().selection_range().unwrap();
-    assert_eq!(start, 3, "anchor should be at mouse down position");
-    assert_eq!(end, 8, "cursor should be at drag position");
-    assert!(
-        app.active_tab_session()
-            .expect("active tab session")
-            .document()
-            .selection_range()
-            .is_some(),
-        "should have selection after drag"
-    );
-
-    // Simulate mouse up
-    app.mouse.is_down = false;
-    app.mouse.down_byte_offset = None;
-
-    // Selection should persist after mouse up
-    let (start, end) =
-        app.active_tab_session().expect("active tab session").document().selection_range().unwrap();
-    assert_eq!(start, 3);
-    assert_eq!(end, 8);
+fn source_button(app: &mut App, point: (f32, f32), state: winit::event::ElementState) {
+    let _ = app.dispatch_editor_mouse_input(state, point.0, point.1);
 }
 
 #[test]
-fn mouse_drag_backward_creates_range() {
-    let mut app = app_with_content(vec!["hello world"]);
-    let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
+fn mouse_drag_reaches_the_shared_source_selection() {
+    use winit::event::ElementState::{Pressed, Released};
 
-    // Mouse down at offset 8
-    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        document.cursor_move_to_offset(8);
-        mouse.down_byte_offset = Some(8);
-        mouse.is_down = true;
+    for (anchor, cursor) in [(3, 8), (8, 3)] {
+        let (mut app, hit) = source_pointer_fixture("hello world");
+        source_button(&mut app, hit(anchor), Pressed);
+        let document = app.active_tab_session().expect("活动源码标签").document();
+        assert_eq!(document.cursor_offset().to_usize(), anchor);
+        assert_eq!(document.selection_range(), None);
 
-        // Drag backward to offset 3
-        if let Some(anchor) = mouse.down_byte_offset.take() {
-            document.cursor_mut().selection_anchor = Some(anchor);
-        }
-        document.set_cursor_offset_synced(3);
-    })
-    .expect("test tab session should exist");
-
-    // Selection should be min..max
-    let (start, end) =
-        app.active_tab_session().expect("active tab session").document().selection_range().unwrap();
-    assert_eq!(start, 3, "start should be min(anchor, cursor)");
-    assert_eq!(end, 8, "end should be max(anchor, cursor)");
+        let (x, y) = hit(cursor);
+        assert!(app.dispatch_editor_cursor_moved(x, y, false).redraw);
+        source_button(&mut app, hit(cursor), Released);
+        let document = app.active_tab_session().expect("活动源码标签").document();
+        assert_eq!(document.cursor().selection_anchor, Some(anchor));
+        assert_eq!(document.cursor_offset().to_usize(), cursor);
+        assert_eq!(document.selection_range(), Some((3, 8)));
+    }
 }
 
 #[test]
-fn mouse_click_without_drag_no_selection() {
-    let mut app = app_with_content(vec!["hello world"]);
-    let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
+fn mouse_click_without_drag_clears_the_previous_selection() {
+    use winit::event::ElementState::{Pressed, Released};
 
-    // Mouse down at offset 5
-    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        document.cursor_move_to_offset(5);
-        mouse.down_byte_offset = Some(5);
-        mouse.is_down = true;
-
-        // Mouse up immediately (no drag)
-        mouse.is_down = false;
-        mouse.down_byte_offset = None;
-    })
-    .expect("test tab session should exist");
-
-    // No selection should exist
-    let document = app.active_tab_session().expect("active tab session");
-    assert!(!document.document().has_selection(), "click without drag should not create selection");
+    let (mut app, hit) = source_pointer_fixture("hello world");
+    source_button(&mut app, hit(3), Pressed);
+    let (x, y) = hit(8);
+    let _ = app.dispatch_editor_cursor_moved(x, y, false);
+    source_button(&mut app, hit(8), Released);
     assert_eq!(
-        document.document().cursor().offset,
-        ByteIndex(5),
-        "cursor should stay at click position"
+        app.active_tab_session().expect("活动源码标签").document().selection_range(),
+        Some((3, 8))
     );
+
+    source_button(&mut app, hit(5), Pressed);
+    source_button(&mut app, hit(5), Released);
+    let document = app.active_tab_session().expect("活动源码标签").document();
+    assert_eq!(document.cursor_offset().to_usize(), 5);
+    assert_eq!(document.selection_range(), None);
 }
 
 #[test]
-fn mouse_drag_then_click_clears_selection() {
-    let mut app = app_with_content(vec!["hello world"]);
-    let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
+fn mouse_selects_from_the_correct_wrapped_row_through_an_empty_source_line() {
+    use winit::event::ElementState::{Pressed, Released};
 
-    // First: create a selection via drag
-    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        document.cursor_move_to_offset(3);
-        mouse.down_byte_offset = Some(3);
-        mouse.is_down = true;
+    let mut app = app_with_content(vec!["abcdef", "", "next"]);
+    app.prepare_editor_pointer_frame_for_test();
+    let text_left = app.editor_left_margin(3);
+    let line_height = app.ui_metrics().line_height;
+    let first_row_middle = app.ui_shell.editor_rect().y + line_height * 0.5;
+    let clusters =
+        vec![(1, text_left + 12.0, 0), (2, text_left + 24.0, 1), (3, text_left + 36.0, 2)];
+    app.active_tab_session_mut().expect("活动源码标签").display_mut().advance_cache = vec![
+        AdvanceCacheEntry {
+            doc_line: 0,
+            vl_byte_start: 0,
+            vl_grapheme_start: 0,
+            clusters: clusters.clone(),
+        },
+        AdvanceCacheEntry { doc_line: 0, vl_byte_start: 3, vl_grapheme_start: 3, clusters },
+        AdvanceCacheEntry {
+            doc_line: 1,
+            vl_byte_start: 0,
+            vl_grapheme_start: 0,
+            clusters: Vec::new(),
+        },
+    ];
+    let wrapped_row = (text_left, first_row_middle + line_height);
+    source_button(&mut app, wrapped_row, Pressed);
+    let tab = app.active_tab_session().expect("活动源码标签");
+    assert_eq!(tab.document().cursor_offset().to_usize(), 3);
+    assert_eq!(
+        tab.cursor_render_state().click_hint,
+        Some((textora_core::types::GraphemeOffset(3), 1))
+    );
 
-        if let Some(anchor) = mouse.down_byte_offset.take() {
-            document.cursor_mut().selection_anchor = Some(anchor);
-        }
-        document.set_cursor_offset_synced(8);
-        assert!(document.has_selection());
-
-        // Mouse up
-        mouse.is_down = false;
-        mouse.down_byte_offset = None;
-
-        // New click at offset 5 (single click, no drag)
-        document.cursor_move_to_offset(5);
-        mouse.down_byte_offset = Some(5);
-        mouse.is_down = true;
-
-        // Selection should be cleared (cursor_move_to_offset clears anchor)
-        assert!(!document.has_selection(), "new click should clear previous selection");
-        assert_eq!(document.cursor().offset, ByteIndex(5));
-    })
-    .expect("test tab session should exist");
+    let empty_row = (text_left, first_row_middle + line_height * 2.0);
+    let _ = app.dispatch_editor_cursor_moved(empty_row.0, empty_row.1, false);
+    source_button(&mut app, empty_row, Released);
+    let document = app.active_tab_session().expect("活动源码标签").document();
+    assert_eq!(document.cursor_line(), 1);
+    assert_eq!(document.selection_range(), Some((3, 7)));
 }
 
 // --- Viewport offset revision: missing tests (A2, A3, B1) ---
@@ -537,25 +492,6 @@ fn move_down_wrapped_line_boundary_no_stall() {
     let dv = tab.document_mut();
     // Should move to VL1 (byte 7), not stay at byte 0
     assert_eq!(dv.cursor().offset, ByteIndex(7), "cursor should advance to VL1 start (byte 7)");
-}
-
-#[test]
-fn cursor_vertices_empty_when_visual_line_is_max() {
-    // B1: cursor_visual_line == usize::MAX (sentinel for "cursor outside viewport")
-    // should produce no caret vertices.
-    let mut app = app_with_content(vec!["hello"]);
-    {
-        let mut tab = app.active_tab_session_mut().expect("active tab session");
-        tab.cursor_render_state_mut().cursor_visual_line = None;
-        tab.cursor_render_state_mut().cursor_pixel_x = 100.0;
-    }
-    {
-        let mut s = ui::settings::Settings::new();
-        s.set_line_height(16.0);
-    }
-
-    let verts = app.cursor_vertices(800.0, 600.0, 0.0);
-    assert!(verts.is_empty(), "cursor_vertices must return empty when cursor_visual_line is None");
 }
 
 // ── Selection highlight rendering tests ──
@@ -1200,7 +1136,7 @@ fn regression_drag_then_page_down() {
     // 立即 PageDown
     let old_offset = dv.cursor().offset;
     tab.with_presentation(|document, presentation| {
-        let _ = crate::commands::execute_edit_command_v2_with_presentation(
+        let _ = appkit_shell::editor_commands::execute_edit_command_with_system_clipboard(
             &EditCommand::PageDown,
             document,
             &[],
@@ -1247,7 +1183,7 @@ fn regression_shift_click_then_page_up() {
     // 立即 PageUp
     let old_offset = dv.cursor().offset;
     tab.with_presentation(|document, presentation| {
-        let _ = crate::commands::execute_edit_command_v2_with_presentation(
+        let _ = appkit_shell::editor_commands::execute_edit_command_with_system_clipboard(
             &EditCommand::PageUp,
             document,
             &[],
@@ -1636,120 +1572,35 @@ fn active_tab_session_tracks_workspace_activation_by_tab_id() {
 // --- Phase 1 Bug Fix Tests ---
 
 #[test]
-fn test_double_click_spatial_proximity() {
-    let mut app = app_with_content(vec!["hello world this is a test"]);
-    let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
-    let modifiers = winit::keyboard::ModifiersState::empty();
-    let mut cursor_render_state = appkit_shell::cursor_motion::CursorRenderState::new();
+fn mouse_clicks_far_apart_do_not_select_a_word() {
+    use winit::event::ElementState::{Pressed, Released};
 
-    // First click at position (10, 10)
-    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        crate::source_pointer::handle_mouse_input_with_cursor_state(
-            winit::event::ElementState::Pressed,
-            10.0,
-            10.0,
-            mouse,
-            document,
-            &mut cursor_render_state,
-            modifiers,
-            Some((GraphemeOffset(0), 0, 0)),
-        );
-    })
-    .expect("test tab session should exist");
-
-    assert_eq!(app.mouse.click_count, 1);
-
-    // Release
-    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        crate::source_pointer::handle_mouse_input_with_cursor_state(
-            winit::event::ElementState::Released,
-            10.0,
-            10.0,
-            mouse,
-            document,
-            &mut cursor_render_state,
-            modifiers,
-            Some((GraphemeOffset(0), 0, 0)),
-        );
-    })
-    .expect("test tab session should exist");
-
-    // Second click within 500ms but FAR AWAY (100, 100) -> distance squared is large
-    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        crate::source_pointer::handle_mouse_input_with_cursor_state(
-            winit::event::ElementState::Pressed,
-            100.0,
-            100.0,
-            mouse,
-            document,
-            &mut cursor_render_state,
-            modifiers,
-            Some((GraphemeOffset(15), 0, 0)),
-        );
-    })
-    .expect("test tab session should exist");
-
-    // Click count should be reset to 1 due to spatial proximity check
-    assert_eq!(
-        app.mouse.click_count, 1,
-        "Click count should reset if spatial distance is too large"
-    );
+    let (mut app, hit) = source_pointer_fixture("hello world this is a test");
+    source_button(&mut app, hit(0), Pressed);
+    source_button(&mut app, hit(0), Released);
+    source_button(&mut app, hit(15), Pressed);
+    let document = app.active_tab_session().expect("活动源码标签").document();
+    assert_eq!(document.selection_range(), None);
+    assert_eq!(document.cursor_offset().to_usize(), 15);
 }
 
 #[test]
-fn test_mouse_release_clears_empty_selection() {
-    let mut app = app_with_content(vec!["hello world"]);
-    let tab_id = app.editor_tab_id_at(0).expect("test tab index should be valid");
-    let modifiers = winit::keyboard::ModifiersState::empty();
-    let mut cursor_render_state = appkit_shell::cursor_motion::CursorRenderState::new();
+fn mouse_release_clears_a_collapsed_shared_selection() {
+    use winit::event::ElementState::{Pressed, Released};
 
-    // Single click
-    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        crate::source_pointer::handle_mouse_input_with_cursor_state(
-            winit::event::ElementState::Pressed,
-            10.0,
-            10.0,
-            mouse,
-            document,
-            &mut cursor_render_state,
-            modifiers,
-            Some((GraphemeOffset(5), 0, 0)),
-        );
-    })
-    .expect("test tab session should exist");
-
-    // Simulate drag but cursor hasn't moved (so selection anchor == cursor)
-    app.tab_session_mut(tab_id)
-        .expect("test tab session should exist")
-        .document_mut()
-        .cursor_mut()
-        .selection_anchor = Some(5);
-    app.tab_session_mut(tab_id)
-        .expect("test tab session should exist")
-        .document_mut()
-        .cursor_move_to_offset(5);
-
-    // Release
-    app.with_editor_document_and_mouse_for_test(tab_id, |mouse, document| {
-        crate::source_pointer::handle_mouse_input_with_cursor_state(
-            winit::event::ElementState::Released,
-            10.0,
-            10.0,
-            mouse,
-            document,
-            &mut cursor_render_state,
-            modifiers,
-            Some((GraphemeOffset(5), 0, 0)),
-        );
-    })
-    .expect("test tab session should exist");
-
-    // Empty selection should be cleared on release
-    let dv = app.active_tab_session().expect("active tab session");
+    let (mut app, hit) = source_pointer_fixture("hello world");
+    source_button(&mut app, hit(5), Pressed);
+    let (x, y) = hit(5);
+    let _ = app.dispatch_editor_cursor_moved(x, y, false);
     assert_eq!(
-        dv.document().cursor().selection_anchor,
+        app.active_tab_session().expect("活动源码标签").document().cursor().selection_anchor,
+        Some(5),
+    );
+
+    source_button(&mut app, hit(5), Released);
+    assert_eq!(
+        app.active_tab_session().expect("活动源码标签").document().cursor().selection_anchor,
         None,
-        "Empty selection should be cleared on mouse release"
     );
 }
 
@@ -1764,7 +1615,7 @@ fn test_backspace_with_empty_selection() {
 
     // Execute Backspace
     let mut cursor_render_state = appkit_shell::cursor_motion::CursorRenderState::new();
-    crate::commands::execute_edit_command_v2_with_presentation(
+    appkit_shell::editor_commands::execute_edit_command_with_system_clipboard(
         &EditCommand::Backspace,
         dv,
         &[],
@@ -1796,7 +1647,7 @@ fn tabs_geometry_and_preview_offset_use_instance_settings() {
     let second = DocumentFixture::new(vec!["second".into()], 10, 10.0);
     app.push_entry_for_test(second, Box::new(EditorPlugin::new()));
     app.switch_workspace_for_test(1);
-    app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+    app.editor_runtime.edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
     app.update_scale_factor(2.0);
 
     assert_eq!(app.current_tab_bar_height(), 64.0);
@@ -1804,20 +1655,21 @@ fn tabs_geometry_and_preview_offset_use_instance_settings() {
     let (_, preview_y) = app.preview_offsets();
     assert_eq!(preview_y, 168.0);
 
-    app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+    app.editor_runtime
+        .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
     assert_eq!(app.current_tab_bar_height(), 0.0);
 }
 
 #[test]
 fn editor_left_margin_respects_instance_line_number_setting() {
     let mut app = app_with_content(vec!["line"]);
-    app.settings.show_line_numbers = false;
-    app.settings.font_size = 40.0;
-    app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+    app.editor_runtime.edit_settings(|settings| settings.show_line_numbers = false);
+    app.editor_runtime.edit_settings(|settings| settings.font_size = 40.0);
+    app.editor_runtime.edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
 
     assert_eq!(app.editor_left_margin(1_000_000), 32.0);
 
-    app.settings.show_line_numbers = true;
+    app.editor_runtime.edit_settings(|settings| settings.show_line_numbers = true);
     assert!(app.editor_left_margin(1_000_000) > 32.0);
 }
 
@@ -1831,8 +1683,8 @@ fn ui_metrics_scales_logical_settings_by_dpi() {
     let metrics = app.ui_metrics();
 
     assert_eq!(metrics.dpi, 2.0);
-    assert_eq!(metrics.font_size, app.settings.font_size * 2.0);
-    assert_eq!(metrics.line_height, app.settings.line_height * 2.0);
+    assert_eq!(metrics.font_size, app.editor_runtime.settings().font_size * 2.0);
+    assert_eq!(metrics.line_height, app.editor_runtime.settings().line_height * 2.0);
 }
 
 #[test]
@@ -1845,16 +1697,12 @@ fn persisted_font_size_returns_logical_value() {
 #[test]
 fn viewport_dimensions_use_instance_line_height_and_chrome() {
     let mut app = App::new(None);
-    app.replace_editor_model(
-        crate::app_init::build_product_workspace(),
-        appkit_shell::tab_runtime::TabRuntimeStore::default(),
-    );
     let dv = crate::document_fixture::DocumentFixture::new(vec!["".into()], 80, 10.0);
     app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
-    app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
-    app.settings.show_status_bar = false;
+    app.editor_runtime.edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
+    app.editor_runtime.edit_settings(|settings| settings.show_status_bar = false);
     app.update_scale_factor(2.0);
-    app.settings.line_height = 40.0;
+    app.editor_runtime.edit_settings(|settings| settings.line_height = 40.0);
     // metrics.line_height = 40.0 * 2.0 = 80.0 (physical)
     // screen 400 physical / 80 physical = 5 visible rows
     let dims = app.viewport_dimensions(400.0);
@@ -1869,22 +1717,22 @@ fn viewport_dimensions_use_instance_line_height_and_chrome() {
 fn scale_factor_changes_metrics_but_not_logical_settings() {
     let mut app = App::new(None);
     let before = (
-        app.settings.font_size,
-        app.settings.line_height,
-        app.settings.status_bar_height,
-        app.settings.gutter_padding,
-        app.settings.toc_width,
+        app.editor_runtime.settings().font_size,
+        app.editor_runtime.settings().line_height,
+        app.editor_runtime.settings().status_bar_height,
+        app.editor_runtime.settings().gutter_padding,
+        app.editor_runtime.settings().toc_width,
     );
 
     app.update_scale_factor(2.0);
     let retina = app.ui_metrics();
     assert_eq!(
         (
-            app.settings.font_size,
-            app.settings.line_height,
-            app.settings.status_bar_height,
-            app.settings.gutter_padding,
-            app.settings.toc_width,
+            app.editor_runtime.settings().font_size,
+            app.editor_runtime.settings().line_height,
+            app.editor_runtime.settings().status_bar_height,
+            app.editor_runtime.settings().gutter_padding,
+            app.editor_runtime.settings().toc_width,
         ),
         before
     );
@@ -1899,26 +1747,27 @@ fn scale_factor_changes_metrics_but_not_logical_settings() {
 #[test]
 fn dpi_zoom_and_sidebar_width_are_reversible() {
     let mut app = App::new(None);
-    let logical_font = app.settings.font_size;
-    let logical_sidebar = app.ui_shell.sidebar_width() / app.ui_metrics().dpi;
-    let settings_version = app.settings.version;
+    let logical_font = app.editor_runtime.settings().font_size;
+    let logical_sidebar = app.ui_shell.sidebar_width_logical();
+    let settings_version = app.editor_runtime.settings().version;
     let reshape_generation = app.editor_runtime.reshape_generation();
 
     app.handle_scale_factor_changed(2.0);
-    assert_eq!(app.settings.font_size, logical_font);
-    assert_eq!(app.settings.version, settings_version);
+    assert_eq!(app.editor_runtime.settings().font_size, logical_font);
+    assert_eq!(app.editor_runtime.settings().version, settings_version);
     assert!(app.editor_runtime.reshape_generation() > reshape_generation);
     assert_eq!(app.ui_metrics().font_size, logical_font * 2.0);
-    assert_eq!(app.ui_shell.sidebar_width(), logical_sidebar * 2.0);
+    assert_eq!(app.ui_shell.sidebar_width_logical(), logical_sidebar);
+    assert_eq!(app.ui_shell.sidebar_cfg().width_px(app.ui_metrics().dpi), logical_sidebar * 2.0);
 
     let _ = app.apply_zoom(logical_font + 1.0);
-    assert_eq!(app.settings.font_size, logical_font + 1.0);
+    assert_eq!(app.editor_runtime.settings().font_size, logical_font + 1.0);
     assert_eq!(app.ui_metrics().font_size, (logical_font + 1.0) * 2.0);
 
     app.handle_scale_factor_changed(1.0);
-    assert_eq!(app.settings.font_size, logical_font + 1.0);
+    assert_eq!(app.editor_runtime.settings().font_size, logical_font + 1.0);
     assert_eq!(app.ui_metrics().font_size, logical_font + 1.0);
-    assert_eq!(app.ui_shell.sidebar_width(), logical_sidebar);
+    assert_eq!(app.ui_shell.sidebar_width_logical(), logical_sidebar);
 }
 
 // ── apply_effect step pipeline tests ────────────────────────────────
@@ -1929,23 +1778,23 @@ use crate::plugins::editor::EditorPlugin;
 #[test]
 fn apply_effect_runs_reshape_before_redraw_without_window() {
     let mut app = App::new(None);
-    app.needs_redraw = false;
+    app.platform.clear_redraw();
     let generation = app.editor_runtime.reshape_generation();
 
     app.apply_effect(AppEffect::RESHAPE);
 
     assert_eq!(app.editor_runtime.reshape_generation(), generation + 1);
-    assert!(app.needs_redraw);
+    assert!(app.platform.redraw_pending());
 }
 
 #[test]
 fn apply_window_chrome_effect_is_safe_without_window() {
     let mut app = App::new(None);
-    app.needs_redraw = false;
+    app.platform.clear_redraw();
 
     app.apply_effect(AppEffect::SYNC_WINDOW_CHROME);
 
-    assert!(app.needs_redraw);
+    assert!(app.platform.redraw_pending());
 }
 
 #[test]
@@ -1953,12 +1802,12 @@ fn apply_persist_settings_continues_on_io_error() {
     // persist_settings should not panic even if settings file is unavailable;
     // the pipeline must continue and still trigger redraw if requested.
     let mut app = App::new(None);
-    app.needs_redraw = false;
+    app.platform.clear_redraw();
 
     let effect = AppEffect::PERSIST_SETTINGS.merge(AppEffect::REDRAW);
     app.apply_effect(effect);
 
-    assert!(app.needs_redraw, "pipeline must continue past settings error to redraw");
+    assert!(app.platform.redraw_pending(), "pipeline must continue past settings error to redraw");
 }
 
 // ── WYSIWYG source and cursor sync tests ────────────────────────────
@@ -2424,6 +2273,22 @@ impl ui::plugin::SelectionView for RecordingPreviewPlugin {
             .map(|(line, grapheme)| ui::plugin::ReadingPosition::new(line, grapheme))
     }
 
+    fn word_range(
+        &self,
+        position: ui::plugin::ReadingPosition,
+    ) -> Option<std::ops::Range<ui::plugin::ReadingPosition>> {
+        let (line, _) = position.indices();
+        Some(ui::plugin::ReadingPosition::new(line, 0)..ui::plugin::ReadingPosition::new(line, 5))
+    }
+
+    fn line_range(
+        &self,
+        position: ui::plugin::ReadingPosition,
+    ) -> Option<std::ops::Range<ui::plugin::ReadingPosition>> {
+        let (line, _) = position.indices();
+        Some(ui::plugin::ReadingPosition::new(line, 0)..ui::plugin::ReadingPosition::new(line, 11))
+    }
+
     fn set_selection_anchor(
         &mut self,
         position: Option<ui::plugin::ReadingPosition>,
@@ -2460,12 +2325,12 @@ fn preview_mouse_hit_test_uses_plugin_render_bounds_origin() {
     app.push_entry_for_test(doc, Box::new(RecordingPreviewPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
+    app.prepare_editor_pointer_frame_for_test();
     let bounds = app.plugin_render_bounds();
     let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         bounds.x + 10.0,
         bounds.y + 10.0,
-        None,
     );
 
     assert_eq!(
@@ -2488,26 +2353,23 @@ fn preview_tiny_mouse_move_does_not_start_selection() {
         app.push_entry_for_test(doc, Box::new(RecordingPreviewPlugin::new(state.clone())));
         app.switch_workspace_for_test(0);
 
+        app.prepare_editor_pointer_frame_for_test();
         let bounds = app.plugin_render_bounds();
         let click_x = bounds.x + 10.0;
         let click_y = bounds.y + 10.0;
         let tiny_drag_x = click_x + 4.0 * scale_factor as f32;
-        let _ = app.dispatch_editor_mouse_input(
-            winit::event::ElementState::Pressed,
-            click_x,
-            click_y,
-            None,
-        );
+        let _ =
+            app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y);
         state.borrow_mut().hit_test_position = Some((0, 1));
 
-        let _ = app.dispatch_editor_cursor_moved(tiny_drag_x, click_y, None);
+        let _ = app.dispatch_editor_cursor_moved(tiny_drag_x, click_y, false);
 
         assert!(
             !app.active_tab_session().expect("active runtime session").plugin_has_selection(),
             "tiny preview mouse movement should not start text selection"
         );
         let _ =
-            app.dispatch_editor_cursor_moved(click_x + 6.0 * scale_factor as f32, click_y, None);
+            app.dispatch_editor_cursor_moved(click_x + 6.0 * scale_factor as f32, click_y, false);
         assert!(
             app.active_tab_session().expect("active runtime session").plugin_has_selection(),
             "deliberate preview dragging should still select text at every scale"
@@ -2526,25 +2388,41 @@ fn preview_mouse_release_clears_empty_selection() {
     app.push_entry_for_test(doc, Box::new(RecordingPreviewPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
+    app.prepare_editor_pointer_frame_for_test();
     let bounds = app.plugin_render_bounds();
     let click_x = bounds.x + 10.0;
     let click_y = bounds.y + 10.0;
-    let _ = app.dispatch_editor_mouse_input(
-        winit::event::ElementState::Pressed,
-        click_x,
-        click_y,
-        None,
-    );
-    let _ = app.dispatch_editor_mouse_input(
-        winit::event::ElementState::Released,
-        click_x,
-        click_y,
-        None,
-    );
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, click_x, click_y);
 
     let preview_state = state.borrow();
     assert_eq!(preview_state.selection_anchor, None);
     assert_eq!(preview_state.selection_cursor, None);
+}
+
+#[test]
+fn preview_mouse_multiple_clicks_select_a_word_then_a_line() {
+    let state = std::rc::Rc::new(std::cell::RefCell::new(RecordingPreviewState {
+        hit_test_position: Some((0, 2)),
+        ..RecordingPreviewState::default()
+    }));
+    let mut app = App::new(None);
+    let document = DocumentFixture::new(vec!["hello world".to_owned()], 80, 10.0);
+    app.push_entry_for_test(document, Box::new(RecordingPreviewPlugin::new(state.clone())));
+    app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
+
+    let bounds = app.plugin_render_bounds();
+    for selection_end in [None, Some((0, 5)), Some((0, 11))] {
+        for phase in [winit::event::ElementState::Pressed, winit::event::ElementState::Released] {
+            let effect = app.dispatch_editor_mouse_input(phase, bounds.x + 10.0, bounds.y + 10.0);
+            assert!(effect.redraw);
+        }
+        assert_eq!(state.borrow().selection_anchor, selection_end.map(|_| (0, 0)));
+        assert_eq!(state.borrow().selection_cursor, selection_end);
+    }
+    let tab = app.active_tab_session().expect("预览测试需要活动标签");
+    assert_eq!(tab.document().selection_range(), None);
 }
 
 #[test]
@@ -2560,13 +2438,13 @@ fn wysiwyg_missing_projection_keeps_cursor_and_selection_unchanged() {
     doc.cursor_mut().selection_anchor = Some(1);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state)));
     app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
 
     let bounds = app.plugin_render_bounds();
     let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         bounds.x + 10.0,
         bounds.y + 10.0,
-        None,
     );
 
     let entry = app.active_tab_session().expect("active entry");
@@ -2586,25 +2464,21 @@ fn wysiwyg_tiny_mouse_move_after_click_does_not_create_selection() {
         let doc = DocumentFixture::new(vec!["abcdef".to_string()], 80, 10.0);
         app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
         app.switch_workspace_for_test(0);
+        app.prepare_editor_pointer_frame_for_test();
 
         let bounds = app.plugin_render_bounds();
         let click_x = bounds.x + 10.0;
         let click_y = bounds.y + 10.0;
-        let _ = app.dispatch_editor_mouse_input(
-            winit::event::ElementState::Pressed,
-            click_x,
-            click_y,
-            None,
-        );
+        let _ =
+            app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y);
         state.borrow_mut().hit_test_byte = Some(3);
 
         let _ =
-            app.dispatch_editor_cursor_moved(click_x + 4.0 * scale_factor as f32, click_y, None);
+            app.dispatch_editor_cursor_moved(click_x + 4.0 * scale_factor as f32, click_y, false);
         let _ = app.dispatch_editor_mouse_input(
             winit::event::ElementState::Released,
             click_x + 4.0 * scale_factor as f32,
             click_y,
-            None,
         );
 
         let active_entry = app.active_tab_session().expect("active entry");
@@ -2638,25 +2512,21 @@ fn wysiwyg_backward_drag_keeps_plugin_selection_anchor() {
         let doc = DocumentFixture::new(vec!["abc：def".to_string()], 80, 10.0);
         app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
         app.switch_workspace_for_test(0);
+        app.prepare_editor_pointer_frame_for_test();
 
         let bounds = app.plugin_render_bounds();
         let click_x = bounds.x + 10.0;
         let click_y = bounds.y + 10.0;
-        let _ = app.dispatch_editor_mouse_input(
-            winit::event::ElementState::Pressed,
-            click_x,
-            click_y,
-            None,
-        );
+        let _ =
+            app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y);
         state.borrow_mut().hit_test_byte = Some(3);
 
         let _ =
-            app.dispatch_editor_cursor_moved(click_x - 6.0 * scale_factor as f32, click_y, None);
+            app.dispatch_editor_cursor_moved(click_x - 6.0 * scale_factor as f32, click_y, false);
         let _ = app.dispatch_editor_mouse_input(
             winit::event::ElementState::Released,
             click_x - 6.0 * scale_factor as f32,
             click_y,
-            None,
         );
 
         let active_entry = app.active_tab_session().expect("active entry");
@@ -2682,22 +2552,18 @@ fn wysiwyg_backward_drag_keeps_initial_anchor_across_moves() {
     let doc = DocumentFixture::new(vec!["abc：def".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
 
     let bounds = app.plugin_render_bounds();
     let click_x = bounds.x + 80.0;
     let click_y = bounds.y + 10.0;
-    let _ = app.dispatch_editor_mouse_input(
-        winit::event::ElementState::Pressed,
-        click_x,
-        click_y,
-        None,
-    );
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y);
 
     state.borrow_mut().hit_test_byte = Some(5);
-    let _ = app.dispatch_editor_cursor_moved(click_x - 20.0, click_y, None);
+    let _ = app.dispatch_editor_cursor_moved(click_x - 20.0, click_y, false);
 
     state.borrow_mut().hit_test_byte = Some(3);
-    let _ = app.dispatch_editor_cursor_moved(click_x - 40.0, click_y, None);
+    let _ = app.dispatch_editor_cursor_moved(click_x - 40.0, click_y, false);
 
     let active_entry = app.active_tab_session().expect("active entry");
     assert_eq!(
@@ -2729,20 +2595,16 @@ fn wysiwyg_drag_move_does_not_synchronously_render_plugin() {
         DocumentFixture::new(vec!["first line".to_string(), "> quoted line".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
 
     let bounds = app.plugin_render_bounds();
     let click_x = bounds.x + 80.0;
     let click_y = bounds.y + 10.0;
-    let _ = app.dispatch_editor_mouse_input(
-        winit::event::ElementState::Pressed,
-        click_x,
-        click_y,
-        None,
-    );
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y);
     state.borrow_mut().render_count = 0;
 
     state.borrow_mut().hit_test_byte = Some(2);
-    let _ = app.dispatch_editor_cursor_moved(click_x - 40.0, click_y + 24.0, None);
+    let _ = app.dispatch_editor_cursor_moved(click_x - 40.0, click_y + 24.0, false);
 
     let active_entry = app.active_tab_session().expect("active entry");
     assert_eq!(
@@ -2770,24 +2632,19 @@ fn wysiwyg_backward_drag_across_paragraph_keeps_plugin_selection_anchor() {
     let doc = DocumentFixture::new(source.lines().map(|line| line.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
 
     let bounds = app.plugin_render_bounds();
     let click_x = bounds.x + 180.0;
     let click_y = bounds.y + 80.0;
-    let _ = app.dispatch_editor_mouse_input(
-        winit::event::ElementState::Pressed,
-        click_x,
-        click_y,
-        None,
-    );
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y);
     state.borrow_mut().hit_test_byte = Some(cursor_byte);
 
-    let _ = app.dispatch_editor_cursor_moved(click_x - 120.0, click_y - 48.0, None);
+    let _ = app.dispatch_editor_cursor_moved(click_x - 120.0, click_y - 48.0, false);
     let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Released,
         click_x - 120.0,
         click_y - 48.0,
-        None,
     );
 
     let active_entry = app.active_tab_session().expect("active entry");
@@ -2910,7 +2767,7 @@ fn render_active_wysiwyg_plugin_in_bounds_for_test(
     app: &mut App,
     bounds: ui::core::geom::Rect,
 ) -> ui::core::paint::DrawList {
-    let theme = app.current_theme.clone();
+    let theme = app.editor_runtime.theme().clone();
     let dpi = app.ui_metrics().dpi;
     let font_size = app.ui_metrics().font_size;
     let mut shaper = app
@@ -2927,7 +2784,7 @@ fn prepare_and_render_active_mmap_canvas_for_test(
 ) -> ui::canvas::CanvasViewportSnapshot {
     let font_size = app.ui_metrics().font_size;
     let dpi = app.ui_metrics().dpi;
-    let theme = app.current_theme.clone();
+    let theme = app.editor_runtime.theme().clone();
     let mut shaper = app
         .editor_runtime
         .new_shaper(font_size, "")
@@ -2947,7 +2804,7 @@ fn render_active_mmap_canvas_snapshot_for_test(
 ) {
     let font_size = app.ui_metrics().font_size;
     let dpi = app.ui_metrics().dpi;
-    let theme = app.current_theme.clone();
+    let theme = app.editor_runtime.theme().clone();
     let mut shaper = app
         .editor_runtime
         .new_shaper(font_size, "")
@@ -2972,6 +2829,7 @@ fn app_with_mmap_source(source: &str) -> App {
     let doc = DocumentFixture::new(source.split('\n').map(str::to_owned).collect(), 80, 10.0);
     app.push_entry_for_test(doc, Box::new(textora_mindmap::mindmap_view::MindmapView::new()));
     app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
     app
@@ -3066,7 +2924,7 @@ fn mmap_node_subtree_range_by_title(source: &str, title: &str) -> std::ops::Rang
     }
 
     let tree = textora_mindmap::mmf::parser::parse(source).expect("mmap drag fixture must parse");
-    find_node_by_title(&tree.root, title)
+    find_node_by_title(tree.root(), title)
         .unwrap_or_else(|| panic!("mmap drag fixture must contain node {title}"))
         .subtree_source_range
         .clone()
@@ -3148,23 +3006,19 @@ fn drag_mmap_node(app: &mut App, source_title: &str, target: DragTarget<'_>) {
         winit::event::ElementState::Pressed,
         source_card.left,
         source_card.top,
-        None,
     );
     let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Released,
         source_card.left,
         source_card.top,
-        None,
     );
     let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         source_card.left,
         source_card.top,
-        None,
     );
-    let _ = app.dispatch_editor_cursor_moved(drop_x, drop_y, None);
-    let _ =
-        app.dispatch_editor_mouse_input(winit::event::ElementState::Released, drop_x, drop_y, None);
+    let _ = app.dispatch_editor_cursor_moved(drop_x, drop_y, false);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, drop_x, drop_y);
 }
 
 #[test]
@@ -3271,7 +3125,7 @@ fn mmap_dragging_the_root_keeps_the_source_unchanged() {
 fn mmap_dragging_title_text_selects_text_without_moving_the_node() {
     let source = "# Root\n## Alpha\n## Beta\n";
     let tree = textora_mindmap::mmf::parser::parse(source).expect("fixture must parse");
-    let alpha_range = tree.root.children[0].title_byte_range.clone();
+    let alpha_range = tree.root().children[0].title_byte_range.clone();
     let mut app = app_with_mmap_source(source);
     let alpha_start_point = mmap_text_caret_hit_point(&mut app, alpha_range.start);
     let alpha_end_point = mmap_text_caret_hit_point(&mut app, alpha_range.end);
@@ -3280,14 +3134,12 @@ fn mmap_dragging_title_text_selects_text_without_moving_the_node() {
         winit::event::ElementState::Pressed,
         alpha_start_point.0,
         alpha_start_point.1,
-        None,
     );
-    let _ = app.dispatch_editor_cursor_moved(alpha_end_point.0, alpha_end_point.1, None);
+    let _ = app.dispatch_editor_cursor_moved(alpha_end_point.0, alpha_end_point.1, false);
     let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Released,
         alpha_end_point.0,
         alpha_end_point.1,
-        None,
     );
 
     let tab = app.active_tab_session().expect("active mmap tab");
@@ -3301,8 +3153,8 @@ fn mmap_dragging_title_text_selects_text_without_moving_the_node() {
 fn mmap_drag_between_titles_does_not_create_a_document_selection() {
     let source = "# Root\n## Alpha\n## Beta\n";
     let tree = textora_mindmap::mmf::parser::parse(source).expect("fixture must parse");
-    let alpha_range = tree.root.children[0].title_byte_range.clone();
-    let beta_range = tree.root.children[1].title_byte_range.clone();
+    let alpha_range = tree.root().children[0].title_byte_range.clone();
+    let beta_range = tree.root().children[1].title_byte_range.clone();
     let mut app = app_with_mmap_source(source);
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
@@ -3313,19 +3165,17 @@ fn mmap_drag_between_titles_does_not_create_a_document_selection() {
         winit::event::ElementState::Pressed,
         alpha_point.0,
         alpha_point.1,
-        None,
     );
     assert_eq!(
         app.active_tab_session().expect("active mmap tab").document().cursor_offset().to_usize(),
         alpha_range.start,
         "fixture must press the first title's semantic text caret"
     );
-    let _ = app.dispatch_editor_cursor_moved(beta_point.0, beta_point.1, None);
+    let _ = app.dispatch_editor_cursor_moved(beta_point.0, beta_point.1, false);
     let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Released,
         beta_point.0,
         beta_point.1,
-        None,
     );
 
     let tab = app.active_tab_session().expect("active mmap tab");
@@ -3341,7 +3191,7 @@ fn mmap_drag_between_titles_does_not_create_a_document_selection() {
 fn mmap_drag_within_a_title_selects_its_source_range() {
     let source = "# Root\n## Alpha\n## Beta\n";
     let tree = textora_mindmap::mmf::parser::parse(source).expect("fixture must parse");
-    let alpha_range = tree.root.children[0].title_byte_range.clone();
+    let alpha_range = tree.root().children[0].title_byte_range.clone();
     let mut app = app_with_mmap_source(source);
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
@@ -3352,9 +3202,8 @@ fn mmap_drag_within_a_title_selects_its_source_range() {
         winit::event::ElementState::Pressed,
         alpha_start_point.0,
         alpha_start_point.1,
-        None,
     );
-    let _ = app.dispatch_editor_cursor_moved(alpha_end_point.0, alpha_end_point.1, None);
+    let _ = app.dispatch_editor_cursor_moved(alpha_end_point.0, alpha_end_point.1, false);
 
     let tab = app.active_tab_session().expect("active mmap tab");
     assert_eq!(tab.document().selection_range(), Some((alpha_range.start, alpha_range.end)));
@@ -3365,7 +3214,7 @@ fn mmap_drag_within_a_title_selects_its_source_range() {
 fn mmap_title_double_click_selects_the_title_word() {
     let source = "# Root\n## Alpha\n## Beta\n";
     let tree = textora_mindmap::mmf::parser::parse(source).expect("fixture must parse");
-    let alpha_range = tree.root.children[0].title_byte_range.clone();
+    let alpha_range = tree.root().children[0].title_byte_range.clone();
     let mut app = app_with_mmap_source(source);
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
@@ -3375,19 +3224,16 @@ fn mmap_title_double_click_selects_the_title_word() {
         winit::event::ElementState::Pressed,
         alpha_point.0,
         alpha_point.1,
-        None,
     );
     let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Released,
         alpha_point.0,
         alpha_point.1,
-        None,
     );
     let _ = app.dispatch_editor_mouse_input(
         winit::event::ElementState::Pressed,
         alpha_point.0,
         alpha_point.1,
-        None,
     );
 
     let tab = app.active_tab_session().expect("active mmap tab");
@@ -3399,7 +3245,7 @@ fn mmap_title_double_click_selects_the_title_word() {
 fn mmap_selected_node_typing_replaces_title_then_undo_and_redo_restore_it() {
     let source = "# Root\n## Parent\n### Child\n## Next\n";
     let tree = textora_mindmap::mmf::parser::parse(source).expect("parse fixture");
-    let parent_range = tree.root.children[0].subtree_source_range.clone();
+    let parent_range = tree.root().children[0].subtree_source_range.clone();
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, parent_range);
     let generation_before =
@@ -3428,7 +3274,7 @@ fn mmap_tab_creates_empty_child_and_enter_creates_empty_sibling() {
     let mut app = app_with_mmap_source(source);
     {
         let mut tab = app.active_tab_session_mut().expect("active mmap tab");
-        tab.document_mut().cursor_move_to_offset(tree.root.children[0].title_byte_range.end);
+        tab.document_mut().cursor_move_to_offset(tree.root().children[0].title_byte_range.end);
         tab.document_mut().cursor_mut().selection_anchor = None;
     }
     app.sync_plugin_state();
@@ -3440,8 +3286,8 @@ fn mmap_tab_creates_empty_child_and_enter_creates_empty_sibling() {
     let _ = app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
     let after_sibling = active_document_text(&app);
     let parsed = textora_mindmap::mmf::parser::parse(&after_sibling).expect("parse edited map");
-    assert_eq!(parsed.root.children[0].children.len(), 2);
-    assert!(parsed.root.children[0].children.iter().all(|child| child.title.is_empty()));
+    assert_eq!(parsed.root().children[0].children.len(), 2);
+    assert!(parsed.root().children[0].children.iter().all(|child| child.title.is_empty()));
 }
 
 #[test]
@@ -3449,7 +3295,7 @@ fn mmap_tab_creates_empty_child_and_enter_creates_empty_sibling() {
 fn mmap_demote_adjusts_whole_subtree_and_undoes_once() {
     let source = "# Root\n## First\n## Second\n### Leaf\n";
     let tree = textora_mindmap::mmf::parser::parse(source).expect("parse fixture");
-    let second_range = tree.root.children[1].subtree_source_range.clone();
+    let second_range = tree.root().children[1].subtree_source_range.clone();
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, second_range);
 
@@ -3465,7 +3311,7 @@ fn mmap_demote_adjusts_whole_subtree_and_undoes_once() {
 fn mmap_selected_node_delete_removes_subtree_then_undo_restores_it() {
     let source = "# Root\n## Parent\n### Child\n## Next\n";
     let tree = textora_mindmap::mmf::parser::parse(source).expect("parse fixture");
-    let parent_range = tree.root.children[0].subtree_source_range.clone();
+    let parent_range = tree.root().children[0].subtree_source_range.clone();
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, parent_range);
 
@@ -3481,7 +3327,7 @@ fn mmap_selected_node_delete_removes_subtree_then_undo_restores_it() {
 fn mmap_preedit_does_not_change_document_until_commit() {
     let source = "# Root\n## Original\n";
     let tree = textora_mindmap::mmf::parser::parse(source).expect("parse fixture");
-    let selected_range = tree.root.children[0].subtree_source_range.clone();
+    let selected_range = tree.root().children[0].subtree_source_range.clone();
     let mut app = app_with_mmap_source(source);
     select_mmap_source_object(&mut app, selected_range);
     set_editor_preedit_for_test(&mut app, "ni", Some((2, 2)));
@@ -3807,10 +3653,10 @@ fn non_canvas_plugin_editor_and_preview_keep_scroll_and_global_font_zoom() {
         Box::new(RecordingPreviewPlugin::new(preview_state)),
     );
 
-    let original_font_size = app.settings.font_size;
+    let original_font_size = app.editor_runtime.settings().font_size;
     let _ = app.apply_zoom(original_font_size + FONT_ZOOM_DELTA);
 
-    assert_eq!(app.settings.font_size, original_font_size + FONT_ZOOM_DELTA);
+    assert_eq!(app.editor_runtime.settings().font_size, original_font_size + FONT_ZOOM_DELTA);
     assert_eq!(
         app.tab_session(editor_tab_id).expect("editor tab").scroll_top() as f32,
         INITIAL_SCROLL_ROW as f32,
@@ -3886,6 +3732,7 @@ fn wysiwyg_promotion_blockquote_line_three_click_and_up_navigation_reach_its_sou
         DocumentFixture::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(document, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
 
@@ -3914,18 +3761,8 @@ fn wysiwyg_promotion_blockquote_line_three_click_and_up_navigation_reach_its_sou
     }
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
-    let _ = app.dispatch_editor_mouse_input(
-        winit::event::ElementState::Pressed,
-        click_x,
-        click_y,
-        None,
-    );
-    let _ = app.dispatch_editor_mouse_input(
-        winit::event::ElementState::Released,
-        click_x,
-        click_y,
-        None,
-    );
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, click_x, click_y);
 
     let clicked_byte =
         app.active_tab_session().expect("active entry").document().cursor_offset().to_usize();
@@ -4019,6 +3856,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         DocumentFixture::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
     app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
     app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
     app.sync_plugin_state();
     render_active_wysiwyg_plugin_for_test(&mut app);
 
@@ -4030,13 +3868,8 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     let probe_x = bounds.x + probe_rect.0 + probe_rect.2 * 0.5;
     let probe_y = bounds.y + probe_rect.1 + probe_rect.3 * 0.5;
 
-    let _ = app.dispatch_editor_mouse_input(
-        winit::event::ElementState::Pressed,
-        blank_x,
-        blank_y,
-        None,
-    );
-    let _ = app.dispatch_editor_cursor_moved(probe_x, probe_y, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, blank_x, blank_y);
+    let _ = app.dispatch_editor_cursor_moved(probe_x, probe_y, false);
     render_active_wysiwyg_plugin_for_test(&mut app);
 
     let tab = app.active_tab_session().expect("active entry");
@@ -4048,7 +3881,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         tab.document().selection_range()
     );
 
-    let highlights = tab.selection_highlights(app.current_theme.editor.selection);
+    let highlights = tab.selection_highlights(app.editor_runtime.theme().editor.selection);
     let current_probe_rect = {
         let tab = app.active_tab_session().expect("active entry");
         tab.query_cursor_screen_rect(probe_byte).expect("expected current WYSIWYG cursor rect")
@@ -4101,7 +3934,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     let bounds = app.plugin_render_bounds();
     let probe_y = bounds.y + probe_rect.1 + probe_rect.3 * 0.5;
     let tab = app.active_tab_session().expect("active entry");
-    let highlights = tab.selection_highlights(app.current_theme.editor.selection);
+    let highlights = tab.selection_highlights(app.editor_runtime.theme().editor.selection);
     let final_text_line_highlighted = highlights.cmds.iter().any(|cmd| {
         matches!(
             cmd,
@@ -4779,17 +4612,17 @@ fn wrapped_markdown_app_for_caret_test(
     let inputs = app.build_shell_inputs();
     app.ui_shell.update_frame(
         ui::Screen::new(window_width, window_height),
-        &app.current_theme,
+        app.editor_runtime.theme(),
         &mut ui::core::measure::NoopMeasure,
         &inputs,
     );
     let metrics = app.ui_metrics();
     let render_settings = ui::plugin::ViewRenderSettings {
-        font_family: app.settings.font_family.clone(),
+        font_family: app.editor_runtime.settings().font_family.clone(),
         font_size: metrics.font_size / metrics.dpi,
         line_height: metrics.line_height / metrics.dpi,
-        toc_max_depth: app.settings.toc_max_depth,
-        markdown_first_line_indent: app.settings.markdown_first_line_indent,
+        toc_max_depth: app.editor_runtime.settings().toc_max_depth,
+        markdown_first_line_indent: app.editor_runtime.settings().markdown_first_line_indent,
     };
     app.active_tab_session_mut()
         .expect("wrapped Markdown fixture")
@@ -4951,6 +4784,7 @@ fn wysiwyg_mouse_click_preserves_the_requested_soft_wrap_side() {
             Box::new(textora_markdown::view::MarkdownEditorView::new()),
         );
         app.switch_workspace_for_test(0);
+        app.prepare_editor_pointer_frame_for_test();
         app.sync_plugin_state();
         render_active_wysiwyg_plugin_for_test(&mut app);
         assert!(app.dispatch_wysiwyg_navigation(&EditCommand::MoveToLineEnd).redraw);
@@ -4961,18 +4795,10 @@ fn wysiwyg_mouse_click_preserves_the_requested_soft_wrap_side() {
         let bounds = app.plugin_render_bounds();
         let click_x = bounds.x + before.0;
         let click_y = bounds.y + before.1 + before.3 * 0.5;
-        let _ = app.dispatch_editor_mouse_input(
-            winit::event::ElementState::Pressed,
-            click_x,
-            click_y,
-            None,
-        );
-        let _ = app.dispatch_editor_mouse_input(
-            winit::event::ElementState::Released,
-            click_x,
-            click_y,
-            None,
-        );
+        let _ =
+            app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, click_x, click_y);
+        let _ =
+            app.dispatch_editor_mouse_input(winit::event::ElementState::Released, click_x, click_y);
         render_active_wysiwyg_plugin_for_test(&mut app);
         let tab = app.active_tab_session().expect("clicked soft-wrap pointer fixture");
         assert_eq!(tab.document().cursor_offset().to_usize(), byte);
@@ -5268,8 +5094,11 @@ fn wysiwyg_single_click_uses_snapped_byte_for_selection_anchor() {
     let doc = DocumentFixture::new(vec![content], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
+    let bounds = app.plugin_render_bounds();
+    let (press_x, press_y) = (bounds.x + 10.0, bounds.y + 10.0);
 
-    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, press_x, press_y);
 
     let tab = app.active_tab_session().expect("active tab should exist");
     let snapped = tab.document().cursor_offset().to_usize();
@@ -5290,11 +5119,14 @@ fn wysiwyg_double_click_selects_word_at_hit_byte() {
     let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
+    let bounds = app.plugin_render_bounds();
+    let (press_x, press_y) = (bounds.x + 10.0, bounds.y + 10.0);
 
-    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
-    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
-    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
-    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, press_x, press_y);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, press_x, press_y);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, press_x, press_y);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, press_x, press_y);
 
     let tab = app.active_tab_session().expect("active tab");
     assert_eq!(tab.document().selection_range(), Some((6, 11)));
@@ -5314,9 +5146,12 @@ fn wysiwyg_single_click_moves_cursor_without_leaving_empty_selection() {
     let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
+    app.prepare_editor_pointer_frame_for_test();
+    let bounds = app.plugin_render_bounds();
+    let (press_x, press_y) = (bounds.x + 10.0, bounds.y + 10.0);
 
-    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, 40.0, 24.0, None);
-    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, 40.0, 24.0, None);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Pressed, press_x, press_y);
+    let _ = app.dispatch_editor_mouse_input(winit::event::ElementState::Released, press_x, press_y);
 
     let tab = app.active_tab_session().expect("active tab");
     assert_eq!(tab.document().cursor_offset().to_usize(), 5);
@@ -5372,9 +5207,6 @@ fn ime_cursor_area_uses_nonzero_plugin_render_bounds_origin() {
     app.push_entry_for_test(doc, Box::new(RecordingWysiwygPlugin::new(state.clone())));
     app.switch_workspace_for_test(0);
 
-    // A nonzero advance would expose an accidental second shift by the host.
-    app.preedit_advance_px = 15.0;
-
     let rect = app.plugin_cursor_window_rect(5).expect("should return rect");
     let bounds = app.plugin_render_bounds();
     assert!(
@@ -5394,12 +5226,11 @@ fn ime_cursor_area_uses_nonzero_plugin_render_bounds_origin() {
     );
     assert_eq!(candidate_y, rect.bottom(), "candidate_y should equal rect.bottom()");
 
-    let ime_cursor_x = crate::app_window::ime_cursor_x(rect, true, app.preedit_advance_px);
     let expected_x = bounds.x + 10.0;
     assert!(
-        (ime_cursor_x - expected_x).abs() < 0.001,
-        "ime_cursor_x ({}) should equal the projected plugin cursor at {}",
-        ime_cursor_x,
+        (rect.x - expected_x).abs() < 0.001,
+        "cursor x ({}) should equal the projected plugin cursor at {}",
+        rect.x,
         expected_x
     );
 }

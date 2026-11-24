@@ -1,5 +1,4 @@
 use crate::action::NotoraAction;
-use crate::effect_executor::ManualSaveRequest;
 use crate::external_files::CanonicalExternalPath;
 use notora_core::ExternalFileId;
 
@@ -17,14 +16,6 @@ impl NotoraRuntime {
             }
             DocumentCommand::RequestCatalogReindex { tab_id, saved_path } => {
                 self.request_catalog_reindex_after_note_save(tab_id, saved_path.as_deref());
-            }
-            DocumentCommand::CompleteExternalSaveAs { request, save_succeeded, saved_path } => {
-                let outcome = self.document_runtime.complete_pending_external_save_as(
-                    request,
-                    save_succeeded,
-                    saved_path,
-                );
-                self.apply_document_outcome(outcome);
             }
             DocumentCommand::ChooseExternalSavePath { tab_id, external_file_id } => {
                 self.save_untitled_external_file(tab_id, external_file_id);
@@ -63,20 +54,6 @@ impl NotoraRuntime {
                 path,
             } => {
                 self.start_conflict_retry_revision_capture(identity, tab_id, content_revision, path)
-            }
-            DocumentCommand::BeginConflictRetry { request, pending } => {
-                let origin = match request {
-                    ManualSaveRequest::Note { tab_id, .. } => self.document_origin_for_tab(tab_id),
-                    ManualSaveRequest::ExistingExternalFile { .. }
-                    | ManualSaveRequest::UntitledExternalFile { .. } => None,
-                };
-                let outcome = self.document_runtime.begin_conflict_retry(
-                    request,
-                    pending,
-                    origin,
-                    self.window_runtime.event_loop_proxy(),
-                );
-                self.apply_document_outcome(outcome);
             }
             DocumentCommand::SaveConflictCopy { identity, prepared, transform } => {
                 self.start_conflict_copy(identity, prepared, transform);

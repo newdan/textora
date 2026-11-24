@@ -207,6 +207,7 @@ pub enum TitleInitialization {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteEditorMetadata {
     pub note_id: NoteId,
+    pub starred: bool,
     pub created_at: SystemTime,
     pub modified_at: SystemTime,
     pub encryption: NoteEncryption,

@@ -1,9 +1,9 @@
 //! 外壳事件派发与输入消费规则。
 
 use std::time::Instant;
+use ui::editor_toolbar::EditorToolbarAction;
 
 use ui::canvas_scrollbars::CanvasScrollbarsAction;
-use ui::core::widget::{ControlAction, TextPayload};
 use ui::tooltip::TooltipHint;
 use ui::{Event, EventCtx, Rect, Widget, WidgetAction};
 
@@ -104,10 +104,8 @@ impl NotoraShell {
         widget_action: &WidgetAction,
     ) -> NotoraEventRoute {
         let mut route = NotoraEventRoute::consumed(self.translate_widget_action(widget_action));
-        if let WidgetAction::Control(ControlAction::TextCommitted {
-            id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
-            value: TextPayload::Plain(command_key),
-        }) = widget_action
+        if let WidgetAction::EditorToolbar(EditorToolbarAction::CommandInvoked(command_key)) =
+            widget_action
         {
             route.canvas_view_command = match command_key.as_str() {
                 "canvas_zoom_out" => Some(CanvasViewCommand::ZoomOut),

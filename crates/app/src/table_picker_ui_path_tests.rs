@@ -13,7 +13,7 @@ const PICKER_PANEL_PADDING_PX: f32 = 12.0;
 fn render_markdown_plugin(app: &mut App) {
     app.sync_plugin_state();
     let bounds = app.plugin_render_bounds();
-    let theme = app.current_theme.clone();
+    let theme = app.editor_runtime.theme().clone();
     let dpi = app.ui_metrics().dpi;
     let font_size = app.ui_metrics().font_size;
     let mut shaper = app
@@ -70,9 +70,9 @@ fn open_structure_menu_at(app: &mut App, byte_offset: usize) -> ui::core::geom::
         .active_overlay_widget_ref::<ui::popup_menu::PopupMenuWidget>()
         .expect("right-click should install the popup widget");
     assert!(popup.menu().items.iter().any(|item| matches!(
-        item.action,
-        ui::popup_menu::PopupMenuAction::TableStructure { cursor_byte, .. }
-            if cursor_byte == hit_byte
+        item.command(),
+        Some(ui::popup_menu::PopupMenuAction::TableStructure { cursor_byte, .. })
+            if *cursor_byte == hit_byte
     )));
     app.ui_shell.active_overlay_layout_rect().expect("popup should have a screen rectangle")
 }
@@ -95,7 +95,7 @@ fn push_table_picker_overlay(app: &mut App) -> (Rect, Rect) {
     let mut context = ui::core::LayoutCtx {
         ui_measure: None,
         measure: &mut measure,
-        theme: &app.current_theme,
+        theme: app.editor_runtime.theme(),
         dpi: 1.0,
     };
     ui::core::Widget::set_rect(&mut frame, modal_size, &mut context);
@@ -115,7 +115,7 @@ fn picker_grid_point(overlay: Rect, content: Rect, column: f32, row: f32) -> (f3
 fn send_picker_key(app: &mut App, key: ui::KeyCode) {
     let widget_action = app
         .ui_shell
-        .forward_key(key, ui::Modifiers::NONE, &app.current_theme, app.ui_metrics().dpi)
+        .forward_key(key, ui::Modifiers::NONE, app.editor_runtime.theme(), app.ui_metrics().dpi)
         .expect("keyboard event should reach the focused table picker");
     let mut actions = Vec::new();
     crate::events::translate_widget_action(&widget_action, app, &mut actions);
@@ -158,8 +158,8 @@ fn right_click_on_rendered_table_disables_header_row_and_last_column_deletion() 
         .ui_shell
         .active_overlay_widget_ref::<ui::popup_menu::PopupMenuWidget>()
         .expect("popup should remain open");
-    assert!(!popup.menu().items[2].enabled, "table header rows cannot be deleted");
-    assert!(!popup.menu().items[5].enabled, "the last table column cannot be deleted");
+    assert!(!popup.menu().items[2].is_selectable(), "table header rows cannot be deleted");
+    assert!(!popup.menu().items[5].is_selectable(), "the last table column cannot be deleted");
 }
 
 #[test]
@@ -173,7 +173,7 @@ fn right_click_and_choose_alignment_updates_the_clicked_second_column_once() {
         .active_overlay_widget_ref::<ui::popup_menu::PopupMenuWidget>()
         .expect("popup should remain open");
     assert!(matches!(
-        popup.menu().items[9].action,
+        popup.menu().items[9].command().expect("column alignment command"),
         ui::popup_menu::PopupMenuAction::TableStructure {
             command: TableStructureCommand::SetColumnAlignment(TableColumnAlignment::Right),
             ..

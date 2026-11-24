@@ -3,9 +3,11 @@
 //! Phase 3：StatusBarWidget 接管道——status 位由真 widget 渲染。
 
 use crate::editor_host::EditorHostWidget;
+use appkit_core::tab_set::types::TabId;
 use appkit_shell::SystemClipboard;
 use appkit_shell::inspector_panel::{MountedInspectorPanel, StampedInspectorPanelAction};
 use appkit_shell::measure_adapter::MeasureFromShaper;
+use appkit_shell::smooth_scroll::SmoothScroll;
 use std::any::Any;
 use std::time::Instant;
 use ui::Theme;
@@ -111,6 +113,7 @@ pub struct UiShell {
     sidebar_config: ui::sidebar::SidebarConfig,
     detached_sidebar: Option<ui::sidebar::SidebarInteraction>,
     dragging_sidebar: bool,
+    sidebar_animating: bool,
     frames_rendered: u32,
     sidebar_tabs: Vec<ui::tab_bar::TabInfo>,
     sidebar_active_index: Option<usize>,
@@ -122,6 +125,8 @@ pub struct UiShell {
     tab_input_forward_enabled: bool,
     tab_hovered_index: Option<usize>,
     tab_scroll_offset: f32,
+    tab_scroll_animation: SmoothScroll,
+    popup_tab_ids: Vec<TabId>,
     dock_dirty: bool,
     /// UI 字体 shaper，用于 widget 布局时的精确文本测量（proportional font）。
     /// 与编辑器 monospace shaper 分开，避免 CJK 标点等字符的宽度误差。
@@ -172,11 +177,12 @@ impl UiShell {
             scrollbar_viewport_height: 0.0,
             scrollbar_total_display_rows: 0,
             scrollbar_scroll_top: 0.0,
-            sidebar_config: ui::sidebar::SidebarConfig::new_default(1.0),
+            sidebar_config: ui::sidebar::SidebarConfig::new_default(),
             detached_sidebar: Some(ui::sidebar::SidebarInteraction::new(
-                &ui::sidebar::SidebarConfig::new_default(1.0),
+                &ui::sidebar::SidebarConfig::new_default(),
             )),
             dragging_sidebar: false,
+            sidebar_animating: false,
             frames_rendered: 0,
             sidebar_tabs: Vec::new(),
             sidebar_active_index: None,
@@ -187,6 +193,8 @@ impl UiShell {
             tab_input_forward_enabled: false,
             tab_hovered_index: None,
             tab_scroll_offset: 0.0,
+            tab_scroll_animation: SmoothScroll::new(),
+            popup_tab_ids: Vec::new(),
             dock_dirty: true,
             ui_shaper: None,
             last_sidebar_visible: false,
@@ -376,10 +384,6 @@ impl UiShell {
         self.canvas_scrollbars_input = input;
     }
 
-    /// Phase 9：sidebar config 可变引用。
-    pub fn sidebar_cfg_mut(&mut self) -> &mut ui::sidebar::SidebarConfig {
-        &mut self.sidebar_config
-    }
     /// Phase 9：sidebar config 只读引用。
     pub fn sidebar_cfg(&self) -> &ui::sidebar::SidebarConfig {
         &self.sidebar_config
@@ -391,14 +395,12 @@ impl UiShell {
     pub fn set_sidebar_pinned(&mut self, v: bool) {
         self.sidebar_config.pinned = v;
     }
-    pub fn sidebar_width(&self) -> f32 {
+    pub(crate) fn sidebar_width_logical(&self) -> f32 {
         self.sidebar_config.width
     }
-    pub fn set_sidebar_width(&mut self, width: f32) {
+    pub(crate) fn set_sidebar_width_logical(&mut self, width: f32) {
         self.sidebar_config.width = width;
-    }
-    pub fn scale_sidebar_width(&mut self, ratio: f32) {
-        self.sidebar_config.width *= ratio;
+        self.sidebar_config.clamp_width();
     }
     fn sidebar_widget(&self) -> Option<&SidebarWidget> {
         self.dock.children.iter().find_map(|child| child.widget.as_any().downcast_ref())
@@ -435,25 +437,31 @@ impl UiShell {
     pub fn set_sidebar_suppress_hover_enter(&mut self, suppress: bool) {
         self.sidebar_interaction_mut().hover.suppress_hover_enter = suppress;
     }
-    pub fn sidebar_current_width(&self) -> f32 {
-        self.sidebar_interaction().current_width(&self.sidebar_config)
+    pub fn sidebar_current_width(&self, dpi: f32) -> f32 {
+        self.sidebar_interaction().current_width(&self.sidebar_config, dpi)
     }
-    pub fn sidebar_editor_left_offset(&self) -> f32 {
-        self.sidebar_interaction().editor_left_offset(&self.sidebar_config)
-    }
-    pub fn sidebar_clamp_width(&mut self, dpi: f32) {
-        self.sidebar_config.clamp_width(dpi);
+    pub fn sidebar_editor_left_offset(&self, dpi: f32) -> f32 {
+        self.sidebar_interaction().editor_left_offset(&self.sidebar_config, dpi)
     }
     pub fn sidebar_on_scroll(&mut self, delta_px: f32, _total_tabs: usize) {
         self.sidebar_interaction_mut().list_scroll_offset += delta_px;
     }
-    pub fn sidebar_clear_menu(&mut self) {
-        if let Some(widget) = self.sidebar_widget_mut() {
-            widget.set_open_menu(None);
+    pub fn sidebar_clear_menu(&mut self) -> bool {
+        let Some(widget) = self.sidebar_widget_mut() else {
+            return false;
+        };
+        if widget.open_menu().is_none() {
+            return false;
         }
+        widget.set_open_menu(None);
+        true
     }
-    pub fn sidebar_tick(&mut self, now: std::time::Instant) -> (bool, bool) {
-        self.sidebar_interaction_mut().tick(now)
+    pub(crate) fn advance_sidebar_animation(&mut self, now: Instant, sidebar_mode: bool) -> bool {
+        self.sidebar_animating = sidebar_mode && {
+            let (visibility_changed, animating) = self.sidebar_interaction_mut().tick(now);
+            visibility_changed || animating
+        };
+        self.sidebar_animating
     }
     pub fn dock_is_dirty(&self) -> bool {
         self.dock_dirty
@@ -513,12 +521,14 @@ impl UiShell {
     }
 
     pub fn tab_bar_layout(&self) -> Option<&ui::tab_bar::TabBarLayout> {
-        for child in &self.dock.children {
-            if let Some(tbw) = child.widget.as_any().downcast_ref::<TabBarWidget>() {
-                return tbw.state().current_layout();
-            }
-        }
-        None
+        self.tab_bar_layout_and_bounds().map(|(layout, _)| layout)
+    }
+
+    pub(crate) fn tab_bar_layout_and_bounds(&self) -> Option<(&ui::tab_bar::TabBarLayout, Rect)> {
+        self.dock.children.iter().find_map(|child| {
+            let widget = child.widget.as_any().downcast_ref::<TabBarWidget>()?;
+            Some((widget.state().current_layout()?, child.layout_rect))
+        })
     }
 
     /// 设置 Dock 中 TabBarWidget 的 hovered_index。
@@ -567,14 +577,43 @@ impl UiShell {
         }
     }
 
-    /// 当前标签栏滚动目标（供 App 读去做动画）。
-    pub fn tab_bar_scroll_target(&self) -> f32 {
+    fn tab_bar_scroll_target(&self) -> f32 {
         for child in &self.dock.children {
             if let Some(tbw) = child.widget.as_any().downcast_ref::<TabBarWidget>() {
                 return tbw.scroll_target();
             }
         }
         0.0
+    }
+
+    pub(crate) fn advance_tab_scroll(&mut self) -> bool {
+        let target = self.tab_bar_scroll_target();
+        self.tab_scroll_animation.set_target(target);
+        self.tab_scroll_animation.tick()
+    }
+
+    pub(crate) fn animated_tab_scroll_offset(&self) -> f32 {
+        self.tab_scroll_animation.current()
+    }
+
+    pub(crate) fn tab_scroll_is_animating(&self) -> bool {
+        self.tab_scroll_animation.is_animating()
+    }
+
+    pub(crate) fn animations_pending(&self) -> bool {
+        self.tab_scroll_is_animating() || self.sidebar_animating
+    }
+
+    pub(crate) fn set_popup_tab_ids(&mut self, ids: Vec<TabId>) {
+        self.popup_tab_ids = ids;
+    }
+
+    pub(crate) fn clear_popup_tab_ids(&mut self) {
+        self.popup_tab_ids.clear();
+    }
+
+    pub(crate) fn popup_tab_id(&self, index: usize) -> Option<TabId> {
+        self.popup_tab_ids.get(index).copied()
     }
 
     /// Phase 7：app 每帧调用，注入 sidebar 配置和标签页数据。
@@ -709,7 +748,7 @@ impl UiShell {
         self.sidebar_interaction_mut().hover.visibility = visibility;
         let mut resolved = inputs.clone();
         resolved.sidebar_thickness =
-            self.sidebar_editor_left_offset().max(SIDEBAR_OVERLAY_DOCK_THICKNESS);
+            self.sidebar_editor_left_offset(inputs.metrics.dpi).max(SIDEBAR_OVERLAY_DOCK_THICKNESS);
         if let Some(title) = &mut self.title_bar_input {
             title.titlebar_x = resolved.sidebar_thickness;
             let sidebar_header_width = if cfg!(target_os = "macos") {
@@ -1349,8 +1388,7 @@ impl UiShell {
         shaper: Option<&mut shaping::Shaper>,
     ) -> DrawList {
         let mut list = DrawList::new();
-        let mut ctx =
-            PaintCtx { global_alpha: 1.0, list: &mut list, theme, dpi, offset: (0.0, 0.0), shaper };
+        let mut ctx = PaintCtx { global_alpha: 1.0, list: &mut list, theme, dpi, shaper };
 
         // 内容区顶部分隔线（原在 TitleBarWidget 底部绘制，现移至此处）
         // Extend through scrollbar column so the line spans the full content width.
@@ -1384,19 +1422,16 @@ impl UiShell {
             if sidebar_on_top && child.widget.as_any().is::<SidebarWidget>() {
                 continue;
             }
-            let saved = ctx.list.offset;
-            ctx.list.offset = (saved.0 + child.layout_rect.x, saved.1 + child.layout_rect.y);
-            child.widget.paint(&mut ctx);
-            ctx.list.offset = saved;
+            ctx.with_offset(child.layout_rect.x, child.layout_rect.y, |ctx| {
+                child.widget.paint(ctx)
+            });
         }
         if sidebar_on_top {
             for child in &self.dock.children {
                 if child.widget.as_any().is::<SidebarWidget>() {
-                    let saved = ctx.list.offset;
-                    ctx.list.offset =
-                        (saved.0 + child.layout_rect.x, saved.1 + child.layout_rect.y);
-                    child.widget.paint(&mut ctx);
-                    ctx.list.offset = saved;
+                    ctx.with_offset(child.layout_rect.x, child.layout_rect.y, |ctx| {
+                        child.widget.paint(ctx)
+                    });
                     break;
                 }
             }
@@ -1421,10 +1456,9 @@ impl UiShell {
         if self.canvas_scrollbars_input.is_none() {
             return;
         }
-        let saved = ctx.list.offset;
-        ctx.list.offset = (saved.0 + self.dock.fill_rect.x, saved.1 + self.dock.fill_rect.y);
-        self.canvas_scrollbars.paint(ctx);
-        ctx.list.offset = saved;
+        ctx.with_offset(self.dock.fill_rect.x, self.dock.fill_rect.y, |ctx| {
+            self.canvas_scrollbars.paint(ctx)
+        });
     }
 
     fn paint_overlay_stack(&self, ctx: &mut PaintCtx) {
@@ -1433,19 +1467,17 @@ impl UiShell {
             if overlay.input_policy == OverlayInputPolicy::Modal {
                 ctx.list.fill(screen_rect, Self::overlay_scrim_color(ctx.theme));
             }
-            let saved = ctx.list.offset;
-            ctx.list.offset = (saved.0 + overlay.layout_rect.x, saved.1 + overlay.layout_rect.y);
-            overlay.widget.paint(ctx);
-            ctx.list.offset = saved;
+            ctx.with_offset(overlay.layout_rect.x, overlay.layout_rect.y, |ctx| {
+                overlay.widget.paint(ctx)
+            });
         }
     }
 
     fn paint_tooltip_overlay(&self, ctx: &mut PaintCtx) {
         if let Some(ref tooltip) = self.tooltip_overlay {
-            let saved = ctx.list.offset;
-            ctx.list.offset = (saved.0 + tooltip.layout_rect.x, saved.1 + tooltip.layout_rect.y);
-            tooltip.widget.paint(ctx);
-            ctx.list.offset = saved;
+            ctx.with_offset(tooltip.layout_rect.x, tooltip.layout_rect.y, |ctx| {
+                tooltip.widget.paint(ctx)
+            });
         }
     }
 
@@ -1888,15 +1920,15 @@ mod tests {
     fn semantic_state_methods_update_private_shell_state() {
         let mut shell = UiShell::new();
 
-        shell.set_sidebar_width(240.0);
-        shell.scale_sidebar_width(1.5);
+        shell.set_sidebar_width_logical(240.0);
         shell.set_sidebar_visibility(ui::sidebar::Visibility::Pinned);
         shell.set_sidebar_suppress_hover_enter(true);
         shell.dock_dirty = false;
         shell.mark_dock_dirty();
         shell.mark_layout_initialized_for_test();
 
-        assert_eq!(shell.sidebar_width(), 360.0);
+        assert_eq!(shell.sidebar_width_logical(), 240.0);
+        assert_eq!(shell.sidebar_editor_left_offset(1.5), 360.0);
         assert_eq!(shell.sidebar_visibility(), ui::sidebar::Visibility::Pinned);
         assert!(shell.sidebar_interaction().hover.suppress_hover_enter);
         assert!(shell.dock_is_dirty());
@@ -2641,14 +2673,8 @@ mod tests {
         shell.update_frame(Screen::new(1200.0, 800.0), &theme, &mut m, &inputs);
 
         let mut dl = DrawList::new();
-        let mut ctx = PaintCtx {
-            global_alpha: 1.0,
-            list: &mut dl,
-            theme: &theme,
-            dpi: 1.0,
-            offset: (0.0, 0.0),
-            shaper: None,
-        };
+        let mut ctx =
+            PaintCtx { global_alpha: 1.0, list: &mut dl, theme: &theme, dpi: 1.0, shaper: None };
         shell.paint(&mut ctx);
         assert_eq!(dl.cmds.len(), 0);
     }
@@ -2706,7 +2732,7 @@ mod tests {
             },
         ];
         shell.set_sidebar_input(
-            ui::sidebar::SidebarConfig::new_default(1.0),
+            ui::sidebar::SidebarConfig::new_default(),
             tabs,
             Some(1),
             (0.0, 0.0),
@@ -2885,7 +2911,7 @@ mod tests {
 
         // Set sidebar visible and inject tabs
         shell.set_sidebar_input(
-            ui::sidebar::SidebarConfig::new_default(1.0),
+            ui::sidebar::SidebarConfig::new_default(),
             vec![ui::tab_bar::TabInfo {
                 title: "test.rs".into(),
                 file_path: None,

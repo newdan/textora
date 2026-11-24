@@ -1,4 +1,5 @@
 use super::*;
+use crate::mmf::layout::SourceNodeIdx;
 use ui::canvas::{CanvasViewPosition, CanvasViewportConfig, CanvasViewportInput, resolve_viewport};
 use ui::core::paint::DrawCmd;
 use ui::theme::{MindmapRenderTheme, Theme, ThemeDefinition};
@@ -40,15 +41,15 @@ fn single_node_layout() -> LayoutTree {
             y: 20.0,
             w: 80.0,
             h: 44.0,
-            node_idx: 0,
-            source_node_index: 0,
+            node_idx: VisibleNodeIdx(0),
+            source_node_index: SourceNodeIdx(0),
             depth: 0,
             connector_from: (10.0, 42.0),
             connector_to: (10.0, 42.0),
             connector_turn_x: None,
             branch_index: None,
         }],
-        y_sorted_indices: vec![0],
+        y_sorted_indices: vec![VisibleNodeIdx(0)],
         total_w: 90.0,
         total_h: 64.0,
     }
@@ -122,7 +123,7 @@ fn label_visual_center(
 
     for cluster in &layout.shaped.clusters {
         let (_, subpixel_phase) = render::split_subpixel(x_cursor);
-        let subpixel_x = subpixel_phase as f32 * 0.25;
+        let subpixel_x = render::subpixel_offset(subpixel_phase);
         if let Some(bitmap) = shaper.rasterize_glyph(
             cluster.font_id,
             cluster.glyph_id as u16,
@@ -252,16 +253,16 @@ fn card_border_uses_configured_radius_and_one_pixel_width() {
         property_source: None,
         heading_source_end: 0,
     };
-    let nodes = vec![&node];
+    let nodes = [&node];
 
     let render_theme = render_theme(&theme);
     render_cards(
         &mut dl,
         &layout,
-        &[0],
+        &[VisibleNodeIdx(0)],
         &render_theme,
         &constants,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         test_viewport(Rect::new(0.0, 0.0, 200.0, 200.0), Rect::new(0.0, 0.0, 200.0, 200.0)),
     );
@@ -283,7 +284,7 @@ fn hovered_card_border_is_wider_than_default_border() {
     let theme = Theme::from_definition(&ThemeDefinition::default_dark());
     let layout = single_node_layout();
     let node = Node { title: "Branch".into(), ..empty_node(2) };
-    let nodes = vec![&node];
+    let nodes = [&node];
     let viewport =
         test_viewport(Rect::new(0.0, 0.0, 400.0, 200.0), Rect::new(0.0, 0.0, 400.0, 200.0));
 
@@ -292,10 +293,10 @@ fn hovered_card_border_is_wider_than_default_border() {
     render_cards(
         &mut default_draw_list,
         &layout,
-        &[0],
+        &[VisibleNodeIdx(0)],
         &render_theme,
         &constants,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         viewport,
     );
@@ -308,10 +309,10 @@ fn hovered_card_border_is_wider_than_default_border() {
     render_cards_with_hover(
         &mut hovered_draw_list,
         &layout,
-        &[0],
+        &[VisibleNodeIdx(0)],
         &render_theme,
         &constants,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         viewport,
         None,
@@ -335,7 +336,7 @@ fn title_editing_card_uses_hover_visuals_without_pointer_hover() {
     let theme = Theme::from_definition(&ThemeDefinition::default_dark());
     let layout = single_node_layout();
     let node = Node { title: "Branch".into(), ..empty_node(1) };
-    let nodes = vec![&node];
+    let nodes = [&node];
     let viewport =
         test_viewport(Rect::new(0.0, 0.0, 400.0, 200.0), Rect::new(0.0, 0.0, 400.0, 200.0));
     let mut projection = plain_projection(["Branch"]);
@@ -351,7 +352,7 @@ fn title_editing_card_uses_hover_visuals_without_pointer_hover() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         &projection,
         None,
@@ -392,7 +393,7 @@ fn render_translates_screen_viewport_to_layout_space() {
         property_source: None,
         heading_source_end: 0,
     };
-    let nodes = vec![&node];
+    let nodes = [&node];
     let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
     let projection = plain_projection([""]);
 
@@ -404,7 +405,7 @@ fn render_translates_screen_viewport_to_layout_space() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         &projection,
         None,
@@ -431,7 +432,7 @@ fn collapsed_title_omits_descendant_suffix_at_zoom_levels() {
         tags: Vec::new(),
         color: None,
     });
-    let nodes = vec![&node];
+    let nodes = [&node];
     let projection = MindmapRenderProjection {
         collapsed_descendant_counts: vec![Some(3)],
         ..plain_projection(["Branch"])
@@ -455,11 +456,11 @@ fn collapsed_title_omits_descendant_suffix_at_zoom_levels() {
         render_text(
             &mut draw_list,
             &layout,
-            &[0],
+            &[VisibleNodeIdx(0)],
             &render_theme,
             &constants,
             &mut shaper,
-            &nodes,
+            &|index| nodes.get(index).copied(),
             &projection,
             viewport,
         );
@@ -491,7 +492,7 @@ fn controls_are_visible_without_pointer_and_show_collapsed_descendant_count() {
         tags: Vec::new(),
         color: None,
     });
-    let nodes = vec![&node];
+    let nodes = [&node];
     let hit_map = HitMap {
         nodes: Vec::new(),
         controls: vec![crate::mmf::layout::ControlHitGeometry {
@@ -516,7 +517,7 @@ fn controls_are_visible_without_pointer_and_show_collapsed_descendant_count() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         Some(&hit_map),
         &projection,
         None,
@@ -598,7 +599,7 @@ fn expanded_control_draws_a_centered_geometry_bar_without_text() {
     let layout = single_node_layout();
     let control_bounds = Rect::new(90.0, 20.0, 36.0, 36.0);
     let node = Node { title: "Branch".into(), children: vec![empty_node(3)], ..empty_node(2) };
-    let nodes = vec![&node];
+    let nodes = [&node];
     let hit_map = HitMap {
         nodes: Vec::new(),
         controls: vec![crate::mmf::layout::ControlHitGeometry {
@@ -621,7 +622,7 @@ fn expanded_control_draws_a_centered_geometry_bar_without_text() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         Some(&hit_map),
         &projection,
         None,
@@ -691,7 +692,7 @@ fn collapsed_control_label_stays_centered_at_canvas_zoom() {
         tags: Vec::new(),
         color: None,
     });
-    let nodes = vec![&node];
+    let nodes = [&node];
     let hit_map = HitMap {
         nodes: Vec::new(),
         controls: vec![crate::mmf::layout::ControlHitGeometry {
@@ -721,7 +722,7 @@ fn collapsed_control_label_stays_centered_at_canvas_zoom() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         Some(&hit_map),
         &projection,
         None,
@@ -757,7 +758,7 @@ fn collapse_control_uses_connector_color_for_light_theme_consistency() {
         tags: Vec::new(),
         color: None,
     });
-    let nodes = vec![&node];
+    let nodes = [&node];
     let hit_map = HitMap {
         nodes: Vec::new(),
         controls: vec![crate::mmf::layout::ControlHitGeometry {
@@ -782,7 +783,7 @@ fn collapse_control_uses_connector_color_for_light_theme_consistency() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         Some(&hit_map),
         &projection,
         None,
@@ -810,15 +811,15 @@ fn collapsed_control_uses_branch_color_when_available() {
             y: 20.0,
             w: 80.0,
             h: 44.0,
-            node_idx: 0,
-            source_node_index: 0,
+            node_idx: VisibleNodeIdx(0),
+            source_node_index: SourceNodeIdx(0),
             depth: 1,
             connector_from: (90.0, 42.0),
             connector_to: (10.0, 42.0),
             connector_turn_x: Some(50.0),
             branch_index: Some(0),
         }],
-        y_sorted_indices: vec![0],
+        y_sorted_indices: vec![VisibleNodeIdx(0)],
         total_w: 90.0,
         total_h: 64.0,
     };
@@ -833,7 +834,7 @@ fn collapsed_control_uses_branch_color_when_available() {
         tags: Vec::new(),
         color: None,
     });
-    let nodes = vec![&node];
+    let nodes = [&node];
     let hit_map = HitMap {
         nodes: Vec::new(),
         controls: vec![crate::mmf::layout::ControlHitGeometry {
@@ -858,7 +859,7 @@ fn collapsed_control_uses_branch_color_when_available() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         Some(&hit_map),
         &projection,
         None,
@@ -882,7 +883,7 @@ fn expanded_geometry_bar_is_centered_at_canvas_zoom() {
     let layout = single_node_layout();
     let control_bounds = Rect::new(90.0, 20.0, 36.0, 36.0);
     let node = Node { title: "Branch".into(), children: vec![empty_node(3)], ..empty_node(2) };
-    let nodes = vec![&node];
+    let nodes = [&node];
     let hit_map = HitMap {
         nodes: Vec::new(),
         controls: vec![crate::mmf::layout::ControlHitGeometry {
@@ -910,7 +911,7 @@ fn expanded_geometry_bar_is_centered_at_canvas_zoom() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         Some(&hit_map),
         &projection,
         None,
@@ -935,7 +936,7 @@ fn expanded_control_is_hidden_without_hover() {
     let theme = Theme::from_definition(&ThemeDefinition::default_dark());
     let layout = single_node_layout();
     let node = Node { title: "Branch".into(), children: vec![empty_node(3)], ..empty_node(2) };
-    let nodes = vec![&node];
+    let nodes = [&node];
     let hit_map = HitMap {
         nodes: Vec::new(),
         controls: vec![crate::mmf::layout::ControlHitGeometry {
@@ -957,7 +958,7 @@ fn expanded_control_is_hidden_without_hover() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         Some(&hit_map),
         &projection,
         None,
@@ -985,7 +986,7 @@ fn collapsed_control_hover_uses_hover_color_for_ring_and_label() {
         tags: Vec::new(),
         color: None,
     });
-    let nodes = vec![&node];
+    let nodes = [&node];
     let hit_map = HitMap {
         nodes: Vec::new(),
         controls: vec![crate::mmf::layout::ControlHitGeometry {
@@ -1009,7 +1010,7 @@ fn collapsed_control_hover_uses_hover_color_for_ring_and_label() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         Some(&hit_map),
         &projection,
         None,
@@ -1047,15 +1048,15 @@ fn collapsed_control_hover_uses_lightened_branch_color() {
             y: 20.0,
             w: 80.0,
             h: 44.0,
-            node_idx: 0,
-            source_node_index: 0,
+            node_idx: VisibleNodeIdx(0),
+            source_node_index: SourceNodeIdx(0),
             depth: 1,
             connector_from: (90.0, 42.0),
             connector_to: (10.0, 42.0),
             connector_turn_x: Some(50.0),
             branch_index: Some(0),
         }],
-        y_sorted_indices: vec![0],
+        y_sorted_indices: vec![VisibleNodeIdx(0)],
         total_w: 90.0,
         total_h: 64.0,
     };
@@ -1070,7 +1071,7 @@ fn collapsed_control_hover_uses_lightened_branch_color() {
         tags: Vec::new(),
         color: None,
     });
-    let nodes = vec![&node];
+    let nodes = [&node];
     let hit_map = HitMap {
         nodes: Vec::new(),
         controls: vec![crate::mmf::layout::ControlHitGeometry {
@@ -1096,7 +1097,7 @@ fn collapsed_control_hover_uses_lightened_branch_color() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         Some(&hit_map),
         &projection,
         None,
@@ -1133,8 +1134,8 @@ fn hovering_one_card_shows_only_its_expanded_control() {
                 y: 20.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 0,
-                source_node_index: 0,
+                node_idx: VisibleNodeIdx(0),
+                source_node_index: SourceNodeIdx(0),
                 depth: 0,
                 connector_from: (10.0, 42.0),
                 connector_to: (10.0, 42.0),
@@ -1146,8 +1147,8 @@ fn hovering_one_card_shows_only_its_expanded_control() {
                 y: 20.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 1,
-                source_node_index: 1,
+                node_idx: VisibleNodeIdx(1),
+                source_node_index: SourceNodeIdx(1),
                 depth: 1,
                 connector_from: (90.0, 42.0),
                 connector_to: (150.0, 42.0),
@@ -1155,14 +1156,14 @@ fn hovering_one_card_shows_only_its_expanded_control() {
                 branch_index: None,
             },
         ],
-        y_sorted_indices: vec![0, 1],
+        y_sorted_indices: vec![VisibleNodeIdx(0), VisibleNodeIdx(1)],
         total_w: 230.0,
         total_h: 64.0,
     };
     let first_node = Node { title: "First".into(), children: vec![empty_node(3)], ..empty_node(1) };
     let second_node =
         Node { title: "Second".into(), children: vec![empty_node(3)], ..empty_node(2) };
-    let nodes = vec![&first_node, &second_node];
+    let nodes = [&first_node, &second_node];
     let hit_map = HitMap {
         nodes: Vec::new(),
         controls: vec![
@@ -1191,7 +1192,7 @@ fn hovering_one_card_shows_only_its_expanded_control() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         Some(&hit_map),
         &projection,
         None,
@@ -1214,8 +1215,8 @@ fn node_selection_uses_node_accent_without_drawing_a_caret() {
                 y: 0.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 0,
-                source_node_index: 0,
+                node_idx: VisibleNodeIdx(0),
+                source_node_index: SourceNodeIdx(0),
                 depth: 0,
                 connector_from: (0.0, 22.0),
                 connector_to: (0.0, 22.0),
@@ -1227,8 +1228,8 @@ fn node_selection_uses_node_accent_without_drawing_a_caret() {
                 y: 0.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 1,
-                source_node_index: 1,
+                node_idx: VisibleNodeIdx(1),
+                source_node_index: SourceNodeIdx(1),
                 depth: 0,
                 connector_from: (80.0, 22.0),
                 connector_to: (160.0, 22.0),
@@ -1236,13 +1237,13 @@ fn node_selection_uses_node_accent_without_drawing_a_caret() {
                 branch_index: None,
             },
         ],
-        y_sorted_indices: vec![0, 1],
+        y_sorted_indices: vec![VisibleNodeIdx(0), VisibleNodeIdx(1)],
         total_w: 240.0,
         total_h: 44.0,
     };
     let root = empty_node(1);
     let child = empty_node(2);
-    let nodes = vec![&root, &child];
+    let nodes = [&root, &child];
     let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
     let projection = MindmapRenderProjection {
         focus: MindmapFocus::NodeSelected { node_index: 1 },
@@ -1265,7 +1266,7 @@ fn node_selection_uses_node_accent_without_drawing_a_caret() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         &projection,
         None,
@@ -1311,8 +1312,8 @@ fn drag_preview_draws_valid_insertion_feedback_and_invalid_color_without_inserti
                 y: 0.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 0,
-                source_node_index: 0,
+                node_idx: VisibleNodeIdx(0),
+                source_node_index: SourceNodeIdx(0),
                 depth: 0,
                 connector_from: (0.0, 22.0),
                 connector_to: (0.0, 22.0),
@@ -1324,8 +1325,8 @@ fn drag_preview_draws_valid_insertion_feedback_and_invalid_color_without_inserti
                 y: 0.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 1,
-                source_node_index: 1,
+                node_idx: VisibleNodeIdx(1),
+                source_node_index: SourceNodeIdx(1),
                 depth: 1,
                 connector_from: (80.0, 22.0),
                 connector_to: (160.0, 22.0),
@@ -1333,13 +1334,13 @@ fn drag_preview_draws_valid_insertion_feedback_and_invalid_color_without_inserti
                 branch_index: None,
             },
         ],
-        y_sorted_indices: vec![0, 1],
+        y_sorted_indices: vec![VisibleNodeIdx(0), VisibleNodeIdx(1)],
         total_w: 240.0,
         total_h: 44.0,
     };
     let root = empty_node(1);
     let child = empty_node(2);
-    let nodes = vec![&root, &child];
+    let nodes = [&root, &child];
     let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
     let valid_preview = CanvasDragPreview {
         label: "Child · 3".into(),
@@ -1366,7 +1367,7 @@ fn drag_preview_draws_valid_insertion_feedback_and_invalid_color_without_inserti
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         &projection,
         None,
@@ -1428,7 +1429,7 @@ fn drag_preview_draws_valid_insertion_feedback_and_invalid_color_without_inserti
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         &projection,
         None,
@@ -1471,7 +1472,7 @@ fn drag_preview_draws_valid_insertion_feedback_and_invalid_color_without_inserti
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         &invalid_projection,
         None,
@@ -1520,8 +1521,8 @@ fn drag_preview_dims_every_source_subtree_visual() {
                 y: root_rect.y,
                 w: root_rect.w,
                 h: root_rect.h,
-                node_idx: 0,
-                source_node_index: 0,
+                node_idx: VisibleNodeIdx(0),
+                source_node_index: SourceNodeIdx(0),
                 depth: 0,
                 connector_from: (0.0, 22.0),
                 connector_to: (0.0, 22.0),
@@ -1533,8 +1534,8 @@ fn drag_preview_dims_every_source_subtree_visual() {
                 y: source_rect.y,
                 w: source_rect.w,
                 h: source_rect.h,
-                node_idx: 1,
-                source_node_index: 1,
+                node_idx: VisibleNodeIdx(1),
+                source_node_index: SourceNodeIdx(1),
                 depth: 1,
                 connector_from: (80.0, 22.0),
                 connector_to: (160.0, 22.0),
@@ -1546,8 +1547,8 @@ fn drag_preview_dims_every_source_subtree_visual() {
                 y: descendant_rect.y,
                 w: descendant_rect.w,
                 h: descendant_rect.h,
-                node_idx: 2,
-                source_node_index: 2,
+                node_idx: VisibleNodeIdx(2),
+                source_node_index: SourceNodeIdx(2),
                 depth: 2,
                 connector_from: (240.0, 22.0),
                 connector_to: (320.0, 22.0),
@@ -1555,14 +1556,14 @@ fn drag_preview_dims_every_source_subtree_visual() {
                 branch_index: None,
             },
         ],
-        y_sorted_indices: vec![0, 1, 2],
+        y_sorted_indices: vec![VisibleNodeIdx(0), VisibleNodeIdx(1), VisibleNodeIdx(2)],
         total_w: 400.0,
         total_h: 44.0,
     };
     let root = Node { title: "root".into(), ..empty_node(1) };
     let source = Node { title: "source".into(), ..empty_node(2) };
     let descendant = Node { title: "descendant".into(), ..empty_node(3) };
-    let nodes = vec![&root, &source, &descendant];
+    let nodes = [&root, &source, &descendant];
     let preview = CanvasDragPreview {
         label: String::new(),
         source_rect,
@@ -1594,7 +1595,7 @@ fn drag_preview_dims_every_source_subtree_visual() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         &projection,
         None,
@@ -1661,8 +1662,8 @@ fn render_draws_long_connector_crossing_viewport_without_visible_cards() {
                 y: 0.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 0,
-                source_node_index: 0,
+                node_idx: VisibleNodeIdx(0),
+                source_node_index: SourceNodeIdx(0),
                 depth: 0,
                 connector_from: (0.0, 22.0),
                 connector_to: (0.0, 22.0),
@@ -1674,8 +1675,8 @@ fn render_draws_long_connector_crossing_viewport_without_visible_cards() {
                 y: 1_000.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 1,
-                source_node_index: 1,
+                node_idx: VisibleNodeIdx(1),
+                source_node_index: SourceNodeIdx(1),
                 depth: 1,
                 connector_from: (80.0, 22.0),
                 connector_to: (160.0, 1_022.0),
@@ -1683,13 +1684,13 @@ fn render_draws_long_connector_crossing_viewport_without_visible_cards() {
                 branch_index: None,
             },
         ],
-        y_sorted_indices: vec![0, 1],
+        y_sorted_indices: vec![VisibleNodeIdx(0), VisibleNodeIdx(1)],
         total_w: 240.0,
         total_h: 1_044.0,
     };
     let root = empty_node(1);
     let child = empty_node(2);
-    let nodes = vec![&root, &child];
+    let nodes = [&root, &child];
     let mut shaper = shaping::Shaper::new().expect("test shaper should initialize");
     let projection = plain_projection(["", ""]);
 
@@ -1710,7 +1711,7 @@ fn render_draws_long_connector_crossing_viewport_without_visible_cards() {
         &render_theme,
         &constants,
         &mut shaper,
-        &nodes,
+        &|index| nodes.get(index).copied(),
         None,
         &projection,
         None,
@@ -1734,8 +1735,8 @@ fn connector_emits_one_length_independent_tapered_mesh_command() {
         y: connector_to.1 - 22.0,
         w: 80.0,
         h: 44.0,
-        node_idx: 1,
-        source_node_index: 1,
+        node_idx: VisibleNodeIdx(1),
+        source_node_index: SourceNodeIdx(1),
         depth: 1,
         connector_from: (0.0, 0.0),
         connector_to,
@@ -1770,8 +1771,8 @@ fn sibling_connectors_draw_independent_single_meshes() {
                 y: 28.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 1,
-                source_node_index: 1,
+                node_idx: VisibleNodeIdx(1),
+                source_node_index: SourceNodeIdx(1),
                 depth: 1,
                 connector_from: parent_joint,
                 connector_to: (200.0, 50.0),
@@ -1783,8 +1784,8 @@ fn sibling_connectors_draw_independent_single_meshes() {
                 y: 78.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 2,
-                source_node_index: 2,
+                node_idx: VisibleNodeIdx(2),
+                source_node_index: SourceNodeIdx(2),
                 depth: 1,
                 connector_from: parent_joint,
                 connector_to: (200.0, 100.0),
@@ -1796,8 +1797,8 @@ fn sibling_connectors_draw_independent_single_meshes() {
                 y: 128.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 3,
-                source_node_index: 3,
+                node_idx: VisibleNodeIdx(3),
+                source_node_index: SourceNodeIdx(3),
                 depth: 1,
                 connector_from: parent_joint,
                 connector_to: (200.0, 150.0),
@@ -1805,7 +1806,7 @@ fn sibling_connectors_draw_independent_single_meshes() {
                 branch_index: None,
             },
         ],
-        y_sorted_indices: vec![0, 1, 2],
+        y_sorted_indices: vec![VisibleNodeIdx(0), VisibleNodeIdx(1), VisibleNodeIdx(2)],
         total_w: 280.0,
         total_h: 172.0,
     };
@@ -1882,8 +1883,8 @@ fn branch_layout_node(depth: u8, branch_index: Option<usize>) -> LayoutNode {
         y: 0.0,
         w: 80.0,
         h: 44.0,
-        node_idx: 1,
-        source_node_index: 1,
+        node_idx: VisibleNodeIdx(1),
+        source_node_index: SourceNodeIdx(1),
         depth,
         connector_from: (80.0, 22.0),
         connector_to: (160.0, 22.0),
@@ -2010,8 +2011,8 @@ fn connectors_use_branch_color_with_default_fallback() {
                 y: 28.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 1,
-                source_node_index: 1,
+                node_idx: VisibleNodeIdx(1),
+                source_node_index: SourceNodeIdx(1),
                 depth: 1,
                 connector_from: parent_joint,
                 connector_to: (200.0, 50.0),
@@ -2023,8 +2024,8 @@ fn connectors_use_branch_color_with_default_fallback() {
                 y: 78.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 2,
-                source_node_index: 2,
+                node_idx: VisibleNodeIdx(2),
+                source_node_index: SourceNodeIdx(2),
                 depth: 1,
                 connector_from: parent_joint,
                 connector_to: (200.0, 100.0),
@@ -2036,8 +2037,8 @@ fn connectors_use_branch_color_with_default_fallback() {
                 y: 128.0,
                 w: 80.0,
                 h: 44.0,
-                node_idx: 3,
-                source_node_index: 3,
+                node_idx: VisibleNodeIdx(3),
+                source_node_index: SourceNodeIdx(3),
                 depth: 1,
                 connector_from: parent_joint,
                 connector_to: (200.0, 150.0),
@@ -2045,7 +2046,7 @@ fn connectors_use_branch_color_with_default_fallback() {
                 branch_index: None,
             },
         ],
-        y_sorted_indices: vec![0, 1, 2],
+        y_sorted_indices: vec![VisibleNodeIdx(0), VisibleNodeIdx(1), VisibleNodeIdx(2)],
         total_w: 280.0,
         total_h: 172.0,
     };

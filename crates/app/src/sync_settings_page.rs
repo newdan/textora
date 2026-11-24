@@ -1412,7 +1412,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         page.paint(&mut paint);
@@ -1428,7 +1427,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         actions.paint(&mut paint);

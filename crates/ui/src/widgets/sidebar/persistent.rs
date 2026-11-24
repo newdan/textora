@@ -14,18 +14,18 @@ impl SidebarInteraction {
         Self { hover: SidebarHoverState::new(cfg), list_scroll_offset: 0.0 }
     }
 
-    pub fn current_width(&self, cfg: &SidebarConfig) -> f32 {
+    pub fn current_width(&self, cfg: &SidebarConfig, dpi: f32) -> f32 {
         match self.hover.visibility {
             Visibility::Hidden => 0.0,
             Visibility::HoverPeek | Visibility::HoverPeekFadingOut | Visibility::Pinned => {
-                cfg.width
+                cfg.width_px(dpi)
             }
         }
     }
 
-    pub fn editor_left_offset(&self, cfg: &SidebarConfig) -> f32 {
+    pub fn editor_left_offset(&self, cfg: &SidebarConfig, dpi: f32) -> f32 {
         match self.hover.visibility {
-            Visibility::Pinned => cfg.width,
+            Visibility::Pinned => cfg.width_px(dpi),
             _ => 0.0,
         }
     }

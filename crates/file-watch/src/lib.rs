@@ -28,15 +28,31 @@ impl<Command> WatchWorker<Command> {
     where
         Command: Send + 'static,
     {
-        let (commands, command_receiver) = mpsc::channel();
         let (output_sender, output_receiver) = mpsc::channel();
+        let worker = Self::spawn_loop(name, shutdown, create_watcher, move |watcher, commands| {
+            run(watcher, commands, output_sender);
+        })?;
+        Ok((worker, output_receiver))
+    }
+
+    /// Starts a watcher whose event loop delivers results through its own event source.
+    pub fn spawn_loop<W: Watcher>(
+        name: &str,
+        shutdown: Command,
+        create_watcher: impl FnOnce(&mpsc::Sender<Command>) -> notify::Result<W> + Send + 'static,
+        run: impl FnOnce(notify::Result<W>, mpsc::Receiver<Command>) + Send + 'static,
+    ) -> io::Result<Self>
+    where
+        Command: Send + 'static,
+    {
+        let (commands, command_receiver) = mpsc::channel();
         let initialization_commands = commands.clone();
         let worker = thread::Builder::new().name(name.to_owned()).spawn(move || {
             let watcher = create_watcher(&initialization_commands);
             drop(initialization_commands);
-            run(watcher, command_receiver, output_sender);
+            run(watcher, command_receiver);
         })?;
-        Ok((Self { commands, running: Some((shutdown, worker)) }, output_receiver))
+        Ok(Self { commands, running: Some((shutdown, worker)) })
     }
 
     pub fn send(&self, command: Command) -> Result<(), mpsc::SendError<Command>> {

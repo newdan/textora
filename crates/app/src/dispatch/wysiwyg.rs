@@ -5,9 +5,6 @@ use crate::app_effect::AppEffect;
 use appkit_core::edit_command::EditCommand;
 #[cfg(test)]
 use appkit_shell::editor_runtime::apply_target_to_document;
-pub(crate) use appkit_shell::editor_runtime::{
-    apply_edit_hit_target, set_wysiwyg_cursor_and_selection, set_wysiwyg_visual_caret_and_selection,
-};
 
 impl App {
     pub(crate) fn dispatch_wysiwyg_navigation(&mut self, command: &EditCommand) -> AppEffect {
@@ -226,7 +223,7 @@ pub(crate) mod semantic_test_support {
 #[cfg(test)]
 mod tests {
     use crate::app::App;
-    use crate::commands::execute_edit_command_v2;
+    use crate::dispatch::editor::command_tests::execute_edit_command_v2;
     use crate::document_fixture::DocumentFixture;
     use appkit_core::edit_command::EditCommand;
 

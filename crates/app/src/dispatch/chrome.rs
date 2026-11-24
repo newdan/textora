@@ -35,6 +35,29 @@ pub(crate) enum SettingsDispatchAction {
     ToggleStatusBar,
 }
 
+impl SettingsDispatchAction {
+    fn apply_to(self, settings: &mut ui::Settings) {
+        match self {
+            Self::SetViewMode(mode) => settings.set_view_mode(mode),
+            Self::SetThemeMode(mode) => settings.set_theme_mode(mode),
+            Self::SetFontFamily(family) => settings.set_font_family(family),
+            Self::SetFontSize(size) => settings.set_font_size(size),
+            Self::SetLineHeightRatio(ratio) => settings.set_line_height_ratio(ratio),
+            Self::SetTabWidth(width) => settings.set_tab_width(width),
+            Self::SetWordWrap(enabled) => settings.set_word_wrap(enabled),
+            Self::SetMarkdownFirstLineIndent(enabled) => {
+                settings.set_markdown_first_line_indent(enabled);
+            }
+            Self::SetTextSpacingMode(mode) => settings.set_text_spacing_mode(mode),
+            Self::SetShowLineNumbers(enabled) => settings.set_show_line_numbers(enabled),
+            Self::SetShowStatusBar(enabled) => settings.set_show_status_bar(enabled),
+            Self::ToggleLineNumbers => settings.set_show_line_numbers(!settings.show_line_numbers),
+            Self::ToggleWordWrap => settings.set_word_wrap(!settings.word_wrap),
+            Self::ToggleStatusBar => settings.set_show_status_bar(!settings.show_status_bar),
+        }
+    }
+}
+
 impl App {
     pub(crate) fn dispatch_chrome_action(&mut self, action: ChromeDispatchAction) -> AppEffect {
         match action {
@@ -54,7 +77,7 @@ impl App {
                 let screen = (self.screen_width(), self.screen_height());
                 let metrics = self.ui_metrics();
                 self.snapshot_popup_tab_ids();
-                if let Some(layout) = self.ui_shell.tab_bar_layout() {
+                if let Some((layout, bounds)) = self.ui_shell.tab_bar_layout_and_bounds() {
                     let entries = layout
                         .tabs
                         .iter()
@@ -66,7 +89,12 @@ impl App {
                     if layout.dropdown_rect_px.w > 0.0 {
                         let menu = ui::popup_menu::PopupMenu::overflow_px(
                             &entries,
-                            layout.dropdown_rect_px,
+                            ui::core::Rect::new(
+                                bounds.x + layout.dropdown_rect_px.x,
+                                bounds.y + layout.dropdown_rect_px.y,
+                                layout.dropdown_rect_px.w,
+                                layout.dropdown_rect_px.h,
+                            ),
                             screen,
                             self.active_editor_index().unwrap_or(0),
                             metrics.dpi,
@@ -97,7 +125,8 @@ impl App {
                 AppEffect::NONE
             }
             ChromeDispatchAction::SetSidebarWidth(width) => {
-                self.ui_shell.sidebar_cfg_mut().width = width;
+                let dpi = self.ui_metrics().dpi.max(f32::EPSILON);
+                self.ui_shell.set_sidebar_width_logical(width / dpi);
                 AppEffect::REDRAW
             }
             ChromeDispatchAction::SidebarResizeEnd => AppEffect::PERSIST_WORKSPACE,
@@ -119,92 +148,47 @@ impl App {
     }
 
     pub(crate) fn dispatch_settings_action(&mut self, action: SettingsDispatchAction) -> AppEffect {
-        self.ui_shell.sidebar_clear_menu();
-        let effect = match action {
-            SettingsDispatchAction::SetViewMode(mode) => {
-                self.settings.set_view_mode(mode);
-                self.ui_shell.set_dragging_sidebar(false);
-                AppEffect::SYNC_WINDOW_CHROME
+        let menu_closed = self.ui_shell.sidebar_clear_menu();
+        let previous = self.editor_runtime.settings();
+        let (view_mode, theme_mode, word_wrap) =
+            (previous.view_mode, previous.theme_mode, previous.word_wrap);
+        if !self.editor_runtime.edit_settings(|settings| action.apply_to(settings)) {
+            return if menu_closed { AppEffect::REDRAW } else { AppEffect::NONE };
+        }
+
+        let current = self.editor_runtime.settings();
+        let effect = if current.view_mode != view_mode {
+            self.ui_shell.set_dragging_sidebar(false);
+            AppEffect::SYNC_WINDOW_CHROME
+        } else if current.theme_mode != theme_mode {
+            let system_theme = self
+                .editor_runtime
+                .window()
+                .and_then(|window| window.theme())
+                .unwrap_or(winit::window::Theme::Dark);
+            self.rebuild_theme_state(system_theme);
+            AppEffect::REDRAW
+        } else {
+            if current.word_wrap != word_wrap {
+                self.invalidate_tab_render_caches();
             }
-            SettingsDispatchAction::SetThemeMode(mode) => {
-                self.settings.set_theme_mode(mode);
-                self.rebuild_theme_state();
-                AppEffect::REDRAW
-            }
-            SettingsDispatchAction::SetFontFamily(family) => {
-                self.settings.set_font_family(family);
-                AppEffect::RESHAPE
-            }
-            SettingsDispatchAction::SetFontSize(size) => {
-                self.settings.set_font_size(size);
-                AppEffect::RESHAPE
-            }
-            SettingsDispatchAction::SetLineHeightRatio(ratio) => {
-                self.settings.set_line_height_ratio(ratio);
-                AppEffect::RESHAPE
-            }
-            SettingsDispatchAction::SetTabWidth(width) => {
-                self.settings.set_tab_width(width);
-                AppEffect::RESHAPE
-            }
-            SettingsDispatchAction::SetWordWrap(enabled) => self.apply_word_wrap(enabled),
-            SettingsDispatchAction::SetMarkdownFirstLineIndent(enabled) => {
-                self.settings.set_markdown_first_line_indent(enabled);
-                AppEffect::RESHAPE
-            }
-            SettingsDispatchAction::SetTextSpacingMode(mode) => {
-                self.settings.set_text_spacing_mode(mode);
-                AppEffect::RESHAPE
-            }
-            SettingsDispatchAction::SetShowLineNumbers(enabled) => {
-                self.settings.set_show_line_numbers(enabled);
-                AppEffect::RESHAPE
-            }
-            SettingsDispatchAction::SetShowStatusBar(enabled) => {
-                self.settings.set_show_status_bar(enabled);
-                AppEffect::RESHAPE
-            }
-            SettingsDispatchAction::ToggleLineNumbers => {
-                return self.dispatch_settings_action(SettingsDispatchAction::SetShowLineNumbers(
-                    !self.settings.show_line_numbers,
-                ));
-            }
-            SettingsDispatchAction::ToggleWordWrap => {
-                self.apply_word_wrap(!self.settings.word_wrap)
-            }
-            SettingsDispatchAction::ToggleStatusBar => {
-                return self.dispatch_settings_action(SettingsDispatchAction::SetShowStatusBar(
-                    !self.settings.show_status_bar,
-                ));
-            }
+            AppEffect::RESHAPE
         };
-        self.editor_runtime.update_settings(self.settings.clone());
         effect.merge(AppEffect::PERSIST_SETTINGS)
     }
 
-    fn apply_word_wrap(&mut self, enabled: bool) -> AppEffect {
-        self.settings.set_word_wrap(enabled);
+    fn invalidate_tab_render_caches(&mut self) {
         for tab_id in self.editor_tab_ids_in_order() {
             if let Some(mut tab) = self.tab_session_mut(tab_id) {
                 tab.invalidate_render_cache_all();
             }
         }
-        AppEffect::RESHAPE
     }
 
-    pub(crate) fn rebuild_theme_state(&mut self) {
-        let system_theme = self
-            .editor_runtime
-            .window()
-            .and_then(|window| window.theme())
-            .unwrap_or(winit::window::Theme::Dark);
-        self.current_theme = ui::Theme::resolve(
-            self.settings.theme_mode,
-            system_theme,
-            &self.active_theme_pair,
-            &self.theme_registry,
-        );
-        self.editor_runtime.update_theme(self.current_theme.clone());
+    pub(crate) fn rebuild_theme_state(&mut self, system_theme: winit::window::Theme) {
+        let theme =
+            self.settings_ui.resolve_theme(self.editor_runtime.settings().theme_mode, system_theme);
+        self.editor_runtime.update_theme(theme);
     }
 
     pub(crate) fn handle_sidebar_key_action(
@@ -246,15 +230,15 @@ mod tests {
     #[test]
     fn sidebar_width_and_pin_return_redraw_without_applying() {
         let mut app = App::new(None);
-        app.needs_redraw = false;
+        app.platform.clear_redraw();
 
         let width_effect = app.dispatch_chrome_action(ChromeDispatchAction::SetSidebarWidth(260.0));
         let pin_effect = app.dispatch_chrome_action(ChromeDispatchAction::ToggleSidebarPin);
 
-        assert_eq!(app.ui_shell.sidebar_width(), 260.0);
+        assert_eq!(app.ui_shell.sidebar_width_logical(), 260.0);
         assert!(width_effect.redraw);
         assert!(pin_effect.redraw);
-        assert!(!app.needs_redraw);
+        assert!(!app.platform.redraw_pending());
     }
 
     #[test]
@@ -267,75 +251,89 @@ mod tests {
     #[test]
     fn view_mode_returns_persist_chrome_and_redraw() {
         let mut app = App::new(None);
-        app.needs_redraw = false;
+        app.platform.clear_redraw();
 
         let effect = app.dispatch_settings_action(SettingsDispatchAction::SetViewMode(
             ui::view_mode::ViewMode::Tabs,
         ));
 
-        assert_eq!(app.settings.view_mode, ui::view_mode::ViewMode::Tabs);
+        assert_eq!(app.editor_runtime.settings().view_mode, ui::view_mode::ViewMode::Tabs);
         assert!(effect.persist_settings);
         assert!(effect.sync_window_chrome);
         assert!(effect.redraw);
-        assert!(!app.needs_redraw);
+        assert!(!app.platform.redraw_pending());
     }
 
     #[test]
     fn word_wrap_returns_persist_and_reshape() {
         let mut app = App::new(None);
-        let before = app.settings.word_wrap;
+        let before = app.editor_runtime.settings().word_wrap;
         let effect = app.dispatch_settings_action(SettingsDispatchAction::ToggleWordWrap);
 
-        assert_eq!(app.settings.word_wrap, !before);
+        assert_eq!(app.editor_runtime.settings().word_wrap, !before);
         assert!(effect.persist_settings);
         assert!(effect.reshape);
     }
 
     #[test]
-    fn font_change_synchronizes_editor_runtime_settings() {
+    fn unchanged_settings_do_not_request_persistence_or_invalidate_layout() {
         let mut app = App::new(None);
-        let effect =
-            app.dispatch_settings_action(SettingsDispatchAction::SetFontFamily("Helvetica".into()));
-        assert!(effect.reshape);
-        assert_eq!(app.editor_runtime.settings_snapshot().font_family, "Helvetica");
+        let original_version = app.editor_runtime.settings().version;
+        let unchanged =
+            SettingsDispatchAction::SetWordWrap(app.editor_runtime.settings().word_wrap);
+
+        let effect = app.dispatch_settings_action(unchanged);
+
+        assert_eq!(effect, AppEffect::NONE);
+        assert_eq!(app.editor_runtime.settings().version, original_version);
     }
 
     #[test]
-    fn settings_actions_synchronize_runtime_before_returning_effects() {
+    fn settings_view_reflects_commits_to_the_editor_runtime() {
+        use ui::settings::ThemeMode;
+        use ui::settings_view::SettingsViewInput;
+        use ui::typography::TextSpacingMode;
+        use ui::view_mode::ViewMode;
+
         let mut app = App::new(None);
+        let before = app.settings_view_input();
+        let original_version = app.editor_runtime.settings().version;
         let actions = [
-            SettingsDispatchAction::SetViewMode(ui::view_mode::ViewMode::Tabs),
-            SettingsDispatchAction::SetThemeMode(ui::settings::ThemeMode::Light),
+            SettingsDispatchAction::SetViewMode(ViewMode::Tabs),
+            SettingsDispatchAction::SetThemeMode(ThemeMode::Light),
             SettingsDispatchAction::SetFontFamily("Helvetica".into()),
             SettingsDispatchAction::SetFontSize(21.0),
             SettingsDispatchAction::SetLineHeightRatio(1.75),
             SettingsDispatchAction::SetTabWidth(8),
             SettingsDispatchAction::ToggleWordWrap,
             SettingsDispatchAction::SetMarkdownFirstLineIndent(true),
-            SettingsDispatchAction::SetTextSpacingMode(ui::typography::TextSpacingMode::Verbatim),
+            SettingsDispatchAction::SetTextSpacingMode(TextSpacingMode::Verbatim),
             SettingsDispatchAction::ToggleLineNumbers,
             SettingsDispatchAction::ToggleStatusBar,
         ];
+        let revisions = actions.len() as u64;
         for action in actions {
             assert!(app.dispatch_settings_action(action).persist_settings);
-            assert_runtime_settings_match(&app);
         }
-    }
-
-    fn assert_runtime_settings_match(app: &App) {
-        let runtime = app.editor_runtime.settings_snapshot();
-        assert_eq!(runtime.version, app.settings.version);
-        assert_eq!(runtime.view_mode, app.settings.view_mode);
-        assert_eq!(runtime.theme_mode, app.settings.theme_mode);
-        assert_eq!(runtime.font_family, app.settings.font_family);
-        assert_eq!(runtime.font_size, app.settings.font_size);
-        assert_eq!(runtime.line_height, app.settings.line_height);
-        assert_eq!(runtime.tab_width, app.settings.tab_width);
-        assert_eq!(runtime.word_wrap, app.settings.word_wrap);
-        assert_eq!(runtime.markdown_first_line_indent, app.settings.markdown_first_line_indent);
-        assert_eq!(runtime.text_spacing_mode, app.settings.text_spacing_mode);
-        assert_eq!(runtime.show_line_numbers, app.settings.show_line_numbers);
-        assert_eq!(runtime.show_status_bar, app.settings.show_status_bar);
+        assert_eq!(app.editor_runtime.settings().version, original_version + revisions);
+        assert!(!app.editor_runtime.theme().is_dark);
+        assert_eq!(
+            app.settings_view_input(),
+            SettingsViewInput {
+                theme_mode: ThemeMode::Light,
+                font_family: "Helvetica".into(),
+                font_size: 21.0,
+                line_height_ratio: 1.75,
+                word_wrap: !before.word_wrap,
+                markdown_first_line_indent: true,
+                text_spacing_mode: TextSpacingMode::Verbatim,
+                show_line_numbers: !before.show_line_numbers,
+                tab_width: 8,
+                view_mode: ViewMode::Tabs,
+                show_status_bar: !before.show_status_bar,
+                persistence: before.persistence,
+            },
+        );
     }
 
     #[test]
@@ -346,7 +344,10 @@ mod tests {
             ui::typography::TextSpacingMode::Verbatim,
         ));
 
-        assert_eq!(app.settings.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
+        assert_eq!(
+            app.editor_runtime.settings().text_spacing_mode,
+            ui::typography::TextSpacingMode::Verbatim
+        );
         assert!(effect.persist_settings);
         assert!(effect.reshape);
     }
@@ -357,7 +358,7 @@ mod tests {
         let effect =
             app.dispatch_settings_action(SettingsDispatchAction::SetMarkdownFirstLineIndent(true));
 
-        assert!(app.settings.markdown_first_line_indent);
+        assert!(app.editor_runtime.settings().markdown_first_line_indent);
         assert!(effect.persist_settings);
         assert!(effect.reshape);
     }

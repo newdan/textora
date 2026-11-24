@@ -201,438 +201,435 @@ pub(in crate::layout::block) fn layout_block_content(block: &BlockNode, ctx: &mu
             let font_size = ctx.font_size_override.unwrap_or(ctx.style.body_font_size);
             layout_text_block(block, ctx, font_size, ctx.style.text_color, Weight::NORMAL);
         }
-        BlockKind::DisplayMath => {
-            let active = block_is_active(block, ctx);
-            if !active {
-                let spelling = ctx.doc.doc_text_in_range(block.block_range.clone());
-                let expression =
-                    spelling.trim().strip_prefix("$$").and_then(|body| body.strip_suffix("$$"));
-                if let Some(expression) = expression
-                    && layout_embedded_block(
-                        block,
-                        ctx,
-                        crate::embedded::EmbeddedKind::DisplayMath,
-                        expression.trim(),
-                    )
-                {
-                    return;
-                }
-            }
-            let font_size = ctx.font_size_override.unwrap_or(ctx.style.body_font_size);
-            layout_text_block(block, ctx, font_size, ctx.style.text_color, Weight::NORMAL);
-        }
-        BlockKind::Heading { level } => {
-            let idx = (*level as usize).saturating_sub(1).min(5);
-            let font_size = ctx.style.heading_font_sizes[idx];
-            if let (Some(edit_ctx), Some(source)) = (ctx.edit_ctx, ctx.source_text) {
-                ctx.active_block_marker =
-                    heading_marker_at_cursor(block, source, edit_ctx.cursor_byte);
-            }
-            layout_text_block(block, ctx, font_size, ctx.style.heading_color, Weight::SEMIBOLD);
-            ctx.active_block_marker = None;
-        }
-        BlockKind::CodeBlock { language } => {
-            let is_mermaid = language.as_deref().is_some_and(is_mermaid_language);
-            let mut active = code_block_is_active(block, ctx.edit_ctx)
-                || (is_mermaid && block_is_selected(block, ctx.selection_range));
-
-            if is_mermaid && !active {
-                let content = block.lines(ctx.doc).join("\n");
-                if layout_embedded_block(
-                    block,
-                    ctx,
-                    crate::embedded::EmbeddedKind::Mermaid,
-                    content.trim_end(),
-                ) {
-                    return;
-                }
-                active = true;
-            }
-
-            let font_size = ctx.style.code_font_size;
-            let line_h = ctx.style.code_line_height;
-            let pad = ctx.style.code_block_padding;
-
-            let (lines, starts) = if active {
-                let full_text = ctx.doc.doc_text_in_range(block.block_range.clone());
-                let (lines, starts) = active_code_source_lines(
-                    &full_text,
-                    block.block_range.start,
-                    !is_fenced_code_block(block, ctx.doc),
-                );
-                (lines, Some(starts))
-            } else if let Some(content_start) = empty_fenced_code_content_start(block, ctx.doc) {
-                (vec![String::new()], Some(vec![content_start]))
-            } else {
-                let raw = collect_text_lines(block, ctx.doc);
-                let lines_vec: Vec<String> =
-                    raw.iter().flat_map(|l| l.split('\n').map(|s| s.to_string())).collect();
-                (lines_vec, block.code_line_source_starts.clone())
-            };
-
-            let ascii_diagram = if active || !is_fenced_code_block(block, ctx.doc) {
-                None
-            } else {
-                super::ascii_diagram::detect_ascii_diagram(&lines)
-            };
-
-            let total_h = lines.len() as f32 * line_h + pad * 2.0;
-
-            // Compute syntax highlight spans if a highlighter and language are available.
-            let highlight_spans_per_line: Option<Vec<Vec<crate::builder::HighlightSpan>>> =
-                if let (Some(hl), Some(lang)) = (ctx.highlighter, language.as_deref()) {
-                    let full_code = lines.join("\n");
-                    Some(hl.highlight(lang, &full_code))
-                } else {
-                    None
-                };
-
-            let mut laid_out_lines = Vec::new();
-            let mut ly = ctx.y + pad;
-            for (i, line_text) in lines.iter().enumerate() {
-                let hl_spans = highlight_spans_per_line
-                    .as_ref()
-                    .and_then(|v| v.get(i).cloned())
-                    .unwrap_or_default();
-                let source_projection = starts.as_ref().and_then(|line_starts| {
-                    line_starts.get(i).map(|&source_start| {
-                        crate::projection::ProjectedText::direct(line_text, source_start)
-                            .slice_visual_line(0, 0..line_text.len())
-                            .expect("a direct code-line projection must slice at its boundaries")
-                    })
-                });
-                let (shaped, _) = super::shaping::shape_line(
-                    line_text,
-                    font_size,
-                    Weight::NORMAL,
-                    shaping::Style::Normal,
-                    ctx.style.code_font_family.as_deref(),
-                    ctx.shaper.as_deref_mut(),
-                );
-                // Retain the code-font geometry so caret and hit-testing share render advances.
-                laid_out_lines.push(LaidOutLine {
-                    text: line_text.clone(),
-                    rect: ui::core::geom::Rect::new(
-                        ctx.indent + pad,
-                        ly,
-                        ctx.available_width() - pad * 2.0,
-                        line_h,
-                    ),
-                    font_size,
-                    is_code: true,
-                    font_weight: Weight::NORMAL,
-                    color_override: None,
-                    doc_line_idx: i,
-                    styles: vec![],
-                    style_segments: vec![],
-                    shaped,
-                    text_layout: None,
-                    highlight_spans: hl_spans,
-                    source_projection,
-                });
-                ly += line_h;
-            }
-
-            if let Some(ascii_diagram) = ascii_diagram {
-                ctx.ascii_diagrams.register(
-                    block.block_range.clone(),
-                    &laid_out_lines,
-                    ascii_diagram,
-                );
-            }
-            ctx.push_block(
-                LaidOutBlockKind::CodeBlock { lines: laid_out_lines, language: language.clone() },
-                total_h,
-            );
-        }
-        BlockKind::BlockQuote => {
-            let saved_indent = ctx.indent;
-            ctx.indent += ctx.style.blockquote_padding;
-            let start_y = ctx.y;
-            ctx.y += ctx.style.blockquote_padding; // top padding
-            let saved_color_fade = ctx.color_fade;
-            let saved_font_size_override = ctx.font_size_override;
-            ctx.color_fade = 0.25; // blend text 25% toward bg
-            ctx.font_size_override = Some(ctx.style.code_font_size);
-
-            // Collect child blocks into a sub-layout
-            let mut sub_blocks = Vec::new();
-            let saved_output = std::mem::take(&mut ctx.output);
-            // Detect active block marker: cursor in blockquote's source range.
-            // The marker is active during child layout so that Paragraph children
-            // in layout_text_block pick it up and prepend "> " to their first line.
-            if let Some(edit_ctx) = ctx.edit_ctx {
-                ctx.active_block_marker =
-                    crate::edit::active_block_marker(block, edit_ctx.cursor_byte);
-            }
-            let saved_previous_spacing_block = ctx.previous_spacing_block.take();
-            let mut child_placement = BlockPlacement::AtContentOrigin;
-            for child in &block.children {
-                if layout_block_with_placement(child, ctx, child_placement) {
-                    child_placement = BlockPlacement::InFlow;
-                }
-            }
-            ctx.previous_spacing_block = saved_previous_spacing_block;
-            ctx.active_block_marker = None;
-            sub_blocks.append(&mut ctx.output);
-            ctx.output = saved_output;
-
-            let content_h = ctx.y - start_y + ctx.style.blockquote_padding; // + bottom padding
-            ctx.y = start_y;
-            ctx.indent = saved_indent;
-            ctx.color_fade = saved_color_fade;
-            ctx.font_size_override = saved_font_size_override;
-
-            ctx.push_block(LaidOutBlockKind::BlockQuote { blocks: sub_blocks }, content_h);
-        }
-        BlockKind::ListItem { bullet, .. } => {
-            let font_size = ctx.font_size_override.unwrap_or(ctx.style.body_font_size);
-            let line_h = ctx.style.line_height;
-            let saved_indent = ctx.indent;
-            let saved_color_fade = ctx.color_fade;
-            let saved_font_size_override = ctx.font_size_override;
-            let current_depth = ctx.list_depth;
-            let start_y = ctx.y;
-
-            // Lay out item's own text as LaidOutLine (bullet offset)
-            let mut item_lines = Vec::new();
-            let raw_text_lines = list_item_text_lines_for_layout(block, ctx);
-            // Detect active block marker: cursor in list item's source range.
-            if let Some(edit_ctx) = ctx.edit_ctx {
-                ctx.active_block_marker = if cursor_in_nested_list_item(block, edit_ctx.cursor_byte)
-                {
-                    None
-                } else {
-                    active_list_item_marker(block, ctx.source_text, edit_ctx.cursor_byte)
-                };
-            }
-            for (line_idx, raw_line) in raw_text_lines.lines.iter().enumerate() {
-                let line_styles = raw_line
-                    .styles
-                    .as_deref()
-                    .or_else(|| block.text_styles.get(line_idx).map(|s| s.as_slice()))
-                    .unwrap_or(&[]);
-                let source_context = raw_line.source_context.as_ref();
-                let mut projected = if let Some(source_text) = ctx.source_text {
-                    crate::edit::materialize_projected_line(
-                        &raw_line.projected,
-                        line_styles,
-                        source_text,
-                        ctx.edit_ctx,
-                        source_context,
-                    )
-                } else {
-                    raw_line.projected.clone()
-                };
-                let materialized_spans = if let Some(source_text) = ctx.source_text {
-                    crate::edit::materialized_spans_for_projected_line(
-                        &raw_line.projected,
-                        &projected,
-                        line_styles,
-                        source_text,
-                        ctx.edit_ctx,
-                    )
-                } else {
-                    crate::edit::materialize_line(&raw_line.projected.text, line_styles, "", None)
-                        .spans
-                };
-                let mut materialized_styles: Vec<StyleSpan> = materialized_spans
-                    .iter()
-                    .map(|span| StyleSpan {
-                        start: span.start,
-                        len: span.len,
-                        style: span.style.clone(),
-                        source_range: span.source_range.clone(),
-                    })
-                    .collect();
-                if line_idx == 0
-                    && let Some(marker) = ctx.active_block_marker.as_ref()
-                {
-                    let marker_source_range =
-                        marker_source_range_for_projected_line(&projected, marker);
-                    projected = materialize_marker_for_projected_line(
-                        projected,
-                        marker,
-                        marker_source_range.clone(),
-                    );
-                    let marker_len = marker.marker_text.len();
-                    for style in &mut materialized_styles {
-                        style.start += marker_len;
-                    }
-                    materialized_styles.insert(
-                        0,
-                        StyleSpan {
-                            start: 0,
-                            len: marker_len,
-                            style: crate::builder::InlineStyle::SourceMarker,
-                            source_range: marker_source_range,
-                        },
-                    );
-                }
-                let active_ordered_marker = (line_idx == 0
-                    && matches!(bullet, crate::builder::ListBullet::Ordered(_)))
-                .then_some(ctx.active_block_marker.as_ref())
-                .flatten();
-                let marker_len = active_ordered_marker.map(|marker| marker.marker_text.len());
-                let estimated_marker_width = active_ordered_marker.map_or(0.0, |marker| {
-                    marker.marker_text.chars().count() as f32 * font_size * 0.55
-                });
-                super::embedded::expose_failed_math(
-                    &mut projected,
-                    &mut materialized_styles,
-                    ctx.doc,
-                    font_size,
-                    ctx.style.text_color,
-                    !ctx.allow_embedded || ctx.shaper.is_none(),
-                    ctx.selection_range,
-                );
-                let projected_verbatim_ranges = projected_verbatim_ranges(&projected);
-                let wrapped = ctx.wrap_text_with_first_line_indent_styled_and_protected(
-                    &projected.text,
-                    font_size,
-                    Weight::NORMAL,
-                    ctx.available_width(),
-                    0.0,
-                    &materialized_styles,
-                    &projected_verbatim_ranges,
-                    ctx.style.text_color,
-                );
-                let wrapped_shaped = ctx.last_wrap_shaped.first().cloned().flatten();
-                let marker_width = marker_len
-                    .and_then(|marker_len| shaped_prefix_width(&ctx.last_wrap_shaped, marker_len))
-                    .unwrap_or(estimated_marker_width);
-                let content_x = ctx.indent + ctx.style.list_indent;
-                let x = (content_x - marker_width).max(ctx.indent);
-                let reclaimed_width = content_x - x;
-                let w = ctx.available_width() - ctx.style.list_indent + reclaimed_width;
-                let laid = layout_line_with_styles(
-                    &materialized_styles,
-                    &wrapped,
-                    &projected,
-                    font_size,
-                    line_h,
-                    x,
-                    ctx.y,
-                    w,
-                    ctx.style.text_color,
-                    ctx.style.body_font_family.first().map(|s| s.as_str()),
-                    wrapped_shaped.as_ref(),
-                    line_idx,
-                    &ctx.embedded_images,
-                );
-                let n = laid.len();
-                let laid_height = laid.iter().map(|line| line.rect.h).sum::<f32>();
-                item_lines.extend(laid);
-                ctx.y += if n == 0 { line_h } else { laid_height };
-            }
-            ctx.active_block_marker = None;
-
-            // Lay out nested children with extra indent
-            ctx.indent += ctx.style.list_indent;
-            ctx.list_depth = current_depth + 1;
-            let saved_output = std::mem::take(&mut ctx.output);
-            let saved_previous_spacing_block = ctx.previous_spacing_block.take();
-            let mut child_placement = BlockPlacement::AtContentOrigin;
-            for (child_index, child) in block.children.iter().enumerate() {
-                // 项文本与子块（loose list 的子段落）之间保留 paragraph_spacing
-                // 级别的间距；嵌套子列表保持紧凑。与顶层块间间距同一视觉规范。
-                if child_index == 0
-                    && !item_lines.is_empty()
-                    && let Some(child_spacing_block) = first_spacing_block(child)
-                {
-                    ctx.y += super::spacing::list_item_child_gap(child_spacing_block, ctx.style);
-                }
-                if layout_block_with_placement(child, ctx, child_placement) {
-                    child_placement = BlockPlacement::InFlow;
-                }
-            }
-            ctx.previous_spacing_block = saved_previous_spacing_block;
-            let sub_blocks: Vec<LaidOutBlock> = ctx.output.drain(..).collect();
-            ctx.output = saved_output;
-
-            let content_h = (ctx.y - start_y).max(line_h);
-            ctx.y = start_y;
-            ctx.indent = saved_indent;
-            ctx.color_fade = saved_color_fade;
-            ctx.font_size_override = saved_font_size_override;
-            ctx.list_depth = current_depth;
-
-            ctx.push_block(
-                LaidOutBlockKind::ListItem {
-                    bullet: bullet.clone(),
-                    blocks: sub_blocks,
-                    lines: item_lines,
-                    level_indent: ctx.style.list_indent,
-                    depth: current_depth,
-                },
-                content_h,
-            );
-        }
+        BlockKind::DisplayMath => layout_display_math_block(block, ctx),
+        BlockKind::Heading { level } => layout_heading_block(block, ctx, *level),
+        BlockKind::CodeBlock { language } => layout_code_block(block, ctx, language.as_deref()),
+        BlockKind::BlockQuote => layout_quote_block(block, ctx),
+        BlockKind::ListItem { bullet, .. } => layout_list_item_block(block, ctx, bullet),
         BlockKind::TableWrapper { columns, alignments: _ } => {
             layout_table(block, ctx, *columns);
         }
-        BlockKind::HorizontalRule => {
-            let active = if let Some(edit_ctx) = ctx.edit_ctx {
-                let rule_source = ctx.doc.doc_text_in_range(block.block_range.clone());
-                let marker_end =
-                    block.block_range.start + rule_source.trim_end_matches(['\r', '\n']).len();
-                edit_ctx.cursor_byte >= block.block_range.start
-                    && edit_ctx.cursor_byte <= marker_end
-            } else {
-                false
-            };
-            if active {
-                let font_size = ctx.font_size_override.unwrap_or(ctx.style.code_font_size);
-                let color = crate::style::blend_toward_bg(
-                    ctx.style.text_color,
-                    ctx.style.background_color,
-                    0.55, // SOURCE_MARKER_FADE_RATIO
-                );
-                layout_text_block(block, ctx, font_size, color, Weight::NORMAL);
-            } else {
-                ctx.push_block(LaidOutBlockKind::HorizontalRule, ctx.style.rule_thickness);
-            }
-        }
-        BlockKind::MetadataBlock => {
-            let font_size = ctx.style.code_font_size;
-            let line_h = ctx.style.code_line_height;
-            let pad = ctx.style.code_block_padding;
-            let lines = metadata_lines_with_source_starts(block);
-            let total_h = lines.len() as f32 * line_h + pad * 2.0;
+        BlockKind::HorizontalRule => layout_horizontal_rule(block, ctx),
+        BlockKind::MetadataBlock => layout_metadata_block(block, ctx),
+    }
+}
 
-            let mut laid_out_lines = Vec::new();
-            let mut ly = ctx.y + pad;
-            for (line_idx, (line_text, source_start)) in lines.iter().enumerate() {
-                let source_projection =
-                    crate::projection::ProjectedText::direct(line_text, *source_start)
-                        .slice_visual_line(0, 0..line_text.len())
-                        .expect("a direct metadata-line projection must slice at its boundaries");
-                laid_out_lines.push(LaidOutLine {
-                    text: line_text.clone(),
-                    rect: ui::core::geom::Rect::new(
-                        ctx.indent + pad,
-                        ly,
-                        ctx.available_width() - pad * 2.0,
-                        line_h,
-                    ),
-                    font_size,
-                    is_code: true,
-                    font_weight: Weight::NORMAL,
-                    color_override: Some(ctx.style.code_color),
-                    doc_line_idx: line_idx,
-                    styles: vec![],
-                    style_segments: vec![],
-                    shaped: None,
-                    text_layout: None,
-                    highlight_spans: vec![],
-                    source_projection: Some(source_projection),
-                });
-                ly += line_h;
-            }
-
-            ctx.push_block(LaidOutBlockKind::MetadataBlock { lines: laid_out_lines }, total_h);
+fn layout_display_math_block(block: &BlockNode, ctx: &mut LayoutCtx) {
+    let active = block_is_active(block, ctx);
+    if !active {
+        let spelling = ctx.doc.doc_text_in_range(block.block_range.clone());
+        let expression =
+            spelling.trim().strip_prefix("$$").and_then(|body| body.strip_suffix("$$"));
+        if let Some(expression) = expression
+            && layout_embedded_block(
+                block,
+                ctx,
+                crate::embedded::EmbeddedKind::DisplayMath,
+                expression.trim(),
+            )
+        {
+            return;
         }
     }
+    let font_size = ctx.font_size_override.unwrap_or(ctx.style.body_font_size);
+    layout_text_block(block, ctx, font_size, ctx.style.text_color, Weight::NORMAL);
+}
+
+fn layout_heading_block(block: &BlockNode, ctx: &mut LayoutCtx, level: u8) {
+    let idx = (level as usize).saturating_sub(1).min(5);
+    let font_size = ctx.style.heading_font_sizes[idx];
+    if let (Some(edit_ctx), Some(source)) = (ctx.edit_ctx, ctx.source_text) {
+        ctx.active_block_marker = heading_marker_at_cursor(block, source, edit_ctx.cursor_byte);
+    }
+    layout_text_block(block, ctx, font_size, ctx.style.heading_color, Weight::SEMIBOLD);
+    ctx.active_block_marker = None;
+}
+
+fn layout_code_block(block: &BlockNode, ctx: &mut LayoutCtx, language: Option<&str>) {
+    let is_mermaid = language.is_some_and(is_mermaid_language);
+    let mut active = code_block_is_active(block, ctx.edit_ctx)
+        || (is_mermaid && block_is_selected(block, ctx.selection_range));
+
+    if is_mermaid && !active {
+        let content = block.lines(ctx.doc).join("\n");
+        if layout_embedded_block(
+            block,
+            ctx,
+            crate::embedded::EmbeddedKind::Mermaid,
+            content.trim_end(),
+        ) {
+            return;
+        }
+        active = true;
+    }
+
+    let font_size = ctx.style.code_font_size;
+    let line_h = ctx.style.code_line_height;
+    let pad = ctx.style.code_block_padding;
+
+    let (lines, starts) = if active {
+        let full_text = ctx.doc.doc_text_in_range(block.block_range.clone());
+        let (lines, starts) = active_code_source_lines(
+            &full_text,
+            block.block_range.start,
+            !is_fenced_code_block(block, ctx.doc),
+        );
+        (lines, Some(starts))
+    } else if let Some(content_start) = empty_fenced_code_content_start(block, ctx.doc) {
+        (vec![String::new()], Some(vec![content_start]))
+    } else {
+        let raw = collect_text_lines(block, ctx.doc);
+        let lines_vec: Vec<String> =
+            raw.iter().flat_map(|l| l.split('\n').map(|s| s.to_string())).collect();
+        (lines_vec, block.code_line_source_starts.clone())
+    };
+
+    let ascii_diagram = if active || !is_fenced_code_block(block, ctx.doc) {
+        None
+    } else {
+        super::ascii_diagram::detect_ascii_diagram(&lines)
+    };
+
+    let total_h = lines.len() as f32 * line_h + pad * 2.0;
+
+    // Compute syntax highlight spans if a highlighter and language are available.
+    let highlight_spans_per_line: Option<Vec<Vec<crate::builder::HighlightSpan>>> =
+        if let (Some(hl), Some(lang)) = (ctx.highlighter, language) {
+            let full_code = lines.join("\n");
+            Some(hl.highlight(lang, &full_code))
+        } else {
+            None
+        };
+
+    let mut laid_out_lines = Vec::new();
+    let mut ly = ctx.y + pad;
+    for (i, line_text) in lines.iter().enumerate() {
+        let hl_spans =
+            highlight_spans_per_line.as_ref().and_then(|v| v.get(i).cloned()).unwrap_or_default();
+        let source_projection = starts.as_ref().and_then(|line_starts| {
+            line_starts.get(i).map(|&source_start| {
+                crate::projection::ProjectedText::direct(line_text, source_start)
+                    .slice_visual_line(0, 0..line_text.len())
+                    .expect("a direct code-line projection must slice at its boundaries")
+            })
+        });
+        let (shaped, _) = super::shaping::shape_line(
+            line_text,
+            font_size,
+            Weight::NORMAL,
+            shaping::Style::Normal,
+            ctx.style.code_font_family.as_deref(),
+            ctx.shaper.as_deref_mut(),
+        );
+        // Retain the code-font geometry so caret and hit-testing share render advances.
+        laid_out_lines.push(LaidOutLine {
+            text: line_text.clone(),
+            rect: ui::core::geom::Rect::new(
+                ctx.indent + pad,
+                ly,
+                ctx.available_width() - pad * 2.0,
+                line_h,
+            ),
+            font_size,
+            is_code: true,
+            font_weight: Weight::NORMAL,
+            color_override: None,
+            doc_line_idx: i,
+            styles: vec![],
+            style_segments: vec![],
+            shaped,
+            text_layout: None,
+            highlight_spans: hl_spans,
+            source_projection,
+        });
+        ly += line_h;
+    }
+
+    if let Some(ascii_diagram) = ascii_diagram {
+        ctx.ascii_diagrams.register(block.block_range.clone(), &laid_out_lines, ascii_diagram);
+    }
+    ctx.push_block(
+        LaidOutBlockKind::CodeBlock {
+            lines: laid_out_lines,
+            language: language.map(str::to_owned),
+        },
+        total_h,
+    );
+}
+
+fn layout_quote_block(block: &BlockNode, ctx: &mut LayoutCtx) {
+    let saved_indent = ctx.indent;
+    ctx.indent += ctx.style.blockquote_padding;
+    let start_y = ctx.y;
+    ctx.y += ctx.style.blockquote_padding; // top padding
+    let saved_color_fade = ctx.color_fade;
+    let saved_font_size_override = ctx.font_size_override;
+    ctx.color_fade = 0.25; // blend text 25% toward bg
+    ctx.font_size_override = Some(ctx.style.code_font_size);
+
+    // Collect child blocks into a sub-layout
+    let mut sub_blocks = Vec::new();
+    let saved_output = std::mem::take(&mut ctx.output);
+    // Detect active block marker: cursor in blockquote's source range.
+    // The marker is active during child layout so that Paragraph children
+    // in layout_text_block pick it up and prepend "> " to their first line.
+    if let Some(edit_ctx) = ctx.edit_ctx {
+        ctx.active_block_marker = crate::edit::active_block_marker(block, edit_ctx.cursor_byte);
+    }
+    let saved_previous_spacing_block = ctx.previous_spacing_block.take();
+    let mut child_placement = BlockPlacement::AtContentOrigin;
+    for child in &block.children {
+        if layout_block_with_placement(child, ctx, child_placement) {
+            child_placement = BlockPlacement::InFlow;
+        }
+    }
+    ctx.previous_spacing_block = saved_previous_spacing_block;
+    ctx.active_block_marker = None;
+    sub_blocks.append(&mut ctx.output);
+    ctx.output = saved_output;
+
+    let content_h = ctx.y - start_y + ctx.style.blockquote_padding; // + bottom padding
+    ctx.y = start_y;
+    ctx.indent = saved_indent;
+    ctx.color_fade = saved_color_fade;
+    ctx.font_size_override = saved_font_size_override;
+
+    ctx.push_block(LaidOutBlockKind::BlockQuote { blocks: sub_blocks }, content_h);
+}
+
+fn layout_list_item_block(
+    block: &BlockNode,
+    ctx: &mut LayoutCtx,
+    bullet: &crate::builder::ListBullet,
+) {
+    let font_size = ctx.font_size_override.unwrap_or(ctx.style.body_font_size);
+    let line_h = ctx.style.line_height;
+    let saved_indent = ctx.indent;
+    let saved_color_fade = ctx.color_fade;
+    let saved_font_size_override = ctx.font_size_override;
+    let current_depth = ctx.list_depth;
+    let start_y = ctx.y;
+
+    // Lay out item's own text as LaidOutLine (bullet offset)
+    let mut item_lines = Vec::new();
+    let raw_text_lines = list_item_text_lines_for_layout(block, ctx);
+    // Detect active block marker: cursor in list item's source range.
+    if let Some(edit_ctx) = ctx.edit_ctx {
+        ctx.active_block_marker = if cursor_in_nested_list_item(block, edit_ctx.cursor_byte) {
+            None
+        } else {
+            active_list_item_marker(block, ctx.source_text, edit_ctx.cursor_byte)
+        };
+    }
+    for (line_idx, raw_line) in raw_text_lines.lines.iter().enumerate() {
+        let line_styles = raw_line
+            .styles
+            .as_deref()
+            .or_else(|| block.text_styles.get(line_idx).map(|s| s.as_slice()))
+            .unwrap_or(&[]);
+        let source_context = raw_line.source_context.as_ref();
+        let mut projected = if let Some(source_text) = ctx.source_text {
+            crate::edit::materialize_projected_line(
+                &raw_line.projected,
+                line_styles,
+                source_text,
+                ctx.edit_ctx,
+                source_context,
+            )
+        } else {
+            raw_line.projected.clone()
+        };
+        let mut materialized_styles = if let Some(source_text) = ctx.source_text {
+            crate::edit::materialized_spans_for_projected_line(
+                &raw_line.projected,
+                &projected,
+                line_styles,
+                source_text,
+                ctx.edit_ctx,
+            )
+        } else {
+            line_styles.to_vec()
+        };
+        if line_idx == 0
+            && let Some(marker) = ctx.active_block_marker.as_ref()
+        {
+            let marker_source_range = marker_source_range_for_projected_line(&projected, marker);
+            projected = materialize_marker_for_projected_line(
+                projected,
+                marker,
+                marker_source_range.clone(),
+            );
+            let marker_len = marker.marker_text.len();
+            for style in &mut materialized_styles {
+                style.start += marker_len;
+            }
+            materialized_styles.insert(
+                0,
+                StyleSpan {
+                    start: 0,
+                    len: marker_len,
+                    style: crate::builder::InlineStyle::SourceMarker,
+                    source_range: marker_source_range,
+                },
+            );
+        }
+        let active_ordered_marker = (line_idx == 0
+            && matches!(bullet, crate::builder::ListBullet::Ordered(_)))
+        .then_some(ctx.active_block_marker.as_ref())
+        .flatten();
+        let marker_len = active_ordered_marker.map(|marker| marker.marker_text.len());
+        let estimated_marker_width = active_ordered_marker
+            .map_or(0.0, |marker| marker.marker_text.chars().count() as f32 * font_size * 0.55);
+        super::embedded::expose_failed_math(
+            &mut projected,
+            &mut materialized_styles,
+            ctx.doc,
+            font_size,
+            ctx.style.text_color,
+            !ctx.allow_embedded || ctx.shaper.is_none(),
+            ctx.selection_range,
+        );
+        let projected_verbatim_ranges = projected_verbatim_ranges(&projected);
+        let wrapped = ctx.wrap_text_with_first_line_indent_styled_and_protected(
+            &projected.text,
+            font_size,
+            Weight::NORMAL,
+            ctx.available_width(),
+            0.0,
+            &materialized_styles,
+            &projected_verbatim_ranges,
+            ctx.style.text_color,
+        );
+        let wrapped_shaped = ctx.last_wrap_shaped.first().cloned().flatten();
+        let marker_width = marker_len
+            .and_then(|marker_len| shaped_prefix_width(&ctx.last_wrap_shaped, marker_len))
+            .unwrap_or(estimated_marker_width);
+        let content_x = ctx.indent + ctx.style.list_indent;
+        let x = (content_x - marker_width).max(ctx.indent);
+        let reclaimed_width = content_x - x;
+        let w = ctx.available_width() - ctx.style.list_indent + reclaimed_width;
+        let laid = layout_line_with_styles(
+            &materialized_styles,
+            &wrapped,
+            &projected,
+            font_size,
+            line_h,
+            x,
+            ctx.y,
+            w,
+            ctx.style.text_color,
+            ctx.style.body_font_family.first().map(|s| s.as_str()),
+            wrapped_shaped.as_ref(),
+            line_idx,
+            &ctx.embedded_images,
+        );
+        let n = laid.len();
+        let laid_height = laid.iter().map(|line| line.rect.h).sum::<f32>();
+        item_lines.extend(laid);
+        ctx.y += if n == 0 { line_h } else { laid_height };
+    }
+    ctx.active_block_marker = None;
+
+    // Lay out nested children with extra indent
+    ctx.indent += ctx.style.list_indent;
+    ctx.list_depth = current_depth + 1;
+    let saved_output = std::mem::take(&mut ctx.output);
+    let saved_previous_spacing_block = ctx.previous_spacing_block.take();
+    let mut child_placement = BlockPlacement::AtContentOrigin;
+    for (child_index, child) in block.children.iter().enumerate() {
+        // 项文本与子块（loose list 的子段落）之间保留 paragraph_spacing
+        // 级别的间距；嵌套子列表保持紧凑。与顶层块间间距同一视觉规范。
+        if child_index == 0
+            && !item_lines.is_empty()
+            && let Some(child_spacing_block) = first_spacing_block(child)
+        {
+            ctx.y += super::spacing::list_item_child_gap(child_spacing_block, ctx.style);
+        }
+        if layout_block_with_placement(child, ctx, child_placement) {
+            child_placement = BlockPlacement::InFlow;
+        }
+    }
+    ctx.previous_spacing_block = saved_previous_spacing_block;
+    let sub_blocks: Vec<LaidOutBlock> = ctx.output.drain(..).collect();
+    ctx.output = saved_output;
+
+    let content_h = (ctx.y - start_y).max(line_h);
+    ctx.y = start_y;
+    ctx.indent = saved_indent;
+    ctx.color_fade = saved_color_fade;
+    ctx.font_size_override = saved_font_size_override;
+    ctx.list_depth = current_depth;
+
+    ctx.push_block(
+        LaidOutBlockKind::ListItem {
+            bullet: bullet.clone(),
+            blocks: sub_blocks,
+            lines: item_lines,
+            level_indent: ctx.style.list_indent,
+            depth: current_depth,
+        },
+        content_h,
+    );
+}
+
+fn layout_horizontal_rule(block: &BlockNode, ctx: &mut LayoutCtx) {
+    let active = if let Some(edit_ctx) = ctx.edit_ctx {
+        let rule_source = ctx.doc.doc_text_in_range(block.block_range.clone());
+        let marker_end = block.block_range.start + rule_source.trim_end_matches(['\r', '\n']).len();
+        edit_ctx.cursor_byte >= block.block_range.start && edit_ctx.cursor_byte <= marker_end
+    } else {
+        false
+    };
+    if active {
+        let font_size = ctx.font_size_override.unwrap_or(ctx.style.code_font_size);
+        let color = crate::style::blend_toward_bg(
+            ctx.style.text_color,
+            ctx.style.background_color,
+            0.55, // SOURCE_MARKER_FADE_RATIO
+        );
+        layout_text_block(block, ctx, font_size, color, Weight::NORMAL);
+    } else {
+        ctx.push_block(LaidOutBlockKind::HorizontalRule, ctx.style.rule_thickness);
+    }
+}
+
+fn layout_metadata_block(block: &BlockNode, ctx: &mut LayoutCtx) {
+    let font_size = ctx.style.code_font_size;
+    let line_h = ctx.style.code_line_height;
+    let pad = ctx.style.code_block_padding;
+    let lines = metadata_lines_with_source_starts(block);
+    let total_h = lines.len() as f32 * line_h + pad * 2.0;
+
+    let mut laid_out_lines = Vec::new();
+    let mut ly = ctx.y + pad;
+    for (line_idx, (line_text, source_start)) in lines.iter().enumerate() {
+        let source_projection = crate::projection::ProjectedText::direct(line_text, *source_start)
+            .slice_visual_line(0, 0..line_text.len())
+            .expect("a direct metadata-line projection must slice at its boundaries");
+        laid_out_lines.push(LaidOutLine {
+            text: line_text.clone(),
+            rect: ui::core::geom::Rect::new(
+                ctx.indent + pad,
+                ly,
+                ctx.available_width() - pad * 2.0,
+                line_h,
+            ),
+            font_size,
+            is_code: true,
+            font_weight: Weight::NORMAL,
+            color_override: Some(ctx.style.code_color),
+            doc_line_idx: line_idx,
+            styles: vec![],
+            style_segments: vec![],
+            shaped: None,
+            text_layout: None,
+            highlight_spans: vec![],
+            source_projection: Some(source_projection),
+        });
+        ly += line_h;
+    }
+
+    ctx.push_block(LaidOutBlockKind::MetadataBlock { lines: laid_out_lines }, total_h);
 }
 
 pub(in crate::layout::block) fn heading_marker_at_cursor(

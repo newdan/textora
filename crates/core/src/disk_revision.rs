@@ -61,7 +61,11 @@ pub fn read_file_with_revision(path: &Path) -> io::Result<(Vec<u8>, DiskRevision
     Ok((contents, revision))
 }
 
-fn revision_from_hash(path: &Path, metadata: &fs::Metadata, hash: blake3::Hash) -> DiskRevision {
+pub(crate) fn revision_from_hash(
+    path: &Path,
+    metadata: &fs::Metadata,
+    hash: blake3::Hash,
+) -> DiskRevision {
     DiskRevision {
         path: path.to_owned(),
         size: metadata.len(),

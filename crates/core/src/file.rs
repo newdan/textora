@@ -12,11 +12,12 @@
 //! the original file's line endings (LF/CRLF/CR) and UTF-8 BOM. File permissions are
 //! carried over from the original file.
 use crate::buffer::GapBuffer;
-use crate::disk_revision::{DiskRevision, read_disk_revision};
+use crate::disk_revision::{DiskRevision, read_disk_revision, revision_from_hash};
 use crate::document::ReadableDocument;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
@@ -84,7 +85,7 @@ pub struct FileMetadata {
 ///
 /// 检测优先级：
 /// 1. UTF-16 BOM（LE / BE）
-/// 2. 无 BOM 时按候选顺序尝试：GB18030, GBK, Big5, Shift_JIS, EUC-JP, EUC-KR
+/// 2. 无 BOM 时优先尝试 GBK/GB18030，再尝试 Big5、Shift_JIS、EUC-JP 和 EUC-KR
 /// 3. 兜底：ISO-8859-15（永不报错）
 ///
 /// 返回 (转码后 UTF-8 字节, 原始编码名称)。
@@ -105,10 +106,14 @@ fn transcode_to_utf8(raw: &[u8]) -> (Vec<u8>, &'static str) {
         }
     }
 
-    // 候选编码列表（按优先级）
+    if let (decoded, _, false) = encoding_rs::GB18030.decode(raw) {
+        // The GBK and GB18030 decoders share the same implementation. Only a
+        // four-byte sequence distinguishes data that needs the extended encoding.
+        let name = if has_gb18030_four_byte_sequence(raw) { "GB18030" } else { "GBK" };
+        return (decoded.into_owned().into_bytes(), name);
+    }
+
     let candidates: &[(&str, &encoding_rs::Encoding)] = &[
-        ("GB18030", encoding_rs::GB18030),
-        ("GBK", encoding_rs::GBK),
         ("Big5", encoding_rs::BIG5),
         ("Shift_JIS", encoding_rs::SHIFT_JIS),
         ("EUC-JP", encoding_rs::EUC_JP),
@@ -126,6 +131,17 @@ fn transcode_to_utf8(raw: &[u8]) -> (Vec<u8>, &'static str) {
     // ISO-8859-15 永不报错，确保始终有输出
     let (decoded, _, _) = encoding_rs::ISO_8859_15.decode(raw);
     (decoded.into_owned().into_bytes(), "ISO-8859-15")
+}
+
+fn has_gb18030_four_byte_sequence(bytes: &[u8]) -> bool {
+    let mut bytes = bytes.iter().copied();
+    while let Some(lead) = bytes.next() {
+        // ASCII and the single-byte Windows euro sign have no trail byte.
+        if lead > 0x80 && bytes.next().is_some_and(|trail| trail.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Size of the first chunk read for binary detection, BOM stripping, and UTF-8 check.
@@ -258,17 +274,6 @@ impl Utf8StreamValidator {
 
 // ── Line ending detection ────────────────────────────────────────────────
 
-/// Determine the [`LineEnding`] from the collected flags.
-fn detect_line_ending(has_lf: bool, has_crlf: bool, has_cr: bool) -> LineEnding {
-    match (has_lf, has_crlf, has_cr) {
-        (false, false, false) => LineEnding::None,
-        (false, true, false) => LineEnding::Crlf,
-        (true, false, false) => LineEnding::Lf,
-        (false, false, true) => LineEnding::Cr,
-        _ => LineEnding::Mixed,
-    }
-}
-
 // ── Non-UTF-8 decode ─────────────────────────────────────────────────────
 
 /// Heuristic: when the input has at least 16 valid non-ASCII characters and
@@ -348,9 +353,7 @@ pub fn load_file(path: &Path) -> Result<(GapBuffer, FileMetadata), FileError> {
     let (had_bom, start) = strip_bom(&first_chunk[..n]);
 
     // Track line endings during loading
-    let mut has_lf = false;
-    let mut has_cr = false;
-    let mut has_crlf = false;
+    let mut endings = LineEndingScan::default();
     let mut original_encoding: Option<&'static str> = None;
 
     // ── Streaming UTF-8 validation (first chunk) ────────────────────
@@ -361,7 +364,7 @@ pub fn load_file(path: &Path) -> Result<(GapBuffer, FileMetadata), FileError> {
     match first_status {
         Utf8StreamStatus::Valid | Utf8StreamStatus::Incomplete => {
             if !start.is_empty() {
-                scan_line_endings(start, &mut has_lf, &mut has_cr, &mut has_crlf);
+                endings.scan(start);
                 let gap = buf.allocate_gap(0, start.len(), 0);
                 gap[..start.len()].copy_from_slice(start);
                 buf.commit_gap(start.len());
@@ -380,17 +383,13 @@ pub fn load_file(path: &Path) -> Result<(GapBuffer, FileMetadata), FileError> {
             }
             let (transcoded, encoding_name) = decode_non_utf8_bytes(all_bytes);
             original_encoding = Some(encoding_name);
-            scan_line_endings(&transcoded, &mut has_lf, &mut has_cr, &mut has_crlf);
+            endings.scan(&transcoded);
             let gap = buf.allocate_gap(0, transcoded.len(), 0);
             gap[..transcoded.len()].copy_from_slice(&transcoded);
             buf.commit_gap(transcoded.len());
             return Ok((
                 buf,
-                FileMetadata {
-                    line_ending: detect_line_ending(has_lf, has_crlf, has_cr),
-                    had_bom,
-                    original_encoding,
-                },
+                FileMetadata { line_ending: endings.detected(), had_bom, original_encoding },
             ));
         }
     }
@@ -410,10 +409,8 @@ pub fn load_file(path: &Path) -> Result<(GapBuffer, FileMetadata), FileError> {
                 let (transcoded, encoding_name) = decode_non_utf8_bytes(raw);
                 original_encoding = Some(encoding_name);
                 buf = GapBuffer::new(false).map_err(FileError::Io)?;
-                has_lf = false;
-                has_cr = false;
-                has_crlf = false;
-                scan_line_endings(&transcoded, &mut has_lf, &mut has_cr, &mut has_crlf);
+                endings = LineEndingScan::default();
+                endings.scan(&transcoded);
                 let gap = buf.allocate_gap(0, transcoded.len(), 0);
                 gap[..transcoded.len()].copy_from_slice(&transcoded);
                 buf.commit_gap(transcoded.len());
@@ -425,7 +422,7 @@ pub fn load_file(path: &Path) -> Result<(GapBuffer, FileMetadata), FileError> {
         let status = validator.feed(&gap[..n], false);
         match status {
             Utf8StreamStatus::Valid | Utf8StreamStatus::Incomplete => {
-                scan_line_endings(&gap[..n], &mut has_lf, &mut has_cr, &mut has_crlf);
+                endings.scan(&gap[..n]);
                 buf.commit_gap(n);
             }
             Utf8StreamStatus::Invalid => {
@@ -443,10 +440,8 @@ pub fn load_file(path: &Path) -> Result<(GapBuffer, FileMetadata), FileError> {
                 let (transcoded, encoding_name) = decode_non_utf8_bytes(all_bytes);
                 original_encoding = Some(encoding_name);
                 buf = GapBuffer::new(false).map_err(FileError::Io)?;
-                has_lf = false;
-                has_cr = false;
-                has_crlf = false;
-                scan_line_endings(&transcoded, &mut has_lf, &mut has_cr, &mut has_crlf);
+                endings = LineEndingScan::default();
+                endings.scan(&transcoded);
                 let gap = buf.allocate_gap(0, transcoded.len(), 0);
                 gap[..transcoded.len()].copy_from_slice(&transcoded);
                 buf.commit_gap(transcoded.len());
@@ -455,25 +450,44 @@ pub fn load_file(path: &Path) -> Result<(GapBuffer, FileMetadata), FileError> {
         }
     }
 
-    let line_ending = detect_line_ending(has_lf, has_crlf, has_cr);
+    let line_ending = endings.detected();
     Ok((buf, FileMetadata { line_ending, had_bom, original_encoding }))
 }
 
-/// Scan bytes for line ending patterns, updating flags.
-fn scan_line_endings(bytes: &[u8], has_lf: &mut bool, has_cr: &mut bool, has_crlf: &mut bool) {
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-            *has_crlf = true;
-            i += 2;
-        } else if bytes[i] == b'\n' {
-            *has_lf = true;
-            i += 1;
-        } else if bytes[i] == b'\r' {
-            *has_cr = true;
-            i += 1;
-        } else {
-            i += 1;
+#[derive(Default)]
+struct LineEndingScan {
+    has_lf: bool,
+    has_cr: bool,
+    has_crlf: bool,
+    pending_cr: bool,
+}
+
+impl LineEndingScan {
+    fn scan(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if self.pending_cr {
+                self.pending_cr = false;
+                if byte == b'\n' {
+                    self.has_crlf = true;
+                    continue;
+                }
+                self.has_cr = true;
+            }
+            match byte {
+                b'\r' => self.pending_cr = true,
+                b'\n' => self.has_lf = true,
+                _ => {}
+            }
+        }
+    }
+
+    fn detected(&self) -> LineEnding {
+        match (self.has_lf, self.has_crlf, self.has_cr || self.pending_cr) {
+            (false, false, false) => LineEnding::None,
+            (false, true, false) => LineEnding::Crlf,
+            (true, false, false) => LineEnding::Lf,
+            (false, false, true) => LineEnding::Cr,
+            _ => LineEnding::Mixed,
         }
     }
 }
@@ -585,23 +599,6 @@ fn convert_line_endings(content: &[u8], ending: LineEnding) -> Vec<u8> {
     }
 }
 
-/// Build a temp file path in the same directory as `target`.
-///
-/// Format: `<parent_dir>/.<basename>.<pid>.tmp`
-fn make_temp_path(target: &Path) -> Result<std::path::PathBuf, SaveError> {
-    let parent = match target.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let basename = target
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_else(|| std::borrow::Cow::Borrowed("untitled"));
-    let pid = std::process::id();
-    let temp_name = format!(".{}.{}.tmp", basename, pid);
-    Ok(parent.join(temp_name))
-}
-
 /// Serialize a snapshot with the requested line endings and optional UTF-8 BOM.
 /// Mixed and unspecified endings preserve the original bytes.
 pub fn serialized_file_contents(source: &[u8], ending: LineEnding, had_bom: bool) -> Vec<u8> {
@@ -618,92 +615,62 @@ pub fn serialized_file_contents(source: &[u8], ending: LineEnding, had_bom: bool
     encoded
 }
 
-/// Save a GapBuffer to a file atomically.
-///
-/// # Strategy
-///
-/// 1. Check existing file: if read-only → `SaveError::ReadOnly`
-/// 2. Read all content from buffer
-/// 3. Convert line endings to match the original file format
-/// 4. Prepend UTF-8 BOM if the original file had one
-/// 5. Write to `<parent>/.<basename>.<pid>.tmp`
-/// 6. Sync (`sync_all`) to durable storage
-/// 7. Copy original file permissions to temp file
-/// 8. `rename` temp → target (atomic on same filesystem)
-///
-/// # Cross-volume fallback
-///
-/// If `rename` fails with `CrossesDevices`, falls back to copy + delete.
-///
-/// # Panics
-///
-/// Does not panic. All errors are returned as `SaveError`.
+/// Atomically save the buffer using the document's line endings and UTF-8 BOM.
 pub fn save_file(
     buffer: &GapBuffer,
     path: &Path,
     metadata: &FileMetadata,
 ) -> Result<(), SaveError> {
-    // ── Check if target exists and is read-only ────────────────────────
-    let original_metadata = fs::metadata(path).ok();
-    if original_metadata.as_ref().is_some_and(|meta| meta.permissions().readonly()) {
-        return Err(SaveError::ReadOnly);
-    }
-    #[cfg(unix)]
-    let original_mode = {
-        use std::os::unix::fs::PermissionsExt;
-        original_metadata.as_ref().map(|meta| meta.permissions().mode())
-    };
-
-    // ── Read + convert content ────────────────────────────────────────
     let raw = read_all(buffer);
-    let final_content = serialized_file_contents(&raw, metadata.line_ending, metadata.had_bom);
-
-    // ── Write to temp file in same directory ──────────────────────────
-    let temp_path = make_temp_path(path)?;
-
-    {
-        let mut file = fs::File::create(&temp_path)?;
-        file.write_all(&final_content)?;
-        file.sync_all()?;
-
-        // Copy original file permissions to temp file
-        #[cfg(unix)]
-        if let Some(mode) = original_mode {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(mode);
-            let _ = file.set_permissions(perms);
-        }
-    }
-
-    // ── Atomic rename ─────────────────────────────────────────────────
-    match fs::rename(&temp_path, path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-            // Cross-volume: fall back to copy + delete
-            fs::copy(&temp_path, path).map_err(|source| save_io("copy saved file", source))?;
-            let _ = fs::remove_file(&temp_path);
-            Ok(())
-        }
-        Err(e) => {
-            let _ = fs::remove_file(&temp_path);
-            Err(save_io("rename saved file", e))
-        }
-    }
+    let contents = serialized_file_contents(&raw, metadata.line_ending, metadata.had_bom);
+    save_atomically(path, &contents, SavePrecondition::Unconditional).map(|_| ())
 }
 
 const SAVE_TEMP_PREFIX: &str = ".textora-save-";
 const SAVE_TEMP_ATTEMPTS: u64 = 100;
+const RENAME_SAVE_OPERATION: &str = "rename saved file";
 static SAVE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SAVE_COMMIT_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Copy)]
+enum SavePrecondition<'a> {
+    Unconditional,
+    Unchanged(Option<&'a DiskRevision>),
+}
+
+impl SavePrecondition<'_> {
+    fn check(self, path: &Path) -> Result<(), SaveError> {
+        let Self::Unchanged(expected) = self else { return Ok(()) };
+        let actual = read_revision_for_save(path)?;
+        if actual.as_ref() == expected {
+            return Ok(());
+        }
+        Err(SaveError::ConcurrentModification {
+            expected: expected.cloned().map(Box::new),
+            actual: actual.map(Box::new),
+        })
+    }
+}
 
 fn create_save_temp_file(
     parent: &Path,
-    basename: &str,
+    replacing_existing: bool,
 ) -> Result<(std::path::PathBuf, fs::File), SaveError> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if replacing_existing {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = replacing_existing;
+
     for _ in 0..SAVE_TEMP_ATTEMPTS {
         let counter = SAVE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let filename = format!("{SAVE_TEMP_PREFIX}{}-{counter}-{basename}.tmp", std::process::id());
+        let filename = format!("{SAVE_TEMP_PREFIX}{}-{counter}.tmp", std::process::id());
         let path = parent.join(filename);
-        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        match options.open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(save_io("create save temporary file", error)),
@@ -713,6 +680,89 @@ fn create_save_temp_file(
         "create save temporary file",
         io::Error::new(io::ErrorKind::AlreadyExists, "temporary file name exhausted"),
     ))
+}
+
+fn writable_target_permissions(path: &Path) -> Result<Option<fs::Permissions>, SaveError> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(save_io("read save target permissions", error)),
+    };
+    let permissions = metadata.permissions();
+    if permissions.readonly() {
+        return Err(SaveError::ReadOnly);
+    }
+    Ok(Some(permissions))
+}
+
+fn save_parent(path: &Path) -> &Path {
+    path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
+}
+
+fn save_atomically(
+    path: &Path,
+    contents: &[u8],
+    precondition: SavePrecondition<'_>,
+) -> Result<Option<DiskRevision>, SaveError> {
+    precondition.check(path)?;
+    let existing = writable_target_permissions(path)?.is_some();
+    let parent = save_parent(path);
+    let save = || stage_and_commit_save(path, parent, contents, precondition, existing);
+    match save() {
+        Err(SaveError::Io { operation: RENAME_SAVE_OPERATION, source })
+            if source.kind() == io::ErrorKind::CrossesDevices =>
+        {
+            // Resolve the destination directory again if its mount changed.
+            // Stage a new file there so the destination remains atomic.
+            save()
+        }
+        result => result,
+    }
+}
+
+fn stage_and_commit_save(
+    path: &Path,
+    parent: &Path,
+    contents: &[u8],
+    precondition: SavePrecondition<'_>,
+    replacing_existing: bool,
+) -> Result<Option<DiskRevision>, SaveError> {
+    let (temporary_path, mut file) = create_save_temp_file(parent, replacing_existing)?;
+    let result = (|| {
+        file.write_all(contents).map_err(|source| save_io("write save temporary file", source))?;
+
+        // Compare and publish together for saves made by this process.
+        let commit = SAVE_COMMIT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        precondition.check(path)?;
+        let permissions = writable_target_permissions(path)?;
+        #[cfg(unix)]
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)
+                .map_err(|source| save_io("preserve save target permissions", source))?;
+        }
+        #[cfg(not(unix))]
+        let _ = permissions;
+        file.sync_all().map_err(|source| save_io("sync save temporary file", source))?;
+        let revision = match precondition {
+            SavePrecondition::Unconditional => None,
+            SavePrecondition::Unchanged(_) => {
+                let metadata =
+                    file.metadata().map_err(|source| save_io("read saved metadata", source))?;
+                Some(revision_from_hash(path, &metadata, blake3::hash(contents)))
+            }
+        };
+        drop(file);
+
+        fs::rename(&temporary_path, path)
+            .map_err(|source| save_io(RENAME_SAVE_OPERATION, source))?;
+        drop(commit);
+        sync_parent_directory(parent)?;
+        Ok(revision)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary_path);
+    }
+    result
 }
 
 fn read_revision_for_save(path: &Path) -> Result<Option<DiskRevision>, SaveError> {
@@ -737,55 +787,14 @@ fn sync_parent_directory(parent: &Path) -> Result<(), SaveError> {
     Ok(())
 }
 
+/// Atomically save only if the destination still has the expected revision.
 pub fn save_file_if_unchanged(
     path: &Path,
     contents: &[u8],
     expected: Option<&DiskRevision>,
 ) -> Result<DiskRevision, SaveError> {
-    let actual = read_revision_for_save(path)?;
-    if actual.as_ref() != expected {
-        return Err(SaveError::ConcurrentModification {
-            expected: expected.cloned().map(Box::new),
-            actual: actual.map(Box::new),
-        });
-    }
-
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let basename = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "untitled".to_owned());
-    let (temp_path, mut temp_file) = create_save_temp_file(parent, &basename)?;
-    let result = (|| {
-        temp_file
-            .write_all(contents)
-            .map_err(|source| save_io("write save temporary file", source))?;
-        temp_file.sync_all().map_err(|source| save_io("sync save temporary file", source))?;
-        drop(temp_file);
-
-        let second_actual = read_revision_for_save(path)?;
-        if second_actual.as_ref() != expected {
-            return Err(SaveError::ConcurrentModification {
-                expected: expected.cloned().map(Box::new),
-                actual: second_actual.map(Box::new),
-            });
-        }
-        fs::rename(&temp_path, path).map_err(|source| save_io("rename saved file", source))?;
-        sync_parent_directory(parent)?;
-        read_revision_for_save(path)?.ok_or_else(|| {
-            save_io(
-                "read saved file revision",
-                io::Error::new(io::ErrorKind::NotFound, "saved file disappeared"),
-            )
-        })
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
-    result
+    let revision = save_atomically(path, contents, SavePrecondition::Unchanged(expected))?;
+    Ok(revision.expect("a revision-checked save returns the revision of its published bytes"))
 }
 
 #[cfg(test)]
@@ -810,6 +819,50 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).expect("saved file should be readable"), b"new");
         assert_ne!(actual.content_hash, expected.content_hash);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_save_preserves_mode_and_respects_readonly() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("save fixture directory");
+        let path = directory.path().join("notes.md");
+        fs::write(&path, b"old").expect("save fixture");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640))
+            .expect("set writable fixture mode");
+        let expected = read_disk_revision(&path).expect("read revision").expect("existing file");
+
+        let saved =
+            save_file_if_unchanged(&path, b"new", Some(&expected)).expect("save existing file");
+        assert_eq!(
+            fs::metadata(&path).expect("saved metadata").permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(read_disk_revision(&path).expect("saved revision"), Some(saved));
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o440))
+            .expect("set readonly fixture mode");
+        let expected = read_disk_revision(&path).expect("read revision").expect("existing file");
+        assert!(matches!(
+            save_file_if_unchanged(&path, b"newer", Some(&expected)),
+            Err(SaveError::ReadOnly)
+        ));
+        assert_eq!(fs::read(&path).expect("read readonly fixture"), b"new");
+    }
+
+    #[test]
+    fn load_crlf_split_across_stream_reads() {
+        let directory = tempfile::tempdir().expect("line ending fixture directory");
+        let path = directory.path().join("split-crlf.txt");
+        for split in [FIRST_CHUNK_SIZE, FIRST_CHUNK_SIZE + READ_CHUNK_SIZE] {
+            let mut contents = vec![b'a'; split - 1];
+            contents.extend_from_slice(b"\r\nnext\r\n");
+            fs::write(&path, &contents).expect("line ending fixture");
+            let (buffer, metadata) = load_file(&path).expect("load line ending fixture");
+            assert_eq!(metadata.line_ending, LineEnding::Crlf, "split at byte {split}");
+            assert_eq!(read_all(&buffer), contents);
+        }
     }
 
     #[test]
@@ -866,19 +919,10 @@ mod tests {
 
     // ── Line ending detection ──────────────────────────────────────────────
 
-    /// Helper: run scan_line_endings and return the detected LineEnding.
     fn detect_ending(bytes: &[u8]) -> LineEnding {
-        let mut has_lf = false;
-        let mut has_cr = false;
-        let mut has_crlf = false;
-        scan_line_endings(bytes, &mut has_lf, &mut has_cr, &mut has_crlf);
-        match (has_lf, has_crlf, has_cr) {
-            (false, false, false) => LineEnding::None,
-            (false, true, false) => LineEnding::Crlf,
-            (true, false, false) => LineEnding::Lf,
-            (false, false, true) => LineEnding::Cr,
-            _ => LineEnding::Mixed,
-        }
+        let mut endings = LineEndingScan::default();
+        endings.scan(bytes);
+        endings.detected()
     }
 
     #[test]
@@ -1084,23 +1128,17 @@ mod tests {
         assert_eq!(convert_line_endings(b"a\nb", LineEnding::None), b"a\nb");
     }
 
-    // ── make_temp_path ────────────────────────────────────────────────
-
     #[test]
-    fn temp_path_in_same_dir() {
-        let target = Path::new("/tmp/foo.txt");
-        let temp = make_temp_path(target).unwrap();
-        assert_eq!(temp.parent().unwrap(), Path::new("/tmp"));
-        let name = temp.file_name().unwrap().to_string_lossy();
-        assert!(name.starts_with(".foo.txt."));
-        assert!(name.ends_with(".tmp"));
-    }
-
-    #[test]
-    fn temp_path_no_parent_uses_dot() {
-        let target = Path::new("foo.txt");
-        let temp = make_temp_path(target).unwrap();
-        assert_eq!(temp.parent().unwrap(), Path::new("."));
+    fn staging_creates_distinct_files_in_target_directory() {
+        let directory = tempfile::tempdir().expect("save fixture directory");
+        let (first_path, _first) =
+            create_save_temp_file(directory.path(), false).expect("first staging file");
+        let (second_path, _second) =
+            create_save_temp_file(directory.path(), false).expect("second staging file");
+        assert_ne!(first_path, second_path);
+        assert_eq!(first_path.parent(), Some(directory.path()));
+        assert_eq!(second_path.parent(), Some(directory.path()));
+        assert_eq!(save_parent(Path::new("notes.md")), Path::new("."));
     }
 
     // ── save_file ─────────────────────────────────────────────────────
@@ -1383,15 +1421,23 @@ mod tests {
         std::fs::write(&path, gbk_bytes).unwrap();
 
         let (gb, meta) = load_file(&path).unwrap();
-        // GB18030 is tried first and is a superset of GBK — same bytes match both
-        assert!(
-            matches!(meta.original_encoding, Some("GB18030") | Some("GBK")),
-            "should detect GBK or GB18030, got {:?}",
-            meta.original_encoding
-        );
+        assert_eq!(meta.original_encoding, Some("GBK"));
         let content = read_all(&gb);
         let text = std::str::from_utf8(&content).expect("transcoded content should be valid UTF-8");
-        assert!(!text.is_empty(), "transcoded text should not be empty");
+        assert_eq!(text, "你好\n");
+    }
+
+    #[test]
+    fn load_gb18030_four_byte_character_keeps_extended_encoding() {
+        let directory = tempfile::tempdir().expect("encoding fixture directory");
+        let path = directory.path().join("gb18030.txt");
+        let (encoded, _, had_errors) = encoding_rs::GB18030.encode("你好😀\n");
+        assert!(!had_errors, "fixture must be representable in GB18030");
+        fs::write(&path, encoded).expect("write encoding fixture");
+
+        let (buffer, metadata) = load_file(&path).expect("load encoding fixture");
+        assert_eq!(metadata.original_encoding, Some("GB18030"));
+        assert_eq!(read_all(&buffer), "你好😀\n".as_bytes());
     }
 
     #[test]

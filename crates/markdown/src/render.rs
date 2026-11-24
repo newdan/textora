@@ -219,343 +219,309 @@ pub(in crate::render) fn render_block_with_offset(
     viewport_h: f32,
     ox: f32,
     oy: f32,
-    mut shaper: Option<&mut shaping::Shaper>,
+    shaper: Option<&mut shaping::Shaper>,
     ascii_diagrams: Option<&AsciiDiagramRegistry>,
     embedded_images: Option<&EmbeddedRegistry>,
 ) {
-    let r = block.rect;
-    let x = r.x + ox;
-    let y = r.y - scroll_y + oy;
+    let paint = BlockPaint { style, scroll_y, viewport_h, ox, oy, ascii_diagrams, embedded_images };
+    paint.draw(block, dl, shaper);
+}
 
-    match &block.kind {
-        LaidOutBlockKind::Text { lines } => {
-            for line in lines {
-                let line_bottom = line.rect.y + line.rect.h;
-                if line_bottom < scroll_y {
-                    continue;
-                }
-                if line.rect.y > scroll_y + viewport_h {
-                    break;
-                }
-                render_line_with_embedded(
-                    line,
-                    style,
+struct BlockPaint<'a> {
+    style: &'a MarkdownStyle,
+    scroll_y: f32,
+    viewport_h: f32,
+    ox: f32,
+    oy: f32,
+    ascii_diagrams: Option<&'a AsciiDiagramRegistry>,
+    embedded_images: Option<&'a EmbeddedRegistry>,
+}
+
+struct TablePaint<'a> {
+    columns: usize,
+    header: &'a [Vec<LaidOutLine>],
+    rows: &'a [Vec<Vec<LaidOutLine>>],
+    column_widths: &'a [f32],
+    header_height: f32,
+    row_heights: &'a [f32],
+}
+
+impl BlockPaint<'_> {
+    fn draw(
+        &self,
+        block: &LaidOutBlock,
+        dl: &mut DrawList,
+        mut shaper: Option<&mut shaping::Shaper>,
+    ) {
+        let rect = Rect::new(
+            block.rect.x + self.ox,
+            block.rect.y - self.scroll_y + self.oy,
+            block.rect.w,
+            block.rect.h,
+        );
+        match &block.kind {
+            LaidOutBlockKind::Text { lines } => {
+                self.draw_visible_lines(lines, dl, shaper, self.embedded_images);
+            }
+            LaidOutBlockKind::CodeBlock { lines, .. } => {
+                let diagram = self.ascii_diagrams.and_then(|registry| registry.diagram_for(lines));
+                self.draw_code_lines(rect, lines, diagram, dl, shaper);
+            }
+            LaidOutBlockKind::MetadataBlock { lines } => {
+                self.draw_code_lines(rect, lines, None, dl, shaper);
+            }
+            LaidOutBlockKind::BlockQuote { blocks } => self.draw_quote(rect, blocks, dl, shaper),
+            LaidOutBlockKind::ListItem { bullet, blocks, lines, depth, .. } => {
+                self.draw_list_marker(rect, bullet, lines, *depth, dl, shaper.as_deref_mut());
+                self.draw_visible_lines(lines, dl, shaper.as_deref_mut(), self.embedded_images);
+                self.draw_children(blocks, dl, shaper);
+            }
+            LaidOutBlockKind::Table {
+                columns,
+                header,
+                rows,
+                column_widths,
+                header_height,
+                row_heights,
+            } => {
+                self.draw_table(
+                    rect,
+                    TablePaint {
+                        columns: *columns,
+                        header,
+                        rows,
+                        column_widths,
+                        header_height: *header_height,
+                        row_heights,
+                    },
                     dl,
-                    scroll_y,
-                    ox,
-                    oy,
-                    shaper.as_deref_mut(),
-                    embedded_images,
+                    shaper,
                 );
             }
-        }
-        LaidOutBlockKind::CodeBlock { lines, .. } => {
-            // Background
-            dl.fill_rounded(Rect::new(x, y, r.w, r.h), style.code_bg, style.border_radius_base);
-            // Border
-            dl.stroke_rounded(
-                Rect::new(x, y, r.w, r.h),
-                style.code_block_border,
-                style.border_radius_base,
-                1.0,
-            );
-            // Clipped code text
-            dl.clip(Rect::new(x, y, r.w, r.h), |dl| {
-                if let (Some(diagram), Some(shaper)) = (
-                    ascii_diagrams.and_then(|registry| registry.diagram_for(lines)),
-                    shaper.as_deref_mut(),
-                ) && diagram.rows.len() == lines.len()
+            LaidOutBlockKind::HorizontalRule => {
+                let width = rect.w * self.style.rule_width_ratio;
+                let x = rect.x + (rect.w - width) / 2.0;
+                dl.fill(Rect::new(x, rect.y, width, rect.h), self.style.rule_color);
+            }
+            LaidOutBlockKind::Embedded { source_range } => {
+                if let Some(entry) =
+                    self.embedded_images.and_then(|images| images.image_for(source_range))
                 {
-                    let cell_width = code_cell_width(
-                        shaper,
-                        style.code_font_size,
-                        style.code_font_family.as_deref(),
-                    );
-                    for (line, row) in lines.iter().zip(&diagram.rows) {
-                        if line.rect.y + line.rect.h < scroll_y {
-                            continue;
-                        }
-                        if line.rect.y > scroll_y + viewport_h {
-                            break;
-                        }
-                        render_ascii_diagram_row(
-                            line, row, cell_width, style, dl, scroll_y, ox, oy, shaper,
-                        );
-                    }
-                } else {
-                    for line in lines {
-                        let line_bottom = line.rect.y + line.rect.h;
-                        if line_bottom < scroll_y {
-                            continue;
-                        }
-                        if line.rect.y > scroll_y + viewport_h {
-                            break;
-                        }
-                        render_line_with_offset(
-                            line,
-                            style,
-                            dl,
-                            scroll_y,
-                            ox,
-                            oy,
-                            shaper.as_deref_mut(),
-                        );
-                    }
+                    let width = (entry.image.width() as f32).min(rect.w);
+                    dl.image(entry.image.clone(), Rect::new(rect.x, rect.y, width, rect.h));
                 }
-            });
+            }
         }
-        LaidOutBlockKind::BlockQuote { blocks } => {
-            // Painter's algorithm: background first (full width), then border on top
-            dl.fill_rounded(
-                Rect::new(x, y, r.w, r.h),
-                style.blockquote_bg,
-                style.border_radius_base,
+    }
+
+    fn draw_visible_lines(
+        &self,
+        lines: &[LaidOutLine],
+        dl: &mut DrawList,
+        mut shaper: Option<&mut shaping::Shaper>,
+        embedded_images: Option<&EmbeddedRegistry>,
+    ) {
+        for line in lines {
+            if line.rect.y + line.rect.h < self.scroll_y {
+                continue;
+            }
+            if line.rect.y > self.scroll_y + self.viewport_h {
+                break;
+            }
+            render_line_with_embedded(
+                line,
+                self.style,
+                dl,
+                self.scroll_y,
+                self.ox,
+                self.oy,
+                shaper.as_deref_mut(),
+                embedded_images,
             );
-            dl.fill(Rect::new(x, y, 4.0, r.h), style.blockquote_border);
-            // Children with culling
-            for child in blocks {
-                if child.rect.y + child.rect.h < scroll_y {
-                    continue;
-                }
-                if child.rect.y > scroll_y + viewport_h {
-                    break;
-                }
-                render_block_with_offset(
-                    child,
-                    style,
-                    dl,
-                    scroll_y,
-                    viewport_h,
-                    ox,
-                    oy,
-                    shaper.as_deref_mut(),
-                    ascii_diagrams,
-                    embedded_images,
-                );
-            }
         }
-        LaidOutBlockKind::ListItem { bullet, blocks, lines, level_indent: _, depth } => {
-            let font_size = style.body_font_size;
-            let bullet_x = x;
-            let bullet_color = blend_toward_bg(style.text_color, style.background_color, 0.3);
-            // Align bullet baseline with first text line, not block top.
-            // Block rect.y may include list_item_spacing that the first text
-            // line already incorporates, causing vertical misalignment.
-            let bullet_baseline = lines.first().map_or(y, |l| l.rect.y - scroll_y + oy) + font_size;
+    }
 
-            match bullet {
-                ListBullet::Bullet => {
-                    // Vary bullet symbol by nesting depth
-                    let symbol = match depth % 3 {
-                        0 => "•",
-                        1 => "◦",
-                        _ => "▪",
-                    };
-                    if let Some(ref mut s) = shaper {
-                        dl.text_shaped(
-                            bullet_x + 4.0,
-                            bullet_baseline,
-                            font_size,
-                            bullet_color,
-                            symbol,
-                            s,
-                        );
-                    }
-                }
-                ListBullet::Ordered(_) if list_item_uses_source_marker(lines) => {}
-                ListBullet::Ordered(n) => {
-                    let label = format!("{}.", n);
-                    if let Some(ref mut s) = shaper {
-                        dl.text_shaped(
-                            bullet_x + 4.0,
-                            bullet_baseline,
-                            font_size,
-                            bullet_color,
-                            &label,
-                            s,
-                        );
-                    }
-                }
-                ListBullet::TaskList(checked) => {
-                    let box_size = font_size * 0.75;
-                    let box_x = bullet_x + 2.0;
-                    // Center box on the same visual center as bullet text.
-                    // bullet_baseline is at first_line_top + font_size (text baseline).
-                    // Text visual center ≈ baseline - font_size * 0.4 (cap-height midpoint).
-                    let box_y = bullet_baseline - font_size * 0.4 - box_size / 2.0;
-                    // Unchecked: subtle border blended toward bg; Checked: full text color
-                    let border_color = if *checked {
-                        style.text_color
-                    } else {
-                        blend_toward_bg(style.text_color, style.background_color, 0.55)
-                    };
-                    dl.stroke_rounded(
-                        Rect::new(box_x, box_y, box_size, box_size),
-                        border_color,
-                        3.0,
-                        1.5,
-                    );
-                    if *checked {
-                        let check_fs = box_size * 0.95;
-                        let check_baseline = box_y + box_size / 2.0 + check_fs * 0.25;
-                        if let Some(ref mut s) = shaper {
-                            // Render at temporary x to measure real width, then center.
-                            let idx = dl.cmds.len();
-                            let actual_w = dl.text_shaped(
-                                box_x,
-                                check_baseline,
-                                check_fs,
-                                border_color,
-                                "x",
-                                s,
-                            );
-                            if let DrawCmd::TextLayout { ref mut x, .. } = dl.cmds[idx] {
-                                *x = box_x + (box_size - actual_w) / 2.0;
-                            }
-                        }
-                    }
-                }
+    fn draw_children(
+        &self,
+        blocks: &[LaidOutBlock],
+        dl: &mut DrawList,
+        mut shaper: Option<&mut shaping::Shaper>,
+    ) {
+        for child in blocks {
+            if child.rect.y + child.rect.h < self.scroll_y {
+                continue;
             }
-            // Render item text lines
-            for line in lines {
-                let line_bottom = line.rect.y + line.rect.h;
-                if line_bottom < scroll_y {
-                    continue;
-                }
-                if line.rect.y > scroll_y + viewport_h {
-                    break;
-                }
-                render_line_with_embedded(
-                    line,
-                    style,
-                    dl,
-                    scroll_y,
-                    ox,
-                    oy,
-                    shaper.as_deref_mut(),
-                    embedded_images,
-                );
+            if child.rect.y > self.scroll_y + self.viewport_h {
+                break;
             }
-            // Render nested child blocks
-            for child in blocks {
-                if child.rect.y + child.rect.h < scroll_y {
-                    continue;
-                }
-                if child.rect.y > scroll_y + viewport_h {
-                    break;
-                }
-                render_block_with_offset(
-                    child,
-                    style,
-                    dl,
-                    scroll_y,
-                    viewport_h,
-                    ox,
-                    oy,
-                    shaper.as_deref_mut(),
-                    ascii_diagrams,
-                    embedded_images,
-                );
-            }
+            self.draw(child, dl, shaper.as_deref_mut());
         }
-        LaidOutBlockKind::Table {
-            columns,
-            header,
-            rows,
-            column_widths,
-            header_height,
-            row_heights,
-        } => {
-            let mut cell_y = y;
+    }
 
-            // Header — use actual measured height
-            if !header.is_empty() && *header_height > 0.0 {
-                dl.fill_rounded(
-                    Rect::new(x, cell_y, r.w, *header_height),
-                    style.table_header_bg,
-                    0.0,
+    fn draw_code_lines(
+        &self,
+        rect: Rect,
+        lines: &[LaidOutLine],
+        diagram: Option<&crate::layout::AsciiDiagram>,
+        dl: &mut DrawList,
+        mut shaper: Option<&mut shaping::Shaper>,
+    ) {
+        let Self { style, scroll_y, viewport_h, ox, oy, .. } = *self;
+        // Background
+        dl.fill_rounded(rect, style.code_bg, style.border_radius_base);
+        // Border
+        dl.stroke_rounded(rect, style.code_block_border, style.border_radius_base, 1.0);
+        // Clipped code text
+        dl.clip(rect, |dl| {
+            if let (Some(diagram), Some(shaper)) = (diagram, shaper.as_deref_mut())
+                && diagram.rows.len() == lines.len()
+            {
+                let cell_width = code_cell_width(
+                    shaper,
+                    style.code_font_size,
+                    style.code_font_family.as_deref(),
                 );
-                for cell_lines in header.iter() {
-                    for line in cell_lines {
-                        render_line_with_embedded(
-                            line,
-                            style,
-                            dl,
-                            scroll_y,
-                            ox,
-                            oy,
-                            shaper.as_deref_mut(),
-                            embedded_images,
-                        );
-                    }
-                }
-                cell_y += *header_height;
-                // Separator line
-                dl.fill(Rect::new(x, cell_y, r.w, 1.0), style.table_border);
-            }
-
-            // Body rows with zebra stripes — use actual measured heights
-            for (row_idx, row) in rows.iter().enumerate() {
-                let row_h = row_heights.get(row_idx).copied().unwrap_or(style.line_height + 2.0);
-                // Zebra stripe: odd rows get a subtle background
-                if row_idx % 2 == 1 {
-                    dl.fill_rounded(Rect::new(x, cell_y, r.w, row_h), style.table_stripe_bg, 0.0);
-                }
-                for cell_lines in row.iter() {
-                    for line in cell_lines {
-                        render_line_with_embedded(
-                            line,
-                            style,
-                            dl,
-                            scroll_y,
-                            ox,
-                            oy,
-                            shaper.as_deref_mut(),
-                            embedded_images,
-                        );
-                    }
-                }
-                cell_y += row_h;
-                // Row separator
-                dl.fill(Rect::new(x, cell_y, r.w, 1.0), style.table_border);
-            }
-
-            // Vertical grid lines
-            for i in 1..*columns {
-                let cx = x + column_widths[..i].iter().sum::<f32>();
-                dl.fill(Rect::new(cx, y, 1.0, r.h), style.table_border);
-            }
-        }
-        LaidOutBlockKind::HorizontalRule => {
-            let rule_w = r.w * style.rule_width_ratio;
-            let rule_x = x + (r.w - rule_w) / 2.0;
-            dl.fill(Rect::new(rule_x, y, rule_w, r.h), style.rule_color);
-        }
-        LaidOutBlockKind::Embedded { source_range } => {
-            if let Some(entry) = embedded_images.and_then(|images| images.image_for(source_range)) {
-                let image_width = (entry.image.width() as f32).min(r.w);
-                dl.image(entry.image.clone(), Rect::new(x, y, image_width, r.h));
-            }
-        }
-        LaidOutBlockKind::MetadataBlock { lines } => {
-            // Metadata blocks rendered like code blocks: background + border + clipped text
-            dl.fill_rounded(Rect::new(x, y, r.w, r.h), style.code_bg, style.border_radius_base);
-            dl.stroke_rounded(
-                Rect::new(x, y, r.w, r.h),
-                style.code_block_border,
-                style.border_radius_base,
-                1.0,
-            );
-            dl.clip(Rect::new(x, y, r.w, r.h), |dl| {
-                for line in lines {
-                    let line_bottom = line.rect.y + line.rect.h;
-                    if line_bottom < scroll_y {
+                for (line, row) in lines.iter().zip(&diagram.rows) {
+                    if line.rect.y + line.rect.h < scroll_y {
                         continue;
                     }
                     if line.rect.y > scroll_y + viewport_h {
                         break;
                     }
-                    render_line_with_offset(
+                    render_ascii_diagram_row(
+                        line, row, cell_width, style, dl, scroll_y, ox, oy, shaper,
+                    );
+                }
+            } else {
+                self.draw_visible_lines(lines, dl, shaper, None);
+            }
+        });
+    }
+
+    fn draw_quote(
+        &self,
+        rect: Rect,
+        blocks: &[LaidOutBlock],
+        dl: &mut DrawList,
+        shaper: Option<&mut shaping::Shaper>,
+    ) {
+        let style = self.style;
+        // Painter's algorithm: background first (full width), then border on top
+        dl.fill_rounded(rect, style.blockquote_bg, style.border_radius_base);
+        dl.fill(Rect::new(rect.x, rect.y, 4.0, rect.h), style.blockquote_border);
+        self.draw_children(blocks, dl, shaper);
+    }
+
+    fn draw_list_marker(
+        &self,
+        rect: Rect,
+        bullet: &ListBullet,
+        lines: &[LaidOutLine],
+        depth: usize,
+        dl: &mut DrawList,
+        mut shaper: Option<&mut shaping::Shaper>,
+    ) {
+        let Self { style, scroll_y, oy, .. } = *self;
+        let x = rect.x;
+        let y = rect.y;
+        let font_size = style.body_font_size;
+        let bullet_x = x;
+        let bullet_color = blend_toward_bg(style.text_color, style.background_color, 0.3);
+        // Align bullet baseline with first text line, not block top.
+        // Block rect.y may include list_item_spacing that the first text
+        // line already incorporates, causing vertical misalignment.
+        let bullet_baseline = lines.first().map_or(y, |l| l.rect.y - scroll_y + oy) + font_size;
+
+        match bullet {
+            ListBullet::Bullet => {
+                // Vary bullet symbol by nesting depth
+                let symbol = match depth % 3 {
+                    0 => "•",
+                    1 => "◦",
+                    _ => "▪",
+                };
+                if let Some(ref mut s) = shaper {
+                    dl.text_shaped(
+                        bullet_x + 4.0,
+                        bullet_baseline,
+                        font_size,
+                        bullet_color,
+                        symbol,
+                        s,
+                    );
+                }
+            }
+            ListBullet::Ordered(_) if list_item_uses_source_marker(lines) => {}
+            ListBullet::Ordered(n) => {
+                let label = format!("{}.", n);
+                if let Some(ref mut s) = shaper {
+                    dl.text_shaped(
+                        bullet_x + 4.0,
+                        bullet_baseline,
+                        font_size,
+                        bullet_color,
+                        &label,
+                        s,
+                    );
+                }
+            }
+            ListBullet::TaskList(checked) => {
+                let box_size = font_size * 0.75;
+                let box_x = bullet_x + 2.0;
+                // Center box on the same visual center as bullet text.
+                // bullet_baseline is at first_line_top + font_size (text baseline).
+                // Text visual center ≈ baseline - font_size * 0.4 (cap-height midpoint).
+                let box_y = bullet_baseline - font_size * 0.4 - box_size / 2.0;
+                // Unchecked: subtle border blended toward bg; Checked: full text color
+                let border_color = if *checked {
+                    style.text_color
+                } else {
+                    blend_toward_bg(style.text_color, style.background_color, 0.55)
+                };
+                dl.stroke_rounded(
+                    Rect::new(box_x, box_y, box_size, box_size),
+                    border_color,
+                    3.0,
+                    1.5,
+                );
+                if *checked {
+                    let check_fs = box_size * 0.95;
+                    let check_baseline = box_y + box_size / 2.0 + check_fs * 0.25;
+                    if let Some(ref mut s) = shaper {
+                        // Render at temporary x to measure real width, then center.
+                        let idx = dl.cmds.len();
+                        let actual_w =
+                            dl.text_shaped(box_x, check_baseline, check_fs, border_color, "x", s);
+                        if let DrawCmd::TextLayout { ref mut x, .. } = dl.cmds[idx] {
+                            *x = box_x + (box_size - actual_w) / 2.0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_table(
+        &self,
+        rect: Rect,
+        table: TablePaint<'_>,
+        dl: &mut DrawList,
+        mut shaper: Option<&mut shaping::Shaper>,
+    ) {
+        let Self { style, scroll_y, ox, oy, embedded_images, .. } = *self;
+        let TablePaint { columns, header, rows, column_widths, header_height, row_heights } = table;
+        let mut cell_y = rect.y;
+
+        // Header — use actual measured height
+        if !header.is_empty() && header_height > 0.0 {
+            dl.fill_rounded(
+                Rect::new(rect.x, cell_y, rect.w, header_height),
+                style.table_header_bg,
+                0.0,
+            );
+            for cell_lines in header.iter() {
+                for line in cell_lines {
+                    render_line_with_embedded(
                         line,
                         style,
                         dl,
@@ -563,9 +529,49 @@ pub(in crate::render) fn render_block_with_offset(
                         ox,
                         oy,
                         shaper.as_deref_mut(),
+                        embedded_images,
                     );
                 }
-            });
+            }
+            cell_y += header_height;
+            // Separator line
+            dl.fill(Rect::new(rect.x, cell_y, rect.w, 1.0), style.table_border);
+        }
+
+        // Body rows with zebra stripes — use actual measured heights
+        for (row_idx, row) in rows.iter().enumerate() {
+            let row_h = row_heights.get(row_idx).copied().unwrap_or(style.line_height + 2.0);
+            // Zebra stripe: odd rows get a subtle background
+            if row_idx % 2 == 1 {
+                dl.fill_rounded(
+                    Rect::new(rect.x, cell_y, rect.w, row_h),
+                    style.table_stripe_bg,
+                    0.0,
+                );
+            }
+            for cell_lines in row.iter() {
+                for line in cell_lines {
+                    render_line_with_embedded(
+                        line,
+                        style,
+                        dl,
+                        scroll_y,
+                        ox,
+                        oy,
+                        shaper.as_deref_mut(),
+                        embedded_images,
+                    );
+                }
+            }
+            cell_y += row_h;
+            // Row separator
+            dl.fill(Rect::new(rect.x, cell_y, rect.w, 1.0), style.table_border);
+        }
+
+        // Vertical grid lines
+        for i in 1..columns {
+            let cx = rect.x + column_widths[..i].iter().sum::<f32>();
+            dl.fill(Rect::new(cx, rect.y, 1.0, rect.h), style.table_border);
         }
     }
 }

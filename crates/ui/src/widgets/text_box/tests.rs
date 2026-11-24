@@ -112,7 +112,6 @@ fn paint_laid_out(tb: &mut TextBox) -> crate::core::paint::DrawList {
         list: &mut draw_list,
         theme: &theme,
         dpi: 1.0,
-        offset: (0.0, 0.0),
         shaper: Some(&mut shaper),
     };
     tb.paint(&mut paint_ctx);
@@ -787,7 +786,6 @@ fn paint_empty_shows_placeholder() {
         list: &mut dl,
         theme: &theme,
         dpi: 1.0,
-        offset: (0.0, 0.0),
         shaper: Some(&mut shaper),
     };
     tb.paint(&mut pc);
@@ -917,7 +915,6 @@ fn paint_shows_text_not_placeholder() {
         list: &mut dl,
         theme: &theme,
         dpi: 1.0,
-        offset: (0.0, 0.0),
         shaper: Some(&mut shaper),
     };
     tb.paint(&mut pc);
@@ -1238,7 +1235,6 @@ fn masked_preedit_uses_bullets_for_layout_and_paint() {
         list: &mut draw_list,
         theme: &theme,
         dpi: 1.0,
-        offset: (0.0, 0.0),
         shaper: Some(&mut shaper),
     };
     tb.paint(&mut paint_ctx);
@@ -1285,7 +1281,6 @@ fn paint_hides_cursor_when_blink_off() {
         list: &mut dl,
         theme: &theme,
         dpi: 1.0,
-        offset: (0.0, 0.0),
         shaper: Some(&mut shaper),
     };
     tb.paint(&mut pc);
@@ -1315,7 +1310,6 @@ fn paint_preedit_draws_text_and_underline() {
         list: &mut dl,
         theme: &theme,
         dpi: 1.0,
-        offset: (0.0, 0.0),
         shaper: Some(&mut shaper),
     };
     tb.paint(&mut pc);

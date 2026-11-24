@@ -671,12 +671,6 @@ fn relocate_title_bound_note(
     disambiguator: u32,
 ) -> Result<NoteCommandResult, NoteCommandError> {
     let source_relative_path = note.relative_path.clone();
-    let source_path = workspace
-        .resolve_relative_path(&source_relative_path)
-        .map_err(NoteCommandError::Workspace)?;
-    let target_path = workspace
-        .resolve_relative_path(&target_relative_path)
-        .map_err(NoteCommandError::Workspace)?;
     let operation = NotePathOperation {
         operation_id: uuid::Uuid::new_v4(),
         note_id: note.note_id,
@@ -686,24 +680,7 @@ fn relocate_title_bound_note(
         expected_title_revision: request.expected_title_revision,
         state: NotePathOperationState::Prepared,
     };
-    catalog
-        .prepare_note_path_operation(&operation)
-        .map_err(|source| NoteCommandError::Catalog { source })?;
-    if let Err(source) = move_file_no_replace(&source_path, &target_path) {
-        catalog
-            .update_note_path_operation_state(
-                operation.operation_id,
-                NotePathOperationState::RolledBack,
-            )
-            .map_err(|source| NoteCommandError::Catalog { source })?;
-        return Err(NoteCommandError::FileMove { from: source_path, to: target_path, source });
-    }
-    if let Err(source) = catalog
-        .update_note_path_operation_state(operation.operation_id, NotePathOperationState::Moved)
-    {
-        rollback_title_relocation(catalog, &operation, &source_path, &target_path)?;
-        return Err(NoteCommandError::Catalog { source });
-    }
+    let (source_path, target_path) = move_note_file_with_journal(workspace, catalog, &operation)?;
     let commit_result = catalog.commit_title_bound_path(
         note.note_id,
         request.expected_title_revision,
@@ -714,11 +691,11 @@ fn relocate_title_bound_note(
     match commit_result {
         Ok(Some(_)) => {}
         Ok(None) => {
-            rollback_title_relocation(catalog, &operation, &source_path, &target_path)?;
+            rollback_note_relocation(catalog, &operation, &source_path, &target_path)?;
             return Err(current_stale_title_revision_error(catalog, request)?);
         }
         Err(source) => {
-            rollback_title_relocation(catalog, &operation, &source_path, &target_path)?;
+            rollback_note_relocation(catalog, &operation, &source_path, &target_path)?;
             return Err(NoteCommandError::CatalogAfterFileMove {
                 from_relative_path: source_relative_path,
                 to_relative_path: target_relative_path,
@@ -740,7 +717,39 @@ fn relocate_title_bound_note(
     })
 }
 
-fn rollback_title_relocation(
+fn move_note_file_with_journal(
+    workspace: &Workspace,
+    catalog: &Catalog,
+    operation: &NotePathOperation,
+) -> Result<(PathBuf, PathBuf), NoteCommandError> {
+    let source_path = workspace
+        .resolve_relative_path(&operation.source_relative_path)
+        .map_err(NoteCommandError::Workspace)?;
+    let target_path = workspace
+        .resolve_relative_path(&operation.target_relative_path)
+        .map_err(NoteCommandError::Workspace)?;
+    catalog
+        .prepare_note_path_operation(operation)
+        .map_err(|source| NoteCommandError::Catalog { source })?;
+    if let Err(source) = move_file_no_replace(&source_path, &target_path) {
+        catalog
+            .update_note_path_operation_state(
+                operation.operation_id,
+                NotePathOperationState::RolledBack,
+            )
+            .map_err(|source| NoteCommandError::Catalog { source })?;
+        return Err(NoteCommandError::FileMove { from: source_path, to: target_path, source });
+    }
+    if let Err(source) = catalog
+        .update_note_path_operation_state(operation.operation_id, NotePathOperationState::Moved)
+    {
+        rollback_note_relocation(catalog, operation, &source_path, &target_path)?;
+        return Err(NoteCommandError::Catalog { source });
+    }
+    Ok((source_path, target_path))
+}
+
+fn rollback_note_relocation(
     catalog: &Catalog,
     operation: &NotePathOperation,
     source_path: &Path,
@@ -899,22 +908,32 @@ fn relocate_note(
             created_editor_metadata: None,
         });
     }
-    let source_path = workspace
-        .resolve_relative_path(&source_relative_path)
-        .map_err(NoteCommandError::Workspace)?;
-    let target_path = workspace
-        .resolve_relative_path(&target_relative_path)
-        .map_err(NoteCommandError::Workspace)?;
-    move_file_no_replace(&source_path, &target_path).map_err(|source| {
-        NoteCommandError::FileMove { from: source_path, to: target_path, source }
-    })?;
-    catalog.update_active_note_path(note.note_id, &target_relative_path).map_err(|source| {
-        NoteCommandError::CatalogAfterFileMove {
-            from_relative_path: source_relative_path.clone(),
-            to_relative_path: target_relative_path.clone(),
+    ensure_no_markdown_links_would_break(workspace, catalog, &source_relative_path)?;
+    let metadata = catalog
+        .note_file_name_metadata(note.note_id)
+        .map_err(|source| NoteCommandError::Catalog { source })?
+        .ok_or(NoteCommandError::NoteNotFound { note_id: note.note_id })?;
+    let operation = NotePathOperation {
+        operation_id: uuid::Uuid::new_v4(),
+        note_id: note.note_id,
+        kind: NotePathOperationKind::DirectoryMove,
+        source_relative_path: source_relative_path.clone(),
+        target_relative_path: target_relative_path.clone(),
+        expected_title_revision: metadata.title_revision,
+        state: NotePathOperationState::Prepared,
+    };
+    let (source_path, target_path) = move_note_file_with_journal(workspace, catalog, &operation)?;
+    if let Err(source) = catalog.update_active_note_path(note.note_id, &target_relative_path) {
+        rollback_note_relocation(catalog, &operation, &source_path, &target_path)?;
+        return Err(NoteCommandError::CatalogAfterFileMove {
+            from_relative_path: source_relative_path,
+            to_relative_path: target_relative_path,
             source: Box::new(source),
-        }
-    })?;
+        });
+    }
+    catalog
+        .update_note_path_operation_state(operation.operation_id, NotePathOperationState::Committed)
+        .map_err(|source| NoteCommandError::Catalog { source })?;
     note.relative_path = target_relative_path;
     Ok(NoteCommandResult {
         note,
@@ -931,6 +950,7 @@ fn created_editor_metadata(
 ) -> NoteEditorMetadata {
     NoteEditorMetadata {
         note_id: note.note_id,
+        starred: note.starred,
         created_at: note.modified_at,
         modified_at: note.modified_at,
         encryption: contents.encryption(),
@@ -1381,8 +1401,138 @@ mod move_note {
 
     use super::{
         ConfiguredCreateNoteRequest, CreateNoteStorage, MoveNoteRequest, NoteCommand,
-        execute_note_command,
+        NoteCommandError, NoteCommandResult, execute_note_command, recover_note_path_operations,
     };
+
+    fn create_markdown(workspace: &Workspace, catalog: &Catalog) -> NoteCommandResult {
+        execute_note_command(
+            workspace,
+            catalog,
+            NoteCommand::CreateConfigured(ConfiguredCreateNoteRequest {
+                kind: DocumentKind::Markdown,
+                target_directory: None,
+                storage: CreateNoteStorage::Unencrypted,
+            }),
+        )
+        .expect("markdown fixture should be created")
+    }
+
+    #[test]
+    fn directory_move_rolls_back_the_file_when_the_catalog_update_fails() {
+        let directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        fs::create_dir(workspace.root().join("archive")).expect("archive should exist");
+        let catalog_path = workspace.metadata_directory().join("catalog.sqlite3");
+        let catalog = Catalog::open(&catalog_path).expect("catalog should initialize");
+        let created = create_markdown(&workspace, &catalog);
+        let trigger_connection =
+            rusqlite::Connection::open(&catalog_path).expect("trigger connection should open");
+        trigger_connection
+            .execute_batch(
+                "CREATE TRIGGER reject_directory_move BEFORE UPDATE OF relative_path ON notes
+                 BEGIN SELECT RAISE(ABORT, 'injected path update failure'); END;",
+            )
+            .expect("path update trigger should install");
+
+        let result = execute_note_command(
+            &workspace,
+            &catalog,
+            NoteCommand::Move(MoveNoteRequest {
+                note_id: created.note.note_id,
+                target_directory: "archive".into(),
+            }),
+        );
+
+        assert!(matches!(result, Err(NoteCommandError::CatalogAfterFileMove { .. })));
+        assert!(workspace.root().join(&created.note.relative_path).is_file());
+        assert!(!workspace.root().join("archive").join(&created.note.relative_path).exists());
+        assert!(
+            catalog
+                .unfinished_note_path_operations()
+                .expect("recovery journal should query")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn directory_move_checks_incoming_markdown_links_before_changing_paths() {
+        let directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        fs::create_dir(workspace.root().join("archive")).expect("archive should exist");
+        let catalog = Catalog::open(&workspace.metadata_directory().join("catalog.sqlite3"))
+            .expect("catalog should initialize");
+        let target = create_markdown(&workspace, &catalog);
+        let source = create_markdown(&workspace, &catalog);
+        fs::write(workspace.root().join(&source.note.relative_path), "[target](无标题.md)")
+            .expect("link source should exist");
+
+        let result = execute_note_command(
+            &workspace,
+            &catalog,
+            NoteCommand::Move(MoveNoteRequest {
+                note_id: target.note.note_id,
+                target_directory: "archive".into(),
+            }),
+        );
+
+        assert!(matches!(
+            result,
+            Err(NoteCommandError::MarkdownLinksWouldBreak { target_relative_path, source_relative_paths })
+            if target_relative_path == target.note.relative_path
+                && source_relative_paths == vec![source.note.relative_path]
+        ));
+        assert!(workspace.root().join(&target.note.relative_path).is_file());
+    }
+
+    #[test]
+    fn directory_move_recovers_when_catalog_commits_before_the_journal_is_finalized() {
+        let directory = tempfile::tempdir().expect("workspace fixture should be created");
+        let workspace =
+            Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
+        fs::create_dir(workspace.root().join("archive")).expect("archive should exist");
+        let catalog_path = workspace.metadata_directory().join("catalog.sqlite3");
+        let catalog = Catalog::open(&catalog_path).expect("catalog should initialize");
+        let created = create_markdown(&workspace, &catalog);
+        let trigger_connection =
+            rusqlite::Connection::open(&catalog_path).expect("trigger connection should open");
+        trigger_connection
+            .execute_batch(
+                "CREATE TRIGGER reject_directory_move_finalization
+                 BEFORE UPDATE OF state ON note_path_operations
+                 WHEN EXISTS (
+                     SELECT 1 FROM notes
+                     WHERE note_id = NEW.note_id AND relative_path = NEW.target_relative_path
+                 )
+                 BEGIN SELECT RAISE(ABORT, 'injected journal failure'); END;",
+            )
+            .expect("journal trigger should install");
+
+        let result = execute_note_command(
+            &workspace,
+            &catalog,
+            NoteCommand::Move(MoveNoteRequest {
+                note_id: created.note.note_id,
+                target_directory: "archive".into(),
+            }),
+        );
+
+        assert!(matches!(result, Err(NoteCommandError::Catalog { .. })));
+        let operations = catalog.unfinished_note_path_operations().expect("journal should query");
+        assert!(matches!(operations.as_slice(), [operation]
+            if operation.kind == crate::catalog::NotePathOperationKind::DirectoryMove
+                && operation.state == crate::catalog::NotePathOperationState::Moved));
+        trigger_connection
+            .execute_batch("DROP TRIGGER reject_directory_move_finalization")
+            .expect("journal trigger should be removed before recovery");
+
+        let report =
+            recover_note_path_operations(&workspace, &catalog).expect("move should recover");
+
+        assert_eq!(report.committed_operations, 1);
+        assert!(workspace.root().join("archive").join(&created.note.relative_path).is_file());
+    }
 
     #[test]
     fn move_keeps_the_note_id_and_updates_its_relative_path() {

@@ -1,4 +1,4 @@
-//! Notora 产品与编辑器运行时；平台应用只通过 `NotoraApp` 组合根访问。
+//! Notora 产品与共享编辑器的组合根。
 
 #[cfg(test)]
 #[path = "runtime/keyboard_shortcut_tests.rs"]
@@ -13,8 +13,6 @@ mod document_search_runtime;
 
 #[path = "runtime/action_runtime.rs"]
 mod action_runtime;
-#[path = "app/deadline_coordinator.rs"]
-mod deadline_coordinator;
 #[path = "runtime/document_commands.rs"]
 mod document_commands;
 #[path = "runtime/document_completions.rs"]
@@ -27,8 +25,6 @@ mod frame_runtime;
 mod persistence_runtime;
 #[path = "runtime/product_effects.rs"]
 mod product_effects;
-#[path = "app/product_event_coordinator.rs"]
-mod product_event_coordinator;
 #[path = "runtime/session_restore_runtime.rs"]
 mod session_restore_runtime;
 #[path = "runtime/window_runtime.rs"]
@@ -60,7 +56,7 @@ use crate::action::{
 use crate::autosave::{AutoSaveRequest, AutoSaveScheduler};
 use crate::dirty_snapshot::{collect_dirty_snapshots, write_dirty_snapshot};
 use crate::editor_adapter::{LoadedDocument, build_editor_plugins, load_document};
-use crate::effect_executor::{EffectExecutor, ExternalOpenRequest, ManualSaveRequest};
+use crate::effect_executor::{ExternalOpenRequest, ManualSaveRequest};
 use crate::events;
 use crate::external_files::{CanonicalExternalPath, ExternalFileSession, read_external_text_file};
 use crate::product::{
@@ -80,7 +76,6 @@ use notora_core::note_command::{
 use notora_core::{DocumentIdentity, DocumentKind};
 
 use self::action_runtime::ActionRuntime;
-use self::deadline_coordinator::{DeadlineCoordinator, DeadlineSnapshot};
 use self::document_runtime::{
     DocumentOutcome, DocumentRuntime, DocumentSelection, TitleCommitContext,
 };
@@ -90,7 +85,6 @@ use self::frame_runtime::{FrameInput, FrameRuntime, StartupTrace};
 #[cfg(test)]
 use self::persistence_runtime::SettingsPersistenceState;
 use self::persistence_runtime::{PersistenceCompletionOutcome, PersistenceRuntime};
-use self::product_event_coordinator::ProductEventCoordinator;
 use self::session_restore_runtime::{
     SessionRestore, SessionRestoreFocusPolicy, SessionRestoreRuntime,
 };
@@ -297,8 +291,8 @@ impl std::error::Error for NotoraAppError {
     }
 }
 
-/// 执行产品状态、后台服务和共享 editor runtime 协调的内部运行时。
-pub(crate) struct NotoraRuntime {
+/// Notora 的产品状态、后台服务和共享编辑器宿主。
+pub struct NotoraRuntime {
     action_runtime: ActionRuntime,
     paths: NotoraPaths,
     persistence_runtime: PersistenceRuntime,
@@ -722,26 +716,6 @@ impl NotoraRuntime {
         self.action_runtime.finish_draining();
     }
 
-    fn reduce_action(&mut self, action: NotoraAction) {
-        let should_persist_session = action_requires_session_persistence(&action);
-        let reduction = self.action_runtime.reduce(action, Instant::now(), should_persist_session);
-        for effect in reduction.effects {
-            let execution =
-                EffectExecutor::execute(effect, |effect| self.execute_product_effect(effect));
-            for follow_up_action in execution.follow_up_actions {
-                self.action_runtime.enqueue(follow_up_action);
-            }
-            self.apply_shell_effect(execution.shell_effect);
-        }
-        self.synchronize_product_focus();
-        for follow_up_action in reduction.follow_up_actions {
-            self.action_runtime.enqueue(follow_up_action);
-        }
-        if reduction.should_persist_session {
-            self.schedule_session_persistence();
-        }
-    }
-
     fn synchronize_product_focus(&mut self) {
         let focus_target = self.action_runtime.state().layout.focus_target;
         let editor_is_active =
@@ -917,15 +891,16 @@ impl NotoraRuntime {
     }
 
     pub(crate) fn next_deadline(&self) -> Option<std::time::Instant> {
-        DeadlineCoordinator::next_deadline(DeadlineSnapshot {
-            autosave: self.next_autosave_deadline(),
-            search: self.next_search_deadline(),
-            persistence: self.persistence_runtime.next_deadline(),
-            text_cursor_blink: self.next_text_cursor_blink_at(),
-            editor_cursor_blink: self
-                .editor_cursor_blink_phase()
-                .map(|phase| phase.next_transition_at),
-        })
+        [
+            self.next_autosave_deadline(),
+            self.next_search_deadline(),
+            self.persistence_runtime.next_deadline(),
+            self.next_text_cursor_blink_at(),
+            self.editor_cursor_blink_phase().map(|phase| phase.next_transition_at),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn process_due_session_persistence_at(&mut self, now: Instant) {
@@ -1154,8 +1129,8 @@ impl NotoraRuntime {
 
     /// 处理后台产品结果；无事件循环的宿主可主动轮询此入口。
     pub fn drain_product_events(&mut self) {
-        let completions = ProductEventCoordinator::drain(&mut self.product);
-        for event in completions.events {
+        let shell_effect = ProductHost::drain_product_events(&mut self.product);
+        for event in self.product.take_events() {
             match event {
                 NotoraProductEvent::WorkspaceBootstrap(completion) => {
                     self.complete_session_workspace_restore(completion);
@@ -1178,7 +1153,7 @@ impl NotoraRuntime {
                 }
             }
         }
-        self.apply_shell_effect(completions.shell_effect);
+        self.apply_shell_effect(shell_effect);
     }
 
     pub(crate) fn route_product_event(&mut self, event: &ui::Event) -> bool {
@@ -1339,7 +1314,7 @@ impl NotoraRuntime {
     fn write_dirty_snapshots_in_background(&self) {
         let plans = collect_dirty_snapshots(
             &self.document_runtime.editor().workspace_snapshot(),
-            self.document_runtime.encrypted_note_tabs(),
+            &self.document_runtime.encrypted_note_tabs(),
         );
         if plans.is_empty() {
             return;
@@ -1587,8 +1562,11 @@ impl NotoraRuntime {
             EditorNotification::ContentChanged { tab_id, content_revision } => {
                 self.document_runtime.clear_save_failure(*tab_id);
                 self.promote_preview_for_tab(*tab_id);
-                if let Some(origin) = self.document_origin_for_tab(*tab_id) {
-                    self.document_runtime.schedule_autosave(&origin, *tab_id, *content_revision);
+                if let Some(origin) = self.document_origin_for_tab(*tab_id)
+                    && let Some(outcome) =
+                        self.document_runtime.schedule_autosave(&origin, *tab_id, *content_revision)
+                {
+                    self.apply_document_outcome(outcome);
                 }
             }
             EditorNotification::SaveCompleted { tab_id, content_revision } => {
@@ -1607,7 +1585,8 @@ impl NotoraRuntime {
             EditorNotification::ActiveDocumentChanged { tab_id: None }
             | EditorNotification::PathChanged { .. }
             | EditorNotification::DirtyChanged { .. }
-            | EditorNotification::CloseRequested { .. } => {}
+            | EditorNotification::CloseRequested { .. }
+            | EditorNotification::TabClosed { .. } => {}
         }
     }
 
@@ -2130,16 +2109,10 @@ impl NotoraRuntime {
         identity: DocumentIdentity,
         tab_id: appkit_core::tab_set::types::TabId,
     ) -> ExternalFileCloseOutcome {
-        let outcome = self
-            .document_runtime
-            .editor_mut()
-            .confirm_close(tab_id, appkit_shell::editor_runtime::CloseConfirmation::Discard);
+        let outcome = self.document_runtime.close_tab_discarding_changes(tab_id);
         if self.document_runtime.editor().document_summary(tab_id).is_some() {
             return ExternalFileCloseOutcome::Blocked(ExternalFileCloseBlocker::PinnedTab);
         }
-        self.document_runtime.cancel_autosave(tab_id);
-        self.document_runtime.clear_save_failure(tab_id);
-        self.document_runtime.remove_tab(tab_id);
         self.apply_editor_outcome(outcome);
         if self.action_runtime.state().library.selected_card == Some(identity) {
             self.action_runtime.invalidate_document_selection();
@@ -2739,10 +2712,8 @@ impl NotoraRuntime {
         let Some(tab_id) = self.document_runtime.tab_for(identity) else {
             return;
         };
-        self.document_runtime.cancel_autosave(tab_id);
-        self.document_runtime.clear_save_failure(tab_id);
-        let _ = self.document_runtime.editor_mut().close_for_product(tab_id);
-        self.document_runtime.remove_tab(tab_id);
+        let outcome = self.document_runtime.close_tab_discarding_changes(tab_id);
+        self.apply_editor_outcome(outcome);
         if self.action_runtime.state().library.selected_card == Some(identity)
             && self.action_runtime.state().library.navigation_scope
                 != notora_core::NavigationScope::Trash
@@ -2773,10 +2744,8 @@ impl NotoraRuntime {
             })
             .collect::<Vec<_>>();
         for tab_id in read_only_tabs {
-            self.document_runtime.cancel_autosave(tab_id);
-            self.document_runtime.clear_save_failure(tab_id);
-            let _ = self.document_runtime.editor_mut().close_for_product(tab_id);
-            self.document_runtime.remove_tab(tab_id);
+            let outcome = self.document_runtime.close_tab_discarding_changes(tab_id);
+            self.apply_editor_outcome(outcome);
         }
     }
 
@@ -2871,19 +2840,24 @@ impl NotoraRuntime {
         prepared: appkit_shell::editor_runtime::PreparedDocumentSave,
         transform: Option<appkit_shell::editor_runtime::SavePayloadTransform>,
     ) {
-        let Some(workspace) = self.workspace_controller.active_workspace() else {
-            self.dispatch_action(NotoraAction::NoteCommandFailed(
-                "工作区关闭后无法保存冲突副本".to_owned(),
-            ));
-            return;
+        let sender = self.product.event_sender();
+        let workspace_sender = if matches!(identity, DocumentIdentity::Note(_)) {
+            let Some(workspace) = self.workspace_controller.active_workspace() else {
+                self.dispatch_action(NotoraAction::NoteCommandFailed(
+                    "工作区关闭后无法保存笔记的冲突副本".to_owned(),
+                ));
+                return;
+            };
+            Some(WorkspaceEventSender::new(
+                sender.clone(),
+                WorkspaceEventScope {
+                    workspace_id: workspace.descriptor.workspace_id,
+                    generation: workspace.generation,
+                },
+            ))
+        } else {
+            None
         };
-        let sender = WorkspaceEventSender::new(
-            self.product.event_sender(),
-            WorkspaceEventScope {
-                workspace_id: workspace.descriptor.workspace_id,
-                generation: workspace.generation,
-            },
-        );
         if thread::Builder::new()
             .name("notora-conflict-copy".to_owned())
             .spawn(move || {
@@ -2896,8 +2870,14 @@ impl NotoraRuntime {
                     None => appkit_shell::editor_runtime::execute_prepared_save(prepared),
                 };
                 let result = completion.result.map(|_| ()).map_err(|error| error.to_string());
-                let _ =
-                    sender.send(WorkspaceCompletion::ConflictCopyCompleted { identity, result });
+                if let Some(workspace_sender) = workspace_sender {
+                    let _ = workspace_sender
+                        .send(WorkspaceCompletion::ConflictCopyCompleted { identity, result });
+                } else {
+                    let _ = sender.send(NotoraProductEvent::Document(
+                        DocumentCompletion::ExternalConflictCopyCompleted { identity, result },
+                    ));
+                }
             })
             .is_err()
         {
@@ -3029,9 +3009,21 @@ impl NotoraRuntime {
         activate: bool,
     ) {
         let identity = self.action_runtime.open_existing_external(canonical_path);
-        let outcome =
-            self.document_runtime.complete_external_file_open(identity, document, activate);
-        self.apply_document_outcome(outcome);
+        if !activate {
+            return;
+        }
+        if self
+            .action_runtime
+            .state()
+            .will_leave_title_focus(&NotoraAction::ExternalFileOpened(identity))
+        {
+            self.commit_title_before_focus();
+        }
+        let request = self.action_runtime.select_opened_external_file(identity);
+        self.install_loaded_preview(request, document);
+        self.apply_shell_effect(ShellEffect::REDRAW);
+        self.synchronize_product_focus();
+        self.schedule_session_persistence();
     }
 
     fn start_external_document_load(

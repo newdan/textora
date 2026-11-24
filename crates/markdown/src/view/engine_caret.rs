@@ -21,14 +21,11 @@ fn trailing_ws_reaches_newline(source: &str, cursor_byte: usize) -> bool {
     after_ws.starts_with('\n') || after_ws.starts_with("\r\n")
 }
 
-impl<S: BlockSource> BlockViewEngine<S> {
+impl<S: BlockSource> BlockViewLayout<S> {
     /// 查询：返回光标在插件渲染空间中的 (x, y, w, h)。
-    /// y = fl.rect.y - scroll_y，与 render_line_with_offset 的投影一致。
+    /// y = fl.rect.y - scroll_y，与 render_line_with_embedded 的投影一致。
     /// 调用方加 plugin_render_bounds().origin 即得窗口像素坐标。
     pub fn cursor_screen_pos(&self) -> Option<(f32, f32, f32, f32)> {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition.engine.cursor_screen_pos();
-        }
         let ctx = self.edit_ctx.as_ref()?;
         self.cursor_screen_pos_for_byte(ctx.cursor_byte)
     }
@@ -78,11 +75,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
         &self,
         cursor_byte: usize,
     ) -> Option<(f32, f32, f32, f32)> {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition
-                .engine
-                .cursor_screen_pos_for_byte(composition.preview_byte(cursor_byte));
-        }
         let lazy = self.lazy.as_ref()?;
 
         if let Some(rect) = self.empty_source_line_cursor_screen_pos(cursor_byte) {
@@ -260,9 +252,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
     }
 
     pub(in crate::view) fn visual_cursor_screen_pos(&self) -> Option<(f32, f32, f32, f32)> {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition.engine.cursor_screen_pos();
-        }
         let ctx = self.edit_ctx.as_ref()?;
         let preedit_text = ctx.preedit_text.as_deref().filter(|text| !text.is_empty())?;
         let lazy = self.lazy.as_ref()?;
@@ -389,5 +378,25 @@ impl<S: BlockSource> BlockViewEngine<S> {
                     && projection.source_extent.end <= source_line.content_end
             })
         })
+    }
+}
+
+impl<S: BlockSource> BlockViewEngine<S> {
+    pub fn cursor_screen_pos(&self) -> Option<(f32, f32, f32, f32)> {
+        self.displayed_layout().cursor_screen_pos()
+    }
+
+    pub(in crate::view) fn cursor_screen_pos_for_byte(
+        &self,
+        source_byte: usize,
+    ) -> Option<(f32, f32, f32, f32)> {
+        self.displayed_layout().cursor_screen_pos_for_byte(self.preview_byte(source_byte))
+    }
+
+    pub(in crate::view) fn visual_cursor_screen_pos(&self) -> Option<(f32, f32, f32, f32)> {
+        match self.replacement_preedit.as_deref() {
+            Some(replacement) => replacement.layout.cursor_screen_pos(),
+            None => self.document_layout.visual_cursor_screen_pos(),
+        }
     }
 }

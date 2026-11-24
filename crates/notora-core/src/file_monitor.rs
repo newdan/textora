@@ -64,24 +64,46 @@ impl WorkspaceFileMonitor {
         Self::start_with_backend(root, recommended_watcher)
     }
 
+    /// Sends events to a caller-owned event source. A sink can return false to stop the worker.
+    pub fn start_with_event_sink(
+        root: PathBuf,
+        emit: impl FnMut(WorkspaceFileMonitorEvent) -> bool + Send + 'static,
+    ) -> Result<Self, WorkspaceFileMonitorError> {
+        Self::start_with_backend_and_sink(root, recommended_watcher, emit)
+    }
+
     fn start_with_backend<W: Watcher + 'static>(
         root: PathBuf,
         create_watcher: impl FnOnce(mpsc::Sender<notify::Result<Event>>) -> notify::Result<W>
         + Send
         + 'static,
     ) -> Result<(Self, mpsc::Receiver<WorkspaceFileMonitorEvent>), WorkspaceFileMonitorError> {
+        let (result_sender, result_receiver) = mpsc::channel();
+        let monitor = Self::start_with_backend_and_sink(root, create_watcher, move |event| {
+            result_sender.send(event).is_ok()
+        })?;
+        Ok((monitor, result_receiver))
+    }
+
+    fn start_with_backend_and_sink<W: Watcher + 'static>(
+        root: PathBuf,
+        create_watcher: impl FnOnce(mpsc::Sender<notify::Result<Event>>) -> notify::Result<W>
+        + Send
+        + 'static,
+        emit: impl FnMut(WorkspaceFileMonitorEvent) -> bool + Send + 'static,
+    ) -> Result<Self, WorkspaceFileMonitorError> {
         let (event_sender, event_receiver) = mpsc::channel();
-        let (worker, result_receiver) = WatchWorker::spawn(
+        let worker = WatchWorker::spawn_loop(
             "notora-file-monitor",
             MonitorCommand::Shutdown,
             move |_| create_watcher(event_sender),
-            move |watcher, command_receiver, result_sender| {
-                run_worker(root, watcher, command_receiver, event_receiver, result_sender);
+            move |watcher, command_receiver| {
+                run_worker(root, watcher, command_receiver, event_receiver, emit);
             },
         )
         .map_err(|_| WorkspaceFileMonitorError::WorkerDisconnected)?;
 
-        Ok((Self { worker }, result_receiver))
+        Ok(Self { worker })
     }
 
     pub fn shutdown(&mut self) {
@@ -98,41 +120,31 @@ fn run_worker<W: Watcher>(
     watcher: notify::Result<W>,
     command_receiver: mpsc::Receiver<MonitorCommand>,
     event_receiver: mpsc::Receiver<notify::Result<Event>>,
-    result_sender: mpsc::Sender<WorkspaceFileMonitorEvent>,
+    mut emit: impl FnMut(WorkspaceFileMonitorEvent) -> bool,
 ) {
     let mut watcher = match watcher {
         Ok(watcher) => watcher,
         Err(error) => {
-            let _ = result_sender
-                .send(WorkspaceFileMonitorEvent::Failed(WorkspaceFileMonitorError::Watcher(error)));
+            emit(WorkspaceFileMonitorEvent::Failed(WorkspaceFileMonitorError::Watcher(error)));
             return;
         }
     };
     if let Err(error) = watcher.watch(&root, RecursiveMode::Recursive) {
-        let _ = result_sender
-            .send(WorkspaceFileMonitorEvent::Failed(WorkspaceFileMonitorError::Watcher(error)));
+        emit(WorkspaceFileMonitorEvent::Failed(WorkspaceFileMonitorError::Watcher(error)));
         return;
     }
-    if command_receiver.try_recv().is_ok()
-        || result_sender.send(WorkspaceFileMonitorEvent::Ready).is_err()
-    {
+    if command_receiver.try_recv().is_ok() || !emit(WorkspaceFileMonitorEvent::Ready) {
         return;
     }
 
-    run_event_batch_loop(
-        &root,
-        &command_receiver,
-        &event_receiver,
-        &result_sender,
-        DEFAULT_DEBOUNCE,
-    );
+    run_event_batch_loop(&root, &command_receiver, &event_receiver, emit, DEFAULT_DEBOUNCE);
 }
 
 fn run_event_batch_loop(
     root: &Path,
     command_receiver: &mpsc::Receiver<MonitorCommand>,
     event_receiver: &mpsc::Receiver<notify::Result<notify::Event>>,
-    result_sender: &mpsc::Sender<WorkspaceFileMonitorEvent>,
+    mut emit: impl FnMut(WorkspaceFileMonitorEvent) -> bool,
     debounce: Duration,
 ) {
     let mut pending_events = Vec::new();
@@ -141,13 +153,13 @@ fn run_event_batch_loop(
             Ok(MonitorCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let drained = drain_events(event_receiver, &mut pending_events);
-                if !send_batch(root, result_sender, &mut pending_events) {
+                if !send_batch(root, &mut emit, &mut pending_events) {
                     return;
                 }
                 if let Err(error) = drained {
-                    let _ = result_sender.send(WorkspaceFileMonitorEvent::Failed(
-                        WorkspaceFileMonitorError::Watcher(error),
-                    ));
+                    emit(WorkspaceFileMonitorEvent::Failed(WorkspaceFileMonitorError::Watcher(
+                        error,
+                    )));
                     return;
                 }
             }
@@ -167,7 +179,7 @@ fn drain_events(
 
 fn send_batch(
     root: &Path,
-    sender: &mpsc::Sender<WorkspaceFileMonitorEvent>,
+    emit: &mut impl FnMut(WorkspaceFileMonitorEvent) -> bool,
     pending_events: &mut Vec<Event>,
 ) -> bool {
     let changes = normalize_changes(root, std::mem::take(pending_events));
@@ -181,9 +193,7 @@ fn send_batch(
     if relative_paths.is_empty() {
         return true;
     }
-    sender
-        .send(WorkspaceFileMonitorEvent::Changes(WorkspaceFileBatch { relative_paths, changes }))
-        .is_ok()
+    emit(WorkspaceFileMonitorEvent::Changes(WorkspaceFileBatch { relative_paths, changes }))
 }
 
 fn normalize_changes(root: &Path, events: Vec<Event>) -> Vec<WorkspaceFileChange> {
@@ -458,7 +468,7 @@ mod tests {
                 Path::new("/workspace"),
                 &command_receiver,
                 &event_receiver,
-                &result_sender,
+                |event| result_sender.send(event).is_ok(),
                 Duration::from_millis(10),
             )
         });
@@ -500,7 +510,7 @@ mod tests {
                 &root,
                 &command_receiver,
                 &event_receiver,
-                &result_sender,
+                |event| result_sender.send(event).is_ok(),
                 Duration::from_millis(10),
             )
         });

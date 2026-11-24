@@ -19,6 +19,17 @@ pub struct EditorRuntimeConfig {
     pub snapshots_directory: PathBuf,
 }
 
+/// 产品从快照恢复的文档与视图状态，由宿主解析视图路由并安装。
+pub struct RestoredEditorTab<'a> {
+    pub document: appkit_core::document::DocumentModel,
+    pub presentation: crate::document_presentation::DocumentPresentation,
+    pub route_path: Option<&'a std::path::Path>,
+    pub active_plugin: Option<&'a str>,
+    pub suggested_file_name: Option<String>,
+    pub scroll_anchor: ui::viewport::ScrollAnchor,
+    pub preview_anchor: Option<(&'a str, f32)>,
+}
+
 /// 打开文档时的 tab 生命周期策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenDisposition {
@@ -46,6 +57,16 @@ pub enum CloseConfirmation {
     Saved,
     Discard,
     Cancel,
+}
+
+impl CloseConfirmation {
+    pub(crate) fn accepts(self, decision: CloseTabDecision) -> bool {
+        match self {
+            Self::Saved => decision == CloseTabDecision::CanClose,
+            Self::Discard => decision != CloseTabDecision::Pinned,
+            Self::Cancel => false,
+        }
+    }
 }
 
 /// 产品用于展示和保存调度的文档摘要。
@@ -125,6 +146,7 @@ pub enum EditorNotification {
     SaveCompleted { tab_id: TabId, content_revision: u64 },
     SaveFailed { tab_id: TabId, message: String },
     CloseRequested { tab_id: TabId, decision: CloseTabDecision },
+    TabClosed { tab_id: TabId },
 }
 
 /// 一次 runtime 操作产生的通用 effect 与产品通知。

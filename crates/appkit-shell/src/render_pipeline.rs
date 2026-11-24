@@ -2,12 +2,14 @@
 //!
 //! Extracts the heavy shaping/rendering logic from App.
 
-use crate::cursor_motion::{LineCache, find_visual_line_index};
+use crate::cursor_motion::{CursorRenderState, find_visual_line_index};
 use crate::document_presentation::DocumentPresentation;
+use crate::frame_cache::{FrameCache, LineCache};
 use crate::render_cache::{CachedLine, GlyphInstance};
 use crate::render_state::{GpuState, TextState};
 use appkit_core::document::DocumentModel;
 use render::GlyphVertex;
+use std::ops::Range;
 use textora_core::highlight::HighlightKind;
 use ui::decorations::*;
 use ui::gutter::ATLAS_SIZE;
@@ -24,6 +26,7 @@ const PERF_LOG_ENV: &str = "EDIT_PLUS_PERF_LOG";
 const PERF_LOG_THRESHOLD_US_ENV: &str = "EDIT_PLUS_PERF_LOG_THRESHOLD_US";
 const DEFAULT_PERF_LOG_THRESHOLD_US: u128 = 1_000;
 const MARKDOWN_LANGUAGE_ID: &str = "markdown";
+const MAX_SYNC_SHAPE_BYTES: usize = 4_000;
 
 #[derive(Clone, Copy)]
 struct ShapeMissMapStats {
@@ -74,25 +77,46 @@ struct RenderViewportState {
     sub_line_offset: f32,
     start_doc: usize,
     viewport_visual_rows: usize,
+    candidate_lines: usize,
+    cursor_doc_line: usize,
+    cursor_relative_line: Option<usize>,
+}
+
+impl RenderViewportState {
+    fn is_filled_after(self, relative_line: usize, rendered_rows: usize) -> bool {
+        rendered_rows >= self.viewport_visual_rows
+            && self.cursor_relative_line.is_none_or(|cursor_line| relative_line >= cursor_line)
+    }
 }
 
 fn visual_line_count_from_len(visual_line_count: usize) -> u16 {
     visual_line_count.min(u16::MAX as usize) as u16
 }
 
-fn compute_render_viewport_state_from_presentation(
-    dv: &DocumentModel,
+fn resolve_visible_line_range(
     presentation: &DocumentPresentation,
     line_height: f32,
+    total_lines: usize,
+    cursor_doc_line: usize,
 ) -> RenderViewportState {
     let anchor = presentation.display.viewport.scroll_anchor;
     let skip_visual = (anchor.pixel_offset / line_height) as usize;
     let sub_line_offset = -(anchor.pixel_offset - skip_visual as f32 * line_height);
-    let total_lines = dv.line_count();
     let start_doc = anchor.doc_line.min(total_lines.saturating_sub(1));
     let viewport_visual_rows = presentation.display.viewport.viewport_height.ceil() as usize + 2;
 
-    RenderViewportState { skip_visual, sub_line_offset, start_doc, viewport_visual_rows }
+    let candidate_lines = total_lines.saturating_sub(start_doc);
+    let cursor_relative_line =
+        cursor_doc_line.checked_sub(start_doc).filter(|line| *line < viewport_visual_rows * 4);
+    RenderViewportState {
+        skip_visual,
+        sub_line_offset,
+        start_doc,
+        viewport_visual_rows,
+        candidate_lines,
+        cursor_doc_line,
+        cursor_relative_line,
+    }
 }
 
 fn highlights_for_line<'a>(
@@ -258,23 +282,23 @@ fn cursor_relative_offset_for_line(
     cursor_offset.checked_sub(current_line_offset).map(|offset| offset as u32)
 }
 
-/// Render a line number for a doc line that has no shaped text content,
-/// so that placeholder rows still show a line number instead of a ghost gap.
-fn render_line_number_placeholder(
+struct GutterLine {
+    doc_index: usize,
+    top: f32,
+    active: bool,
+}
+
+fn emit_gutter_line_number(
     metrics: &ui::settings::UiMetrics,
     ctx: &RenderContext,
     text: &mut TextState,
     gpu: &GpuState,
-    is_active_line: bool,
-    doc_line_idx: usize,
-    visual_line: usize,
+    line: GutterLine,
     all_vertices: &mut Vec<GlyphVertex>,
-    sub_line_offset: f32,
 ) {
-    let _line_num_buf = format_line_num(doc_line_idx + 1);
+    let _line_num_buf = format_line_num(line.doc_index + 1);
     let line_num_str = line_num_str(&_line_num_buf);
     if let Ok(line_num_shaped) = text.shaper.shape(line_num_str) {
-        let ln_y = visual_line as f32 * metrics.line_height + sub_line_offset;
         let ln_font_size = text.shaper.font_size() * ui::constants::LN_FONT_SCALE;
         let ln_verts = generate_line_number_vertices(
             ctx,
@@ -284,8 +308,8 @@ fn render_line_number_placeholder(
             &gpu.ctx.queue,
             &mut text.shaper,
             ln_font_size,
-            ln_y,
-            is_active_line,
+            line.top,
+            line.active,
             metrics.gutter_padding,
             metrics.line_height,
         );
@@ -328,1333 +352,1390 @@ fn build_cached_advance_cache_entries(
     entries
 }
 
+struct SourceLineShapeOptions<'a> {
+    text: &'a str,
+    bytes: &'a [u8],
+    cluster_byte_offset: usize,
+    highlights: &'a [(usize, HighlightKind)],
+    has_font_overrides: bool,
+    display_breaks: Option<&'a [crate::snap_tree::VisualBreak]>,
+    spacing: TextSpacingMode,
+    protected_ranges: &'a [Range<usize>],
+    viewport_width: f32,
+}
+
+enum LineShape {
+    Empty,
+    Wrapped { shaped: shaping::ShapedRun, visual_lines: Vec<(usize, usize, f32)>, char_width: f32 },
+}
+
+fn shape_and_wrap_line(
+    shaper: &mut shaping::Shaper,
+    options: SourceLineShapeOptions<'_>,
+) -> Result<LineShape, shaping::ShapeError> {
+    let mut shaped = shape_source_run(
+        shaper,
+        options.text,
+        options.cluster_byte_offset,
+        options.highlights,
+        options.has_font_overrides,
+    )?;
+    if shaped.clusters.is_empty() {
+        return Ok(LineShape::Empty);
+    }
+    for cluster in &mut shaped.clusters {
+        cluster.byte_range.start += options.cluster_byte_offset;
+        cluster.byte_range.end += options.cluster_byte_offset;
+    }
+
+    let char_width = shaper.col_width();
+    let typography_clusters: Vec<TypographyCluster> = shaped
+        .clusters
+        .iter()
+        .map(|cluster| TypographyCluster::new(cluster.byte_range.clone(), shaper.font_size()))
+        .collect();
+    let typography_input = TypographyInput::new(
+        std::str::from_utf8(options.bytes).unwrap_or_default(),
+        options.spacing,
+        &typography_clusters,
+        options.protected_ranges,
+    );
+    let gaps = ui::typography::calculate_gaps(&typography_input);
+
+    let visual_lines = options.display_breaks.and_then(|breaks| {
+        let visual_lines = map_display_breaks_to_clusters(&shaped, breaks);
+        visual_lines.iter().all(|&(start, end, _)| start <= end).then_some(visual_lines)
+    });
+    if let Some(visual_lines) = visual_lines {
+        let shaped = ui::layout::typography::apply_gaps_to_existing_visual_lines(
+            &shaped,
+            &gaps,
+            &visual_lines,
+        );
+        return Ok(LineShape::Wrapped { shaped, visual_lines, char_width });
+    }
+
+    let layout = ui::layout::typography::layout_shaped_run_with_gaps(
+        &shaped,
+        &gaps,
+        options.bytes,
+        char_width,
+        options.viewport_width,
+        0.5,
+        0.0,
+    );
+    Ok(LineShape::Wrapped { shaped: layout.shaped, visual_lines: layout.visual_lines, char_width })
+}
+
+fn map_display_breaks_to_clusters(
+    shaped: &shaping::ShapedRun,
+    breaks: &[crate::snap_tree::VisualBreak],
+) -> Vec<(usize, usize, f32)> {
+    breaks
+        .iter()
+        .map(|visual_break| {
+            let start = shaped.clusters.partition_point(|cluster| {
+                cluster.byte_range.start < visual_break.byte_start as usize
+            });
+            let end = shaped.clusters.partition_point(|cluster| {
+                cluster.byte_range.start < visual_break.byte_end as usize
+            });
+            (start, end, visual_break.pixel_width)
+        })
+        .collect()
+}
+
+fn full_line_display_breaks(
+    entry: &crate::snap_tree::DisplayLineEntry,
+    layout_hash: u64,
+) -> Option<&[crate::snap_tree::VisualBreak]> {
+    let placeholder = entry.visual_breaks.len() == 1
+        && entry.visual_breaks[0].pixel_width == 0.0
+        && entry.byte_length > 0;
+    (!placeholder && entry.content_hash == layout_hash && !entry.visual_breaks.is_empty())
+        .then_some(entry.visual_breaks.as_slice())
+}
+
+fn shape_source_run(
+    shaper: &mut shaping::Shaper,
+    line_str_to_shape: &str,
+    byte_offset_for_clusters: usize,
+    highlight_spans: &[(usize, HighlightKind)],
+    has_bold_italic: bool,
+) -> Result<shaping::ShapedRun, shaping::ShapeError> {
+    if !has_bold_italic {
+        return shaper.shape_fast(line_str_to_shape).or_else(|_| shaper.shape(line_str_to_shape));
+    }
+    // Build per-span weight/style overrides from highlight spans.
+    // When shape_subset_only, adjust byte offsets to be relative to the substring.
+    let subset_start = byte_offset_for_clusters;
+    let subset_end = subset_start + line_str_to_shape.len();
+    let mut span_attrs: Vec<(usize, shaping::Weight, shaping::Style)> = Vec::new();
+    let mut last_end = 0usize;
+    for &(highlight_start, kind) in highlight_spans {
+        // Skip highlights entirely outside the visible subset
+        if highlight_start >= subset_end {
+            break;
+        }
+        // Clip highlights that start before the subset
+        let start = highlight_start.saturating_sub(subset_start);
+        if start >= line_str_to_shape.len() {
+            continue;
+        }
+        // Fill gap with base weight/style
+        if start > last_end {
+            span_attrs.push((last_end, shaper.font_weight(), shaper.font_style()));
+        }
+        let (w, s) = match kind {
+            HighlightKind::MarkupBold => (shaping::Weight::BOLD, shaper.font_style()),
+            HighlightKind::MarkupItalic => (shaper.font_weight(), shaping::Style::Italic),
+            HighlightKind::MarkupHeading => (shaping::Weight::BOLD, shaper.font_style()),
+            _ => (shaper.font_weight(), shaper.font_style()),
+        };
+        span_attrs.push((start, w, s));
+        last_end = start;
+    }
+    // Fill trailing gap
+    if last_end < line_str_to_shape.len() {
+        span_attrs.push((last_end, shaper.font_weight(), shaper.font_style()));
+    }
+    // Deduplicate consecutive identical attrs
+    span_attrs.dedup_by(|a, b| a.1 == b.1 && a.2 == b.2);
+
+    shaper.shape_with_highlights(line_str_to_shape, &span_attrs)
+}
+
+struct LineCacheInput<'a> {
+    doc_index: usize,
+    doc_offset: usize,
+    bytes: &'a [u8],
+    spacing: TextSpacingMode,
+    preedit_on_cursor_line: bool,
+}
+
+struct LineCacheLookup {
+    layout_hash: u64,
+    protected_ranges: Vec<Range<usize>>,
+    cached: Option<CachedLine>,
+}
+
+fn lookup_or_prepare_cached_line(
+    line: LineCacheInput<'_>,
+    presentation: &mut DocumentPresentation,
+    viewport_width: f32,
+    font_size: f32,
+    font_family: &str,
+) -> LineCacheLookup {
+    let protected_ranges = protected_ranges_for_line(
+        &presentation.source_spacing.protected_ranges,
+        line.doc_offset,
+        line.bytes.len(),
+    );
+    let layout_hash = content_hash_for_layout(
+        line.bytes,
+        line.doc_offset,
+        viewport_width,
+        font_size,
+        line.spacing,
+        &protected_ranges,
+        presentation.source_spacing.semantic_version,
+        font_family,
+    );
+    let render_cache = &mut presentation.display.render_cache;
+    let cached = if line.preedit_on_cursor_line {
+        None
+    } else {
+        let matching = render_cache
+            .get(line.doc_index)
+            .filter(|cached| {
+                cached.content_hash == layout_hash
+                    && cached.visual_lines.len() == cached.visual_line_instance_starts.len()
+            })
+            .cloned();
+        if matching.is_none() {
+            render_cache.invalidate(line.doc_index);
+        }
+        matching
+    };
+    LineCacheLookup { layout_hash, protected_ranges, cached }
+}
+
+#[derive(Clone, Copy)]
+pub struct SourceLayoutOptions<'a> {
+    pub metrics: &'a ui::settings::UiMetrics,
+    pub text_spacing_mode: TextSpacingMode,
+    pub render_context: &'a RenderContext<'a>,
+    pub word_wrap: bool,
+}
+
+pub struct ShapedVisibleLines {
+    pub vertices: Vec<GlyphVertex>,
+    pub tree_dirty: bool,
+}
+
+#[derive(Clone, Copy)]
+struct LinePlacement {
+    doc_index: usize,
+    screen_row: usize,
+    skipped_rows: usize,
+    sub_line_offset: f32,
+    active: bool,
+}
+
+struct CachedLineEmission {
+    relative_skip: usize,
+    rows_advanced: usize,
+}
+
+fn emit_cached_line_and_gutter_vertices(
+    cached: &CachedLine,
+    placement: LinePlacement,
+    options: SourceLayoutOptions<'_>,
+    rows_needed: usize,
+    text: &mut TextState,
+    gpu: &GpuState,
+    vertices: &mut Vec<GlyphVertex>,
+) -> Option<CachedLineEmission> {
+    let is_full_line =
+        cached.subset_start == 0 && cached.visual_lines.len() == cached.visual_line_count as usize;
+    let usable_subset =
+        placement.skipped_rows == cached.subset_start && cached.visual_lines.len() >= rows_needed;
+    if !is_full_line && !usable_subset {
+        return None;
+    }
+
+    let metrics = options.metrics;
+    let ctx = options.render_context;
+    let relative_skip = placement.skipped_rows.saturating_sub(cached.subset_start);
+    for row in relative_skip..cached.visual_lines.len() {
+        let line_y = (placement.screen_row + row - relative_skip) as f32 * metrics.line_height
+            + placement.sub_line_offset;
+        vertices.extend(cached.emit_vertices_for_visual_line(
+            row,
+            line_y,
+            metrics.line_height,
+            ctx.tab_bar_height,
+            ctx.screen_w,
+            ctx.screen_h,
+            ctx.theme.editor.foreground,
+            ctx.theme,
+            None,
+        ));
+        if row == 0 && ctx.gutter_width > 0.0 && placement.skipped_rows == 0 {
+            emit_gutter_line_number(
+                metrics,
+                ctx,
+                text,
+                gpu,
+                GutterLine {
+                    doc_index: placement.doc_index,
+                    top: line_y,
+                    active: placement.active,
+                },
+                vertices,
+            );
+        }
+    }
+    let scope = ShapedLineScope::from_subset_flag(!is_full_line);
+    let rows_advanced = cached_line_rows_to_advance(
+        scope,
+        cached.visual_line_count,
+        cached.visual_lines.len(),
+        placement.skipped_rows,
+        relative_skip,
+    );
+    Some(CachedLineEmission { relative_skip, rows_advanced })
+}
+
+fn update_cursor_from_cached_line(
+    document: &mut DocumentModel,
+    cursor: &mut CursorRenderState,
+    cached: &CachedLine,
+    placement: LinePlacement,
+    relative_skip: usize,
+    left_margin: f32,
+) {
+    let cursor_col = document.cursor_column();
+    let bounds = cached
+        .visual_lines
+        .iter()
+        .map(|&(start, end, _)| {
+            let first_byte = cached.cluster_data.get(start).map_or(usize::MAX, |cluster| cluster.0);
+            let last_byte = end
+                .checked_sub(1)
+                .and_then(|last| cached.cluster_data.get(last))
+                .map_or(usize::MAX, |cluster| cluster.1);
+            (first_byte, last_byte)
+        })
+        .collect::<Vec<_>>();
+    let cursor_row = find_visual_line_index(&bounds, cursor_col);
+    let full_row = cursor_row + cached.subset_start;
+    cursor.cursor_visual_line_in_doc = full_row;
+    cursor.cursor_visual_line =
+        Some((placement.screen_row + full_row).saturating_sub(placement.skipped_rows));
+    if cursor_row < relative_skip {
+        return;
+    }
+
+    if let Some(&(start, end, _)) = cached.visual_lines.get(cursor_row) {
+        let cluster_end =
+            cached.cluster_data.get(end.saturating_sub(1)).map_or(0, |cluster| cluster.1);
+        if let Some(cursor_x) = compute_cursor_pixel_x_cached(
+            &cached.cluster_data,
+            start,
+            end,
+            cursor_col,
+            cluster_end,
+            left_margin,
+        ) {
+            cursor.cursor_pixel_x = cursor_x;
+        }
+    }
+    if cursor.sticky_x_dirty
+        && document.cursor().offset.to_usize()
+            >= document.line_byte_offset(placement.doc_index).unwrap_or(0)
+    {
+        cursor.sticky_x = cursor.cursor_pixel_x;
+        cursor.sticky_x_dirty = false;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ShapedLineView<'a> {
+    shaped: &'a shaping::ShapedRun,
+    visual_lines: &'a [(usize, usize, f32)],
+    bytes: &'a [u8],
+    highlights: &'a [(usize, HighlightKind)],
+    char_width: f32,
+}
+
+struct FreshLineEmission<'a> {
+    line: ShapedLineView<'a>,
+    placement: LinePlacement,
+    show_line_number: bool,
+    preedit_on_cursor_line: bool,
+}
+
+fn emit_line_and_gutter_vertices(
+    emission: FreshLineEmission<'_>,
+    options: SourceLayoutOptions<'_>,
+    text: &mut TextState,
+    gpu: &GpuState,
+    all_vertices: &mut Vec<GlyphVertex>,
+) {
+    let placement = emission.placement;
+    let ctx = options.render_context;
+    let metrics = options.metrics;
+    let skip_visual_local = placement.skipped_rows;
+    let ShapedLineView {
+        shaped,
+        visual_lines,
+        bytes: line_bytes,
+        highlights: highlight_spans,
+        char_width,
+    } = emission.line;
+    if emission.show_line_number && ctx.gutter_width > 0.0 {
+        emit_gutter_line_number(
+            metrics,
+            ctx,
+            text,
+            gpu,
+            GutterLine {
+                doc_index: placement.doc_index,
+                top: placement.screen_row as f32 * metrics.line_height + placement.sub_line_offset,
+                active: placement.active,
+            },
+            all_vertices,
+        );
+    }
+
+    for (vl_idx, &(vl_start, vl_end, _vl_width)) in visual_lines.iter().enumerate() {
+        if vl_idx < skip_visual_local {
+            continue;
+        }
+        let line_y = (placement.screen_row + vl_idx - skip_visual_local) as f32
+            * metrics.line_height
+            + placement.sub_line_offset;
+        let y_base =
+            line_y + metrics.line_height * ui::constants::BASELINE_RATIO + ctx.tab_bar_height;
+
+        let mut x_cursor = ctx.left_margin;
+
+        for cluster in &shaped.clusters[vl_start..vl_end] {
+            let glyph_id = cluster.glyph_id as u16;
+            let font_id = cluster.font_id;
+            let font_size = text.shaper.font_size();
+
+            let cluster_bytes = &line_bytes[cluster.byte_range.clone()];
+            let (is_ws, advance) =
+                precise_cluster_advance(cluster_bytes, cluster.advance, char_width);
+            if is_ws {
+                x_cursor += advance;
+                continue;
+            }
+
+            // Apply composition displacement before choosing the raster phase and pixel origin.
+            let preedit_shift = if emission.preedit_on_cursor_line
+                && cluster.byte_range.start >= ctx.preedit_cursor_col
+            {
+                ctx.preedit_advance_px
+            } else {
+                0.0
+            };
+            let (int_x, phase) = crate::text_rasterize::glyph_position(
+                &mut text.shaper,
+                font_id,
+                x_cursor + cluster.x_offset + preedit_shift,
+            );
+            let Some(slot) = crate::text_rasterize::resolve_glyph(
+                font_id,
+                glyph_id,
+                font_size,
+                phase,
+                &mut text.shaper,
+                &mut text.atlas,
+                &text.atlas_texture,
+                &gpu.ctx.queue,
+            ) else {
+                x_cursor += advance;
+                continue;
+            };
+
+            // Look up highlight color for this cluster's byte range.
+            let color = if highlight_spans.is_empty() {
+                ctx.theme.editor.foreground
+            } else {
+                highlight_color_for_offset(highlight_spans, cluster.byte_range.start, ctx.theme)
+            };
+
+            let verts = GlyphRenderer::generate_vertices(
+                &[(slot, int_x, y_base)],
+                ATLAS_SIZE,
+                ATLAS_SIZE,
+                ctx.screen_w,
+                ctx.screen_h,
+                color,
+            );
+            all_vertices.extend(verts);
+            x_cursor += advance;
+        }
+    }
+}
+
+struct CacheLineCommit {
+    doc_index: usize,
+    doc_offset: usize,
+    layout_hash: u64,
+    atlas_generation: u64,
+    scope: ShapedLineScope,
+    metadata: RenderCacheMetadata,
+}
+
+fn cache_shaped_line(
+    line: ShapedLineView<'_>,
+    commit: CacheLineCommit,
+    presentation: &mut DocumentPresentation,
+    text: &mut TextState,
+    ctx: &RenderContext<'_>,
+) -> bool {
+    let ShapedLineView {
+        shaped,
+        visual_lines,
+        bytes: line_bytes,
+        highlights: highlight_spans,
+        char_width,
+    } = line;
+    let CacheLineCommit {
+        doc_index: cache_doc_line,
+        layout_hash: content_hash,
+        atlas_generation,
+        scope: shaped_line_scope,
+        metadata: cache_metadata,
+        ..
+    } = commit;
+    let mut all_instances: Vec<GlyphInstance> = Vec::new();
+    let mut vl_instance_starts: Vec<usize> = Vec::new();
+
+    for &(vl_start, vl_end, _vl_width) in visual_lines.iter() {
+        vl_instance_starts.push(all_instances.len());
+        let mut x_c = ctx.left_margin;
+
+        for cluster in &shaped.clusters[vl_start..vl_end] {
+            let c_font_id = cluster.font_id;
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            c_font_id.hash(&mut h);
+            let c_fid = h.finish() as usize;
+            let c_fs = text.shaper.font_size();
+
+            let (c_ws, c_adv) = precise_cluster_advance(
+                &line_bytes[cluster.byte_range.clone()],
+                cluster.advance,
+                char_width,
+            );
+
+            if c_ws {
+                x_c += c_adv;
+                continue;
+            }
+
+            let (int_x, phase) = crate::text_rasterize::glyph_position(
+                &mut text.shaper,
+                c_font_id,
+                x_c + cluster.x_offset,
+            );
+            let c_key = GlyphKey {
+                glyph_id: cluster.glyph_id,
+                font_id: c_fid,
+                font_size: (c_fs * 64.0) as u32,
+                subpixel_phase: phase,
+            };
+
+            if let Some(c_slot) = text.atlas.get(&c_key) {
+                let aw = ATLAS_SIZE as f32;
+                let ah = ATLAS_SIZE as f32;
+                all_instances.push(GlyphInstance {
+                    x: int_x,
+                    y: 0.0,
+                    bearing_x: c_slot.bearing_x,
+                    bearing_y: c_slot.bearing_y,
+                    width: c_slot.width as f32,
+                    height: c_slot.height as f32,
+                    uv: [
+                        c_slot.x as f32 / aw,
+                        c_slot.y as f32 / ah,
+                        (c_slot.x + c_slot.width) as f32 / aw,
+                        (c_slot.y + c_slot.height) as f32 / ah,
+                    ],
+                    atlas_page: c_slot.page,
+                    highlight_kind: if highlight_spans.is_empty() {
+                        0
+                    } else {
+                        // Highlight spans: [(start0, kind0), (start1, kind1), ..., sentinel]
+                        // A cluster belongs to the last span whose start <= byte_start.
+                        highlight_spans
+                            .iter()
+                            .rev()
+                            .find(|(start, _)| *start <= cluster.byte_range.start)
+                            .map(|(_, kind)| *kind as u8)
+                            .unwrap_or(0)
+                    },
+                });
+            }
+            x_c += c_adv;
+        }
+    }
+
+    let cluster_data: Vec<_> = shaped
+        .clusters
+        .iter()
+        .map(|c| {
+            let (_is_ws, adv) =
+                precise_cluster_advance(&line_bytes[c.byte_range.clone()], c.advance, char_width);
+            (c.byte_range.start, c.byte_range.end, adv)
+        })
+        .collect();
+
+    let mut tree_dirty = false;
+    if shaped_line_scope == ShapedLineScope::FullLine {
+        let breaks: smallvec::SmallVec<[crate::snap_tree::VisualBreak; 1]> = visual_lines
+            .iter()
+            .map(|&(start, end, width)| {
+                let byte_start =
+                    shaped.clusters.get(start).map(|c| c.byte_range.start as u32).unwrap_or(0);
+                let byte_end_val = shaped
+                    .clusters
+                    .get(end.saturating_sub(1))
+                    .map(|c| c.byte_range.end as u32)
+                    .unwrap_or(0);
+                crate::snap_tree::VisualBreak {
+                    byte_start,
+                    byte_end: byte_end_val,
+                    pixel_width: width,
+                }
+            })
+            .collect();
+        let entry = crate::snap_tree::DisplayLineEntry {
+            visual_line_count: cache_metadata.visual_line_count,
+            visual_breaks: breaks,
+            byte_offset: commit.doc_offset,
+            byte_length: line_bytes.len() as u32,
+            content_hash,
+        };
+        let old_vl_count = presentation
+            .display
+            .display_map
+            .get_entry(cache_doc_line)
+            .map(|e| e.visual_line_count)
+            .unwrap_or(1);
+        presentation.display.display_map.update_entry_in_place(cache_doc_line, entry);
+        if old_vl_count != cache_metadata.visual_line_count {
+            tree_dirty = true;
+        }
+    }
+
+    presentation.display.render_cache.insert(
+        cache_doc_line,
+        CachedLine {
+            instances: all_instances,
+            line_number_glyphs: vec![],
+            atlas_generation,
+            visual_line_count: cache_metadata.visual_line_count,
+            content_hash,
+            visual_lines: visual_lines.to_vec(),
+            visual_line_instance_starts: vl_instance_starts,
+            cluster_data,
+            subset_start: cache_metadata.subset_start,
+        },
+    );
+    tree_dirty
+}
+
+fn update_frame_edge_lines(
+    line: ShapedLineView<'_>,
+    first_line_offset: Option<usize>,
+    first_line: &mut LineCache,
+    last_line: &mut LineCache,
+) {
+    last_line.visual_lines.clear();
+    last_line.visual_lines.extend_from_slice(line.visual_lines);
+    last_line.clusters.clear();
+    last_line.clusters.extend(line.shaped.clusters.iter().map(|cluster| {
+        let (_, advance) = line
+            .bytes
+            .get(cluster.byte_range.clone())
+            .map(|bytes| precise_cluster_advance(bytes, cluster.advance, line.char_width))
+            .unwrap_or((false, cluster.advance.max(0.0)));
+        (cluster.byte_range.start, cluster.byte_range.end, advance)
+    }));
+    if let Some(doc_offset) = first_line_offset {
+        first_line.visual_lines.clone_from(&last_line.visual_lines);
+        first_line.clusters.clone_from(&last_line.clusters);
+        first_line.doc_offset = doc_offset;
+    }
+}
+
+fn update_cursor_from_shaped_line(
+    document: &mut DocumentModel,
+    cursor: &mut CursorRenderState,
+    line: ShapedLineView<'_>,
+    placement: LinePlacement,
+    is_cursor_doc_line: bool,
+    scope: ShapedLineScope,
+    left_margin: f32,
+) {
+    let cursor_col = document.cursor_column();
+    let bounds = line
+        .visual_lines
+        .iter()
+        .map(|&(start, end, _)| {
+            (
+                line.shaped.clusters[start].byte_range.start,
+                line.shaped.clusters[end - 1].byte_range.end,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut cursor_row = find_visual_line_index(&bounds, cursor_col);
+
+    // After End, a cursor at a shared boundary stays on the previous visual row.
+    if document.cursor().last_command_was_end
+        && cursor_row > 0
+        && cursor_col == bounds[cursor_row - 1].1
+    {
+        cursor_row -= 1;
+    }
+    if cursor_row >= placement.skipped_rows {
+        if is_cursor_doc_line {
+            let doc_row = match scope {
+                ShapedLineScope::FullLine => cursor_row,
+                ShapedLineScope::VisualSubset => cursor_row + placement.skipped_rows,
+            };
+            cursor.cursor_visual_line_in_doc = doc_row;
+            cursor.cursor_visual_line =
+                Some((placement.screen_row + doc_row).saturating_sub(placement.skipped_rows));
+        }
+        if let Some(cursor_x) = shaped_cursor_x(line, cursor_row, cursor_col, left_margin) {
+            cursor.cursor_pixel_x = cursor_x;
+        }
+    }
+    if is_cursor_doc_line && cursor.sticky_x_dirty {
+        cursor.sticky_x = cursor.cursor_pixel_x;
+        cursor.sticky_x_dirty = false;
+    }
+}
+
+fn shaped_cursor_x(
+    line: ShapedLineView<'_>,
+    row: usize,
+    byte_column: usize,
+    left_margin: f32,
+) -> Option<f32> {
+    let &(start, end, _) = line.visual_lines.get(row)?;
+    let first_byte = line.shaped.clusters[start].byte_range.start;
+    let mut cluster_positions: smallvec::SmallVec<[(usize, f32, u32); 64]> =
+        smallvec::SmallVec::new();
+    let mut x = left_margin;
+    for cluster in &line.shaped.clusters[start..end] {
+        let (_, advance) = precise_cluster_advance(
+            &line.bytes[cluster.byte_range.clone()],
+            cluster.advance,
+            line.char_width,
+        );
+        x += advance;
+        cluster_positions.push((cluster.byte_range.end - first_byte, x, 0));
+    }
+    Some(ui::render_geom::byte_to_x(
+        byte_column.saturating_sub(first_byte),
+        &cluster_positions,
+        left_margin,
+        false,
+    ))
+}
+
 pub fn shape_visible_lines(
-    metrics: &ui::settings::UiMetrics,
-    text_spacing_mode: TextSpacingMode,
-    _semantic_version: u64,
-    ctx: &ui::gutter::RenderContext,
-    dv: &mut DocumentModel,
+    options: SourceLayoutOptions<'_>,
+    document: &mut DocumentModel,
     presentation: &mut DocumentPresentation,
     text: &mut TextState,
     gpu: &GpuState,
-    cluster_pool: &mut Vec<Vec<(usize, f32, u32)>>,
-    first_line: &mut LineCache,
-    last_line: &mut LineCache,
-    tree_dirty: &mut bool,
-    word_wrap: bool,
-) -> Vec<GlyphVertex> {
-    let atlas_generation = text.atlas_generation();
-    presentation.display.render_cache.invalidate_stale_atlas(atlas_generation);
-
-    let _perf_t0 = std::time::Instant::now();
-    let mut _perf_cache_hits = 0usize;
-    let mut _perf_cache_misses = 0usize;
-    let mut _perf_hl_time_us = 0u128;
-    let mut _perf_shape_time_us = 0u128;
-    let mut _perf_vertex_time_us = 0u128;
-
-    // Notify WrapIndex of viewport width for dirty tracking
-    presentation.display.display_map.set_viewport_size(
-        render_viewport_width(ctx.screen_w, ctx.left_margin, metrics, word_wrap),
-        metrics.font_size,
-    );
-
-    let lh = metrics.line_height;
-    let viewport_state = compute_render_viewport_state_from_presentation(dv, presentation, lh);
-    let skip_visual = viewport_state.skip_visual;
-    let sub_line_offset = viewport_state.sub_line_offset;
-
-    // Drain cluster Vecs into pool for reuse, then clear advance cache
-    for entry in presentation.display.advance_cache.drain(..) {
-        if !entry.clusters.is_empty() {
-            cluster_pool.push(entry.clusters);
-        }
-    }
-
-    let mut all_vertices = Vec::new();
-    let mut visual_line_counter: usize = 0;
-    let mut tree_dirty_local = false;
-
-    // Start doc line from anchor — while loop renders until viewport is full,
-    // not limited by a pre-computed range based on placeholder VL estimates.
-    let total_lines = dv.line_count();
-    let start_doc = viewport_state.start_doc;
-
-    let cursor_doc_line_pre = dv.cursor_line_cached();
-    if cursor_doc_line_pre < start_doc {
-        presentation.cursor_render_state.cursor_visual_line = None;
-    }
-
-    let vp_height = viewport_state.viewport_visual_rows;
-
-    // Cursor line relative index — bound generously so the break guard still
-    // fires when cursor is far below the viewport (avoids wasted iterations).
-    let cursor_rel_line = if cursor_doc_line_pre >= start_doc
-        && cursor_doc_line_pre.saturating_sub(start_doc) < vp_height * 4
-    {
-        Some(cursor_doc_line_pre - start_doc)
-    } else {
-        None
-    };
-
-    let mut _wi_key_us = 0u128;
-    let _perf_setup_us = _perf_t0.elapsed().as_micros();
-    let mut _perf_hit_block_us = 0u128;
-    let mut _perf_empty_us = 0u128;
-    // Iterate from start_doc to end of doc, break when viewport fills.
-    // Bound is the entire remaining doc (not a pre-computed range based on
-    // placeholder VL estimates) so that the loop never starves before the
-    // viewport is full.
-    let bound = total_lines.saturating_sub(start_doc);
-    let source_uses_verbatim_spacing = document_uses_verbatim_source_spacing(dv);
-    let source_semantic_version = presentation.source_spacing.semantic_version;
-    for i in 0..bound {
-        let doc_idx = start_doc + i;
-        let is_active_line = {
-            let mut active = false;
-            let line_offset = dv.line_byte_offset(doc_idx).unwrap_or(0);
-            let line_len = dv.line_byte_length(doc_idx).unwrap_or(0);
-            let line_end = line_offset + line_len;
-
-            if dv.cursor().offset.to_usize() >= line_offset
-                && dv.cursor().offset.to_usize() <= line_end
-            {
-                active = true;
-            }
-            if let Some(anchor) = dv.cursor().selection_anchor {
-                let sel_start = anchor.min(dv.cursor().offset.to_usize());
-                let sel_end = anchor.max(dv.cursor().offset.to_usize());
-                if line_offset <= sel_end && line_end >= sel_start {
-                    active = true;
-                }
-            }
-            active
-        };
-        let (_offset, length) = if doc_idx < total_lines {
-            (dv.line_byte_offset(doc_idx), dv.line_byte_length(doc_idx))
-        } else {
-            (None, None)
-        };
-        let length = if let Some(l) = length {
-            l
-        } else {
-            // Line out of range — render placeholder to avoid ghost gaps.
-            let doc_line_idx = doc_idx;
-            let sub_line_offset = sub_line_offset;
-            if ctx.gutter_width > 0.0 && (i > 0 || skip_visual == 0) {
-                render_line_number_placeholder(
-                    metrics,
-                    ctx,
-                    text,
-                    gpu,
-                    is_active_line,
-                    doc_line_idx,
-                    visual_line_counter,
-                    &mut all_vertices,
-                    sub_line_offset,
-                );
-            }
-            presentation.display.advance_cache.push(AdvanceCacheEntry {
-                doc_line: doc_line_idx,
-                vl_byte_start: 0,
-                vl_grapheme_start: 0,
-                clusters: Vec::new(),
-            });
-            visual_line_counter += 1;
-            let cursor_line_done = cursor_rel_line.is_none() || i >= cursor_rel_line.unwrap();
-            if visual_line_counter >= vp_height && cursor_line_done {
-                break;
-            }
-            continue;
-        };
-        // Fetch line bytes early for unified empty-line detection
-        let doc_line_idx = doc_idx;
-        let line_bytes_early = dv.doc_line_bytes(doc_line_idx).map(|c| c.into_owned());
-
-        // Unified empty-line check: covers length==0, bytes-empty, and edge cases
-        let is_empty = length == 0 || line_bytes_early.as_ref().is_none_or(|b| b.is_empty());
-
-        if is_empty {
-            let _empty_t0 = std::time::Instant::now();
-            let doc_offset = dv.line_byte_offset(doc_line_idx).unwrap_or(0);
-            if cursor_doc_line_pre == doc_line_idx {
-                presentation.cursor_render_state.cursor_visual_line = Some(visual_line_counter);
-                presentation.cursor_render_state.cursor_visual_line_in_doc = 0;
-            }
-            if dv.cursor().offset.to_usize() == doc_offset {
-                presentation.cursor_render_state.cursor_pixel_x = ctx.left_margin;
-                if presentation.cursor_render_state.sticky_x_dirty {
-                    presentation.cursor_render_state.sticky_x =
-                        presentation.cursor_render_state.cursor_pixel_x;
-                    presentation.cursor_render_state.sticky_x_dirty = false;
-                }
-            }
-            if ctx.gutter_width > 0.0 && (i > 0 || skip_visual == 0) {
-                render_line_number_placeholder(
-                    metrics,
-                    ctx,
-                    text,
-                    gpu,
-                    is_active_line,
-                    doc_line_idx,
-                    visual_line_counter,
-                    &mut all_vertices,
-                    sub_line_offset,
-                );
-            }
-            presentation.display.advance_cache.push(AdvanceCacheEntry {
-                doc_line: doc_line_idx,
-                vl_byte_start: 0,
-                vl_grapheme_start: 0,
-                clusters: Vec::new(),
-            });
-            visual_line_counter += 1;
-            _perf_empty_us += _empty_t0.elapsed().as_micros();
-            let cursor_line_done = cursor_rel_line.is_none() || i >= cursor_rel_line.unwrap();
-            if visual_line_counter >= vp_height && cursor_line_done {
-                break;
-            }
-            continue;
-        }
-
-        // ── Check RenderCache ──
-        // Validate caches against the actual line content as well as layout inputs.
-        let viewport_width =
-            render_viewport_width(ctx.screen_w, ctx.left_margin, metrics, word_wrap);
-        let line_offset = dv.line_byte_offset(doc_line_idx).unwrap_or(0);
-        let line_protected_ranges = protected_ranges_for_line(
-            &presentation.source_spacing.protected_ranges,
-            line_offset,
-            line_bytes_early.as_ref().map_or(0, Vec::len),
-        );
-        let current_content_hash = {
-            let line_bytes = line_bytes_early.as_deref().unwrap_or_default();
-            let line_spacing_mode =
-                spacing_mode_for_line(text_spacing_mode, source_uses_verbatim_spacing, line_bytes);
-            content_hash_for_layout(
-                line_bytes,
-                line_offset,
-                viewport_width,
-                metrics.font_size,
-                line_spacing_mode,
-                &line_protected_ranges,
-                source_semantic_version,
-                text.shaper.font_family().unwrap_or("sans-serif"),
-            )
-        };
-        // IME preedit: skip cache for cursor line (positions need shifting)
-        let preedit_on_cursor_line =
-            ctx.preedit_advance_px > 0.0 && doc_line_idx == cursor_doc_line_pre;
-        let cache_hit = if preedit_on_cursor_line {
-            None
-        } else {
-            presentation
-                .display
-                .render_cache
-                .get(doc_line_idx)
-                .filter(|c| {
-                    c.content_hash == current_content_hash
-                        && c.visual_lines.len() == c.visual_line_instance_starts.len()
-                })
-                .cloned()
-        };
-        // Evict stale entries (hash mismatch e.g. font size changed) so the
-        // populate path below can re-insert with the current shaping params.
-        if cache_hit.is_none() && !preedit_on_cursor_line {
-            presentation.display.render_cache.invalidate(doc_line_idx);
-        }
-        if let Some(cached) = cache_hit {
-            let skip_vl_c = if i == 0 { skip_visual } else { 0 };
-            let vl_needed_for_cache = vp_height.saturating_sub(visual_line_counter);
-
-            let is_full_line = cached.subset_start == 0
-                && cached.visual_lines.len() == cached.visual_line_count as usize;
-            let is_perfect_subset = skip_vl_c == cached.subset_start
-                && cached.visual_lines.len() >= vl_needed_for_cache;
-
-            if is_full_line || is_perfect_subset {
-                _perf_cache_hits += 1;
-                let _hit_block_t0 = std::time::Instant::now();
-                // Cache hit: emit vertices from GlyphInstances
-                let sub_line_offset_c = sub_line_offset;
-                let relative_skip = skip_vl_c.saturating_sub(cached.subset_start);
-
-                // IME preedit: compute cursor x threshold for cache-hit path
-                let preedit_cursor_vl_and_x: Option<(usize, f32)> = if ctx.preedit_advance_px > 0.0
-                    && doc_line_idx == cursor_doc_line_pre
-                {
-                    let cursor_col = dv.cursor_column();
-                    let bounds_c: Vec<(usize, usize)> = cached
-                        .visual_lines
-                        .iter()
-                        .map(|&(vs, ve, _)| {
-                            let bs =
-                                cached.cluster_data.get(vs).map(|cd| cd.0).unwrap_or(usize::MAX);
-                            let be = if ve > 0 {
-                                cached.cluster_data.get(ve - 1).map(|cd| cd.1).unwrap_or(usize::MAX)
-                            } else {
-                                usize::MAX
-                            };
-                            (bs, be)
-                        })
-                        .collect();
-                    let cvl = find_visual_line_index(&bounds_c, cursor_col);
-                    let (cs, ce, _) = cached.visual_lines[cvl];
-                    let cluster_end =
-                        cached.cluster_data.get(ce.saturating_sub(1)).map(|cd| cd.1).unwrap_or(0);
-                    let cx = compute_cursor_pixel_x_cached(
-                        &cached.cluster_data,
-                        cs,
-                        ce,
-                        cursor_col,
-                        cluster_end,
-                        ctx.left_margin,
-                    )
-                    .unwrap_or(ctx.left_margin);
-                    Some((cvl, cx))
-                } else {
-                    None
-                };
-
-                for vl_idx in 0..cached.visual_lines.len() {
-                    if vl_idx < relative_skip {
-                        continue;
-                    }
-                    let line_y_c = (visual_line_counter + vl_idx - relative_skip) as f32
-                        * metrics.line_height
-                        + sub_line_offset_c;
-                    // IME preedit: determine shift for this visual line
-                    let preedit_shift = preedit_cursor_vl_and_x.and_then(|(cvl, cx)| {
-                        if vl_idx == cvl {
-                            // Cursor's visual line: shift instances at/after cursor x
-                            Some((cx, ctx.preedit_advance_px))
-                        } else if vl_idx > cvl {
-                            // Visual lines after cursor: shift all instances
-                            Some((0.0, ctx.preedit_advance_px))
-                        } else {
-                            None
-                        }
-                    });
-                    let verts = cached.emit_vertices_for_visual_line(
-                        vl_idx,
-                        line_y_c,
-                        metrics.line_height,
-                        ctx.tab_bar_height,
-                        ctx.screen_w,
-                        ctx.screen_h,
-                        ctx.theme.editor.foreground,
-                        ctx.theme,
-                        preedit_shift,
-                    );
-                    all_vertices.extend(verts);
-
-                    // Line number for first VL
-                    if vl_idx == 0 && ctx.gutter_width > 0.0 && skip_vl_c == 0 {
-                        let _line_num_buf = format_line_num(doc_line_idx + 1);
-                        let line_num_str = line_num_str(&_line_num_buf);
-                        if let Ok(line_num_shaped) = text.shaper.shape(line_num_str) {
-                            let ln_font_size =
-                                text.shaper.font_size() * ui::constants::LN_FONT_SCALE;
-                            let ln_verts = generate_line_number_vertices(
-                                ctx,
-                                &line_num_shaped,
-                                &mut text.atlas,
-                                &text.atlas_texture,
-                                &gpu.ctx.queue,
-                                &mut text.shaper,
-                                ln_font_size,
-                                line_y_c,
-                                is_active_line,
-                                metrics.gutter_padding,
-                                metrics.line_height,
-                            );
-                            all_vertices.extend(ln_verts);
-                        }
-                    }
-                }
-                presentation.display.advance_cache.extend(build_cached_advance_cache_entries(
-                    &cached,
-                    doc_line_idx,
-                    relative_skip,
-                    ctx.left_margin,
-                ));
-
-                // Compute cursor position from cached data (cache-hit frames, no shaping needed)
-                {
-                    let cursor_doc_line = dv.cursor_line_cached();
-                    if cursor_doc_line >= start_doc
-                        && cursor_doc_line.saturating_sub(start_doc) < vp_height * 4
-                    {
-                        let cursor_vis_line = cursor_doc_line - start_doc;
-                        if cursor_vis_line == i {
-                            let cursor_col = dv.cursor_column();
-                            // Find which visual line the cursor is on using cached data.
-                            // Uses find_visual_line_index to unify boundary-handling with
-                            // the non-cache path — non-last lines use "offset < end"
-                            // (boundary belongs to the right/target line), preventing
-                            // soft-wrap clicks from landing one visual line too high.
-                            let bounds: Vec<(usize, usize)> = cached
-                                .visual_lines
-                                .iter()
-                                .map(|&(vl_start, vl_end, _)| {
-                                    let byte_start = cached
-                                        .cluster_data
-                                        .get(vl_start)
-                                        .map(|cd| cd.0)
-                                        .unwrap_or(usize::MAX);
-                                    let byte_end = if vl_end > 0 {
-                                        cached
-                                            .cluster_data
-                                            .get(vl_end - 1)
-                                            .map(|cd| cd.1)
-                                            .unwrap_or(usize::MAX)
-                                    } else {
-                                        usize::MAX
-                                    };
-                                    (byte_start, byte_end)
-                                })
-                                .collect();
-                            let cursor_vl_in_doc = find_visual_line_index(&bounds, cursor_col);
-                            let cursor_vl_in_doc_all = cursor_vl_in_doc + cached.subset_start;
-                            if doc_line_idx == cursor_doc_line {
-                                // Prefer click_hint VL over find_visual_line_index to avoid
-                                // boundary ambiguity (byte=5 can be VL0-end or VL1-start).
-                                let hint_matches = presentation
-                                    .cursor_render_state
-                                    .click_hint
-                                    .is_some_and(|(ho, _hv)| {
-                                        ho == dv
-                                            .byte_to_grapheme_offset(dv.cursor().offset.to_usize())
-                                    });
-                                if hint_matches {
-                                    // click_hint resolves VL-in-doc boundary ambiguity;
-                                    // cursor_visual_line (Y) computed from render-loop state.
-                                    presentation.cursor_render_state.cursor_visual_line_in_doc =
-                                        cursor_vl_in_doc_all;
-                                    presentation.cursor_render_state.cursor_visual_line = Some(
-                                        (visual_line_counter + cursor_vl_in_doc_all)
-                                            .saturating_sub(skip_vl_c),
-                                    );
-                                } else {
-                                    presentation.cursor_render_state.cursor_visual_line = Some(
-                                        (visual_line_counter + cursor_vl_in_doc_all)
-                                            .saturating_sub(skip_vl_c),
-                                    );
-                                    presentation.cursor_render_state.cursor_visual_line_in_doc =
-                                        cursor_vl_in_doc_all;
-                                }
-                            }
-                            if relative_skip > 0 && cursor_vl_in_doc < relative_skip {
-                            } else {
-                                let vli = cursor_vl_in_doc;
-                                if vli < cached.visual_lines.len() {
-                                    let (cvl_start, cvl_end, _) = cached.visual_lines[vli];
-                                    let cluster_end = cached
-                                        .cluster_data
-                                        .get(cvl_end.saturating_sub(1))
-                                        .map(|cd| cd.1)
-                                        .unwrap_or(0);
-                                    if let Some(px) = compute_cursor_pixel_x_cached(
-                                        &cached.cluster_data,
-                                        cvl_start,
-                                        cvl_end,
-                                        cursor_col,
-                                        cluster_end,
-                                        ctx.left_margin,
-                                    ) {
-                                        presentation.cursor_render_state.cursor_pixel_x = px;
-                                    }
-                                }
-                                if dv.cursor().offset.to_usize()
-                                    >= dv.line_byte_offset(doc_line_idx).unwrap_or(0)
-                                    && presentation.cursor_render_state.sticky_x_dirty
-                                {
-                                    presentation.cursor_render_state.sticky_x =
-                                        presentation.cursor_render_state.cursor_pixel_x;
-                                    presentation.cursor_render_state.sticky_x_dirty = false;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let cached_scope = if cached.visual_lines.len() == cached.visual_line_count as usize
-                    && cached.subset_start == 0
-                {
-                    ShapedLineScope::FullLine
-                } else {
-                    ShapedLineScope::VisualSubset
-                };
-                visual_line_counter += cached_line_rows_to_advance(
-                    cached_scope,
-                    cached.visual_line_count,
-                    cached.visual_lines.len(),
-                    skip_vl_c,
-                    relative_skip,
-                );
-                _perf_hit_block_us += _hit_block_t0.elapsed().as_micros();
-                let cl_done = cursor_rel_line.is_none() || i >= cursor_rel_line.unwrap();
-                if visual_line_counter >= vp_height && cl_done {
-                    break;
-                }
-                continue;
-            }
-        }
-        // ── End RenderCache check ──
-
-        // Use pre-fetched line_bytes from unified empty-line check above
-        let line_bytes = line_bytes_early.expect("checked non-empty above");
-
-        // Cache key: (offset, length, font_size_bits) — collision-free
-        let _font_size_bits = text.shaper.font_size().to_bits();
-        // Check cache first; shape only on miss.
-
-        let doc_line_idx_miss = doc_idx;
-        let line_len = dv.line_byte_length(doc_line_idx_miss).unwrap_or(0);
-        let max_sync_bytes = 4000; // Synchronous shape threshold
-
-        let map_stats = presentation
-            .display
-            .display_map
-            .get_entry(doc_line_idx_miss)
-            .map(|entry| ShapeMissMapStats::from_entry(entry, current_content_hash));
-        let is_placeholder = map_stats.map(|stats| stats.is_placeholder).unwrap_or(true);
-
-        if is_placeholder && line_len > max_sync_bytes {
-            // Line is too long for sync shape and hasn't been shaped yet. Yield to async background shaping.
-            let vl_count = presentation
-                .display
-                .display_map
-                .get_entry(doc_line_idx_miss)
-                .map(|e| e.visual_line_count)
-                .unwrap_or(1) as usize;
-            // Render line number at minimum, so placeholder lines don't appear as ghosts.
-            // Text content will appear once async shaping (submit_reshape_ahead) completes.
-            if ctx.gutter_width > 0.0 && (i > 0 || skip_visual == 0) {
-                let _line_num_buf = format_line_num(doc_line_idx_miss + 1);
-                let line_num_str = line_num_str(&_line_num_buf);
-                if let Ok(line_num_shaped) = text.shaper.shape(line_num_str) {
-                    let sub_line_offset = sub_line_offset;
-                    let ln_y = (visual_line_counter) as f32 * metrics.line_height + sub_line_offset;
-                    let ln_font_size = text.shaper.font_size() * ui::constants::LN_FONT_SCALE;
-                    let ln_verts = generate_line_number_vertices(
-                        ctx,
-                        &line_num_shaped,
-                        &mut text.atlas,
-                        &text.atlas_texture,
-                        &gpu.ctx.queue,
-                        &mut text.shaper,
-                        ln_font_size,
-                        ln_y,
-                        is_active_line,
-                        metrics.gutter_padding,
-                        metrics.line_height,
-                    );
-                    all_vertices.extend(ln_verts);
-                }
-            }
-            visual_line_counter += vl_count;
-
-            // Advance cache placeholder so indices stay aligned
-            presentation.display.advance_cache.push(AdvanceCacheEntry {
-                doc_line: doc_line_idx_miss,
-                vl_byte_start: 0,
-                vl_grapheme_start: 0,
-                clusters: Vec::new(),
-            });
-
-            let cursor_line_done = cursor_rel_line.is_none() || i >= cursor_rel_line.unwrap();
-            if visual_line_counter >= vp_height && cursor_line_done {
-                break;
-            }
-            continue;
-        }
-
-        _perf_cache_misses += 1;
-
-        let _hl_t0 = std::time::Instant::now();
-        // --- Subset Shaping Optimization for Long Lines ---
-        let mut line_str_to_shape = std::str::from_utf8(&line_bytes).unwrap_or("");
-        let mut byte_offset_for_clusters = 0;
-        let mut shape_subset_only = false;
-        let mut visible_tree_breaks = None;
-        let mut doc_vl_count = 1;
-        let mut subset_start_visual_line = 0usize;
-        let mut subset_end_visual_line = 0usize;
-        let mut visible_visual_lines_needed = 0usize;
-        let mut cursor_visual_lines_needed = 0usize;
-
-        if !is_placeholder
-            && line_len > max_sync_bytes
-            && let Some(entry) = presentation.display.display_map.get_entry(doc_line_idx_miss)
-            && entry.content_hash == current_content_hash
-            && !entry.visual_breaks.is_empty()
+    frame_cache: &mut FrameCache,
+) -> ShapedVisibleLines {
+    let mut frame = SourceRenderFrame::new(options, document, presentation, text, gpu, frame_cache);
+    // Walk candidate document lines until their shaped rows fill the viewport.
+    for relative_line in 0..frame.viewport.candidate_lines {
+        let progress = frame.render_line(relative_line);
+        if progress == LineProgress::CheckViewport
+            && frame.viewport.is_filled_after(relative_line, frame.rendered_rows)
         {
-            let skip = if i == 0 { skip_visual } else { 0 };
-            let vl_needed = vp_height.saturating_sub(visual_line_counter);
-            visible_visual_lines_needed = vl_needed;
+            break;
+        }
+    }
+    frame.finish()
+}
 
-            let mut cursor_needed = 0;
-            if Some(i) == cursor_rel_line {
-                let cursor_offset = dv.cursor().offset.to_usize();
-                let current_line_offset =
-                    dv.line_byte_offset(doc_line_idx_miss).unwrap_or(entry.byte_offset);
-                if let Some(rel_offset) =
-                    cursor_relative_offset_for_line(cursor_offset, current_line_offset)
-                {
-                    let cursor_vl = entry
-                        .visual_breaks
-                        .partition_point(|b| b.byte_start <= rel_offset)
-                        .saturating_sub(1);
-                    if cursor_vl >= skip {
-                        cursor_needed = cursor_vl - skip + 1;
-                    }
-                }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineProgress {
+    CheckViewport,
+    KeepScanning,
+}
+
+struct SourceRenderFrame<'resources, 'options> {
+    document: &'resources mut DocumentModel,
+    presentation: &'resources mut DocumentPresentation,
+    text: &'resources mut TextState,
+    gpu: &'resources GpuState,
+    frame_cache: &'resources mut FrameCache,
+    options: SourceLayoutOptions<'options>,
+    viewport: RenderViewportState,
+    viewport_width: f32,
+    rendered_rows: usize,
+    vertices: Vec<GlyphVertex>,
+    atlas_generation: u64,
+    source_uses_verbatim_spacing: bool,
+    tree_dirty: bool,
+    timing: SourceShapeTiming,
+}
+
+impl<'resources, 'options> SourceRenderFrame<'resources, 'options> {
+    fn new(
+        options: SourceLayoutOptions<'options>,
+        document: &'resources mut DocumentModel,
+        presentation: &'resources mut DocumentPresentation,
+        text: &'resources mut TextState,
+        gpu: &'resources GpuState,
+        frame_cache: &'resources mut FrameCache,
+    ) -> Self {
+        let atlas_generation = text.atlas_generation();
+        presentation.display.render_cache.invalidate_stale_atlas(atlas_generation);
+        let mut timing = SourceShapeTiming::new();
+        let metrics = options.metrics;
+        let ctx = options.render_context;
+        let viewport_width =
+            render_viewport_width(ctx.screen_w, ctx.left_margin, metrics, options.word_wrap);
+        presentation.display.display_map.set_viewport_size(viewport_width, metrics.font_size);
+        let viewport = resolve_visible_line_range(
+            presentation,
+            metrics.line_height,
+            document.line_count(),
+            document.cursor_line_cached(),
+        );
+        for entry in presentation.display.advance_cache.drain(..) {
+            if !entry.clusters.is_empty() {
+                frame_cache.cluster_pool.push(entry.clusters);
             }
-            cursor_visual_lines_needed = cursor_needed;
+        }
+        if viewport.cursor_doc_line < viewport.start_doc {
+            presentation.cursor_render_state.cursor_visual_line = None;
+        }
+        timing.setup_us = timing.started_at.elapsed().as_micros();
+        let source_uses_verbatim_spacing = document_uses_verbatim_source_spacing(document);
+        Self {
+            document,
+            presentation,
+            text,
+            gpu,
+            frame_cache,
+            options,
+            viewport,
+            viewport_width,
+            rendered_rows: 0,
+            vertices: Vec::new(),
+            atlas_generation,
+            source_uses_verbatim_spacing,
+            tree_dirty: false,
+            timing,
+        }
+    }
 
-            let needed = vl_needed.max(cursor_needed);
-            let end_idx = (skip + needed + 1).min(entry.visual_breaks.len());
-            subset_start_visual_line = skip;
-            subset_end_visual_line = end_idx;
+    fn render_line(&mut self, relative_line: usize) -> LineProgress {
+        let doc_index = self.viewport.start_doc + relative_line;
+        let doc_offset = self.document.line_byte_offset(doc_index).unwrap_or(0);
+        let length = self.document.line_byte_length(doc_index);
+        let placement = LinePlacement {
+            doc_index,
+            screen_row: self.rendered_rows,
+            skipped_rows: if relative_line == 0 { self.viewport.skip_visual } else { 0 },
+            sub_line_offset: self.viewport.sub_line_offset,
+            active: line_contains_cursor_or_selection(
+                self.document,
+                doc_offset,
+                length.unwrap_or(0),
+            ),
+        };
+        let Some(length) = length else {
+            self.emit_placeholder(placement, 1);
+            return LineProgress::CheckViewport;
+        };
+        let bytes = self.document.doc_line_bytes(doc_index).map(|bytes| bytes.into_owned());
+        let Some(bytes) = bytes.filter(|bytes| length > 0 && !bytes.is_empty()) else {
+            let started_at = std::time::Instant::now();
+            self.update_empty_line_cursor(placement, doc_offset);
+            self.emit_placeholder(placement, 1);
+            self.timing.empty_us += started_at.elapsed().as_micros();
+            return LineProgress::CheckViewport;
+        };
 
-            if skip < end_idx {
-                let start_byte = entry.visual_breaks[skip].byte_start as usize;
-                let end_byte = entry.visual_breaks[end_idx - 1].byte_end as usize;
-
-                line_str_to_shape =
-                    std::str::from_utf8(&line_bytes[start_byte..end_byte]).unwrap_or("");
-                byte_offset_for_clusters = start_byte;
-                shape_subset_only = true;
-                visible_tree_breaks = Some(entry.visual_breaks[skip..end_idx].to_vec());
-            }
-            doc_vl_count = entry.visual_breaks.len();
+        let spacing = spacing_mode_for_line(
+            self.options.text_spacing_mode,
+            self.source_uses_verbatim_spacing,
+            &bytes,
+        );
+        let preedit_on_cursor_line = self.options.render_context.preedit_advance_px > 0.0
+            && self.viewport.cursor_doc_line == doc_index;
+        let LineCacheLookup { layout_hash, protected_ranges, cached } =
+            lookup_or_prepare_cached_line(
+                LineCacheInput {
+                    doc_index,
+                    doc_offset,
+                    bytes: &bytes,
+                    spacing,
+                    preedit_on_cursor_line,
+                },
+                self.presentation,
+                self.viewport_width,
+                self.options.metrics.font_size,
+                self.text.shaper.font_family().unwrap_or("sans-serif"),
+            );
+        if let Some(cached) = cached
+            && self.render_cached_line(&cached, placement, relative_line)
+        {
+            return LineProgress::CheckViewport;
         }
 
-        _perf_hl_time_us += _hl_t0.elapsed().as_micros();
-        let _shape_t0 = std::time::Instant::now();
+        self.render_uncached_line(UncachedLine {
+            placement,
+            relative_line,
+            doc_offset,
+            length,
+            bytes: &bytes,
+            spacing,
+            layout_hash,
+            protected_ranges: &protected_ranges,
+            preedit_on_cursor_line,
+        })
+    }
 
-        // Fetch highlight spans once; reuse for both bold/italic check and span building.
-        let hl_spans = highlights_for_line(dv, presentation, doc_line_idx_miss);
-        let has_bold_italic = hl_spans.iter().any(|h| {
+    fn render_cached_line(
+        &mut self,
+        cached: &CachedLine,
+        placement: LinePlacement,
+        relative_line: usize,
+    ) -> bool {
+        let started_at = std::time::Instant::now();
+        let rows_needed = self.viewport.viewport_visual_rows.saturating_sub(self.rendered_rows);
+        let Some(emission) = emit_cached_line_and_gutter_vertices(
+            cached,
+            placement,
+            self.options,
+            rows_needed,
+            self.text,
+            self.gpu,
+            &mut self.vertices,
+        ) else {
+            return false;
+        };
+        let left_margin = self.options.render_context.left_margin;
+        self.presentation.display.advance_cache.extend(build_cached_advance_cache_entries(
+            cached,
+            placement.doc_index,
+            emission.relative_skip,
+            left_margin,
+        ));
+        if self.viewport.cursor_relative_line == Some(relative_line) {
+            update_cursor_from_cached_line(
+                self.document,
+                &mut self.presentation.cursor_render_state,
+                cached,
+                placement,
+                emission.relative_skip,
+                left_margin,
+            );
+        }
+        self.timing.cache_hits += 1;
+        self.timing.hit_block_us += started_at.elapsed().as_micros();
+        self.rendered_rows += emission.rows_advanced;
+        true
+    }
+
+    fn render_uncached_line(&mut self, line: UncachedLine<'_>) -> LineProgress {
+        let doc_index = line.placement.doc_index;
+        let map_entry = self.presentation.display.display_map.get_entry(doc_index);
+        let map_stats =
+            map_entry.map(|entry| ShapeMissMapStats::from_entry(entry, line.layout_hash));
+        let is_placeholder = map_stats.is_none_or(|stats| stats.is_placeholder);
+        if is_placeholder && line.length > MAX_SYNC_SHAPE_BYTES {
+            // Leave long, unresolved rows to background shaping.
+            let rows = map_entry.map_or(1, |entry| usize::from(entry.visual_line_count));
+            self.emit_placeholder(line.placement, rows);
+            return LineProgress::CheckViewport;
+        }
+
+        self.timing.cache_misses += 1;
+        let subset_started_at = std::time::Instant::now();
+        let subset_entry =
+            map_entry.filter(|_| !is_placeholder && line.length > MAX_SYNC_SHAPE_BYTES);
+        let cursor_offset = subset_entry.and_then(|entry| {
+            (self.viewport.cursor_relative_line == Some(line.relative_line))
+                .then(|| {
+                    cursor_relative_offset_for_line(
+                        self.document.cursor().offset.to_usize(),
+                        self.document.line_byte_offset(doc_index).unwrap_or(entry.byte_offset),
+                    )
+                })
+                .flatten()
+        });
+        let plan = LineShapePlan::resolve(
+            line.bytes,
+            subset_entry,
+            line.layout_hash,
+            line.placement.skipped_rows,
+            self.viewport.viewport_visual_rows.saturating_sub(self.rendered_rows),
+            cursor_offset,
+        );
+        self.timing.highlight_us += subset_started_at.elapsed().as_micros();
+        let shape_started_at = std::time::Instant::now();
+
+        let highlights = highlights_for_line(self.document, self.presentation, doc_index)
+            .iter()
+            .map(|highlight| (highlight.start, highlight.kind))
+            .collect::<Vec<_>>();
+        let has_font_overrides = highlights.iter().any(|&(_, kind)| {
             matches!(
-                h.kind,
+                kind,
                 HighlightKind::MarkupBold
                     | HighlightKind::MarkupItalic
                     | HighlightKind::MarkupHeading
             )
         });
-
-        let mut shaped = if has_bold_italic {
-            // Build per-span weight/style overrides from highlight spans.
-            // When shape_subset_only, adjust byte offsets to be relative to the substring.
-            let subset_start = byte_offset_for_clusters;
-            let subset_end = subset_start + line_str_to_shape.len();
-            let mut span_attrs: Vec<(usize, shaping::Weight, shaping::Style)> = Vec::new();
-            let mut last_end = 0usize;
-            for h in hl_spans.iter() {
-                // Skip highlights entirely outside the visible subset
-                if h.start >= subset_end {
-                    break;
-                }
-                // Clip highlights that start before the subset
-                let start = h.start.saturating_sub(subset_start);
-                if start >= line_str_to_shape.len() {
-                    continue;
-                }
-                // Fill gap with base weight/style
-                if start > last_end {
-                    span_attrs.push((
-                        last_end,
-                        text.shaper.font_weight(),
-                        text.shaper.font_style(),
-                    ));
-                }
-                let (w, s) = match h.kind {
-                    HighlightKind::MarkupBold => (shaping::Weight::BOLD, text.shaper.font_style()),
-                    HighlightKind::MarkupItalic => {
-                        (text.shaper.font_weight(), shaping::Style::Italic)
-                    }
-                    HighlightKind::MarkupHeading => {
-                        (shaping::Weight::BOLD, text.shaper.font_style())
-                    }
-                    _ => (text.shaper.font_weight(), text.shaper.font_style()),
-                };
-                span_attrs.push((start, w, s));
-                last_end = start;
-            }
-            // Fill trailing gap
-            if last_end < line_str_to_shape.len() {
-                span_attrs.push((last_end, text.shaper.font_weight(), text.shaper.font_style()));
-            }
-            // Deduplicate consecutive identical attrs
-            span_attrs.dedup_by(|a, b| a.1 == b.1 && a.2 == b.2);
-
-            match text.shaper.shape_with_highlights(line_str_to_shape, &span_attrs) {
-                Ok(s) => s,
-                Err(_) => continue,
-            }
-        } else {
-            match text.shaper.shape_fast(line_str_to_shape) {
-                Ok(s) => s,
-                Err(_) => match text.shaper.shape(line_str_to_shape) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                },
-            }
+        let display_breaks = plan.visible_breaks.as_deref().or_else(|| {
+            self.presentation
+                .display
+                .display_map
+                .get_entry(doc_index)
+                .and_then(|entry| full_line_display_breaks(entry, line.layout_hash))
+        });
+        let Ok(shape) = shape_and_wrap_line(
+            &mut self.text.shaper,
+            SourceLineShapeOptions {
+                text: plan.text,
+                bytes: line.bytes,
+                cluster_byte_offset: plan.cluster_byte_offset,
+                highlights: &highlights,
+                has_font_overrides,
+                display_breaks,
+                spacing: line.spacing,
+                protected_ranges: line.protected_ranges,
+                viewport_width: self.viewport_width,
+            },
+        ) else {
+            return LineProgress::KeepScanning;
         };
-
-        if shape_subset_only {
-            for c in &mut shaped.clusters {
-                c.byte_range.start += byte_offset_for_clusters;
-                c.byte_range.end += byte_offset_for_clusters;
-            }
-        }
-
-        if shaped.clusters.is_empty() {
-            // Shaper produced no glyphs (e.g. control chars / whitespace only) — still render line number
-            if ctx.gutter_width > 0.0 && (i > 0 || skip_visual == 0) {
-                render_line_number_placeholder(
-                    metrics,
-                    ctx,
-                    text,
-                    gpu,
-                    is_active_line,
-                    doc_line_idx,
-                    visual_line_counter,
-                    &mut all_vertices,
-                    sub_line_offset,
-                );
-            }
-            presentation.display.advance_cache.push(AdvanceCacheEntry {
-                doc_line: doc_line_idx,
-                vl_byte_start: 0,
-                vl_grapheme_start: 0,
-                clusters: Vec::new(),
-            });
-            visual_line_counter += 1;
-            continue;
-        }
-
-        // Monospace column width measured from font
-        let char_width = text.shaper.col_width();
-
-        // Word wrap: normal word wrap
-        let viewport_width =
-            render_viewport_width(ctx.screen_w, ctx.left_margin, metrics, word_wrap);
-        let tree_breaks: Option<Vec<(usize, usize, f32)>> = if shape_subset_only {
-            let breaks = visible_tree_breaks.unwrap();
-            let visual_lines: Vec<_> = breaks
-                .iter()
-                .map(|b| {
-                    let start = shaped
-                        .clusters
-                        .partition_point(|c| c.byte_range.start < b.byte_start as usize);
-                    let end = shaped
-                        .clusters
-                        .partition_point(|c| c.byte_range.start < b.byte_end as usize);
-                    (start, end, b.pixel_width)
-                })
-                .collect();
-            Some(visual_lines)
-        } else {
-            presentation.display.display_map.get_entry(doc_line_idx_miss).and_then(|entry| {
-                // Exclude placeholder entries (single break with pixel_width=0 on non-empty lines)
-                let is_placeholder = entry.visual_breaks.len() == 1
-                    && entry.visual_breaks[0].pixel_width == 0.0
-                    && entry.byte_length > 0;
-                if entry.content_hash == current_content_hash
-                    && !entry.visual_breaks.is_empty()
-                    && !is_placeholder
-                {
-                    let visual_lines: Vec<_> = entry
-                        .visual_breaks
-                        .iter()
-                        .map(|b| {
-                            let start = shaped
-                                .clusters
-                                .partition_point(|c| c.byte_range.start < b.byte_start as usize);
-                            let end = shaped
-                                .clusters
-                                .partition_point(|c| c.byte_range.start < b.byte_end as usize);
-                            (start, end, b.pixel_width)
-                        })
-                        .collect();
-                    if visual_lines.iter().all(|&(s, e, _)| s <= e) {
-                        Some(visual_lines)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
+        let LineShape::Wrapped { shaped, visual_lines, char_width } = shape else {
+            self.emit_placeholder(line.placement, 1);
+            return LineProgress::KeepScanning;
         };
-
-        let line_spacing_mode =
-            spacing_mode_for_line(text_spacing_mode, source_uses_verbatim_spacing, &line_bytes);
-        let typography_clusters: Vec<TypographyCluster> = shaped
-            .clusters
-            .iter()
-            .map(|cluster| {
-                TypographyCluster::new(cluster.byte_range.clone(), text.shaper.font_size())
-            })
-            .collect();
-        let typography_input = TypographyInput::new(
-            std::str::from_utf8(&line_bytes).unwrap_or_default(),
-            line_spacing_mode,
-            &typography_clusters,
-            &line_protected_ranges,
-        );
-        let gaps = ui::typography::calculate_gaps(&typography_input);
-        let visual_lines = if let Some(visual_lines) = tree_breaks {
-            shaped = ui::layout::typography::apply_gaps_to_existing_visual_lines(
-                &shaped,
-                &gaps,
-                &visual_lines,
-            );
-            visual_lines
-        } else {
-            let layout = ui::layout::typography::layout_shaped_run_with_gaps(
-                &shaped,
-                &gaps,
-                &line_bytes,
-                char_width,
-                viewport_width,
-                0.5,
-                0.0,
-            );
-            shaped = layout.shaped;
-            layout.visual_lines
-        };
-        // Defer WrapIndex update until after the loop
-        let doc_line = doc_idx;
-
-        // skip_visual: only for the first visible doc line
-        let skip_visual_local = if shape_subset_only {
-            0
-        } else if i == 0 {
-            skip_visual
-        } else {
-            0
-        };
-        let skip_visual_local = skip_visual_local.min(visual_lines.len());
-
-        // B4: Cache visual line + cluster data for first/last visible doc lines
-        if i == 0 {
-            first_line.visual_lines = visual_lines.clone();
-            first_line.clusters = shaped
-                .clusters
-                .iter()
-                .map(|c| {
-                    let (_, adv) = line_bytes
-                        .get(c.byte_range.clone())
-                        .map(|b| precise_cluster_advance(b, c.advance, char_width))
-                        .unwrap_or((false, c.advance.max(0.0)));
-                    (c.byte_range.start, c.byte_range.end, adv)
-                })
-                .collect();
-            first_line.doc_offset = dv.line_byte_offset(start_doc).unwrap_or(0);
-        }
-        // Always overwrite — ends up with last visible doc line's data
-        {
-            last_line.visual_lines = visual_lines.clone();
-            last_line.clusters = shaped
-                .clusters
-                .iter()
-                .map(|c| {
-                    let (_, adv) = line_bytes
-                        .get(c.byte_range.clone())
-                        .map(|b| precise_cluster_advance(b, c.advance, char_width))
-                        .unwrap_or((false, c.advance.max(0.0)));
-                    (c.byte_range.start, c.byte_range.end, adv)
-                })
-                .collect();
-        }
-
-        // Compute cursor pixel x-position from shaped cluster advances
-        let cursor_doc_line = dv.cursor_line_cached();
-        let range = presentation
-            .display
-            .viewport
-            .visible_doc_range_from_anchor(&presentation.display.display_map, lh);
-        let cursor_vis_line = if cursor_doc_line >= range.start && cursor_doc_line < range.end {
-            Some(cursor_doc_line - range.start)
-        } else {
-            None
-        };
-        if cursor_vis_line == Some(i) && !shaped.clusters.is_empty() {
-            let cursor_col = dv.cursor_column();
-
-            // First, find which visual line the cursor is on
-            let bounds: Vec<(usize, usize)> = visual_lines
-                .iter()
-                .map(|&(vl_start, vl_end, _)| {
-                    let byte_start = shaped.clusters[vl_start].byte_range.start;
-                    let byte_end = shaped.clusters[vl_end - 1].byte_range.end;
-                    (byte_start, byte_end)
-                })
-                .collect();
-            let mut cursor_vl_in_doc_all = find_visual_line_index(&bounds, cursor_col);
-
-            // End affinity: if cursor lands at a VL boundary after End,
-            // prefer the left VL so the caret stays on the current line.
-            if dv.cursor().last_command_was_end && cursor_vl_in_doc_all > 0 {
-                let prev_end = bounds[cursor_vl_in_doc_all - 1].1;
-                if cursor_col == prev_end {
-                    cursor_vl_in_doc_all -= 1;
-                }
-            }
-            // Check if cursor is in the skipped area (above visible portion of first doc line)
-            let actual_skip = if i == 0 { skip_visual } else { 0 };
-            let cursor_in_skipped = actual_skip > 0 && cursor_vl_in_doc_all < actual_skip;
-
-            if doc_line == cursor_doc_line && !cursor_in_skipped {
-                let full_vl_in_doc = if shape_subset_only {
-                    cursor_vl_in_doc_all + actual_skip
-                } else {
-                    cursor_vl_in_doc_all
-                };
-                // Prefer click_hint VL over find_visual_line_index to avoid
-                // boundary ambiguity (byte=5 can be VL0-end or VL1-start).
-                let hint_matches =
-                    presentation.cursor_render_state.click_hint.is_some_and(|(ho, _hv)| {
-                        ho == dv.byte_to_grapheme_offset(dv.cursor().offset.to_usize())
-                    });
-                if hint_matches {
-                    // click_hint resolves VL-in-doc boundary ambiguity;
-                    // cursor_visual_line (Y) computed from render-loop state.
-                    presentation.cursor_render_state.cursor_visual_line_in_doc = full_vl_in_doc;
-                    presentation.cursor_render_state.cursor_visual_line =
-                        Some((visual_line_counter + full_vl_in_doc).saturating_sub(actual_skip));
-                } else {
-                    presentation.cursor_render_state.cursor_visual_line =
-                        Some((visual_line_counter + full_vl_in_doc).saturating_sub(actual_skip));
-                    presentation.cursor_render_state.cursor_visual_line_in_doc = full_vl_in_doc;
-                }
-            }
-
-            if !cursor_in_skipped {
-                // Cursor is in the visible area — compute pixel position via byte_to_x
-                // (same code path as selection highlighting, for consistency)
-                let vl_idx = cursor_vl_in_doc_all;
-                if vl_idx < visual_lines.len() {
-                    let (vl_start, _vl_end, _) = visual_lines[vl_idx];
-                    let vl_byte_start = shaped.clusters[vl_start].byte_range.start;
-                    let cursor_local = dv.cursor_column().saturating_sub(vl_byte_start);
-                    // Build temporary cluster array for byte_to_x
-                    let mut cluster_xs: smallvec::SmallVec<[(usize, f32, u32); 64]> =
-                        smallvec::SmallVec::new();
-                    let mut x = ctx.left_margin;
-                    for c in &shaped.clusters[vl_start.._vl_end] {
-                        let (_, adv) = precise_cluster_advance(
-                            &line_bytes[c.byte_range.clone()],
-                            c.advance,
-                            char_width,
-                        );
-                        x += adv;
-                        // grapheme_idx unused — only byte_to_x consumes this data
-                        cluster_xs.push((c.byte_range.end - vl_byte_start, x, 0u32));
-                    }
-                    let px = ui::render_geom::byte_to_x(
-                        cursor_local,
-                        &cluster_xs,
-                        ctx.left_margin,
-                        false,
-                    );
-                    presentation.cursor_render_state.cursor_pixel_x = px;
-                }
-            }
-
-            if cursor_doc_line == doc_line {
-                // Sync sticky_x from cursor_pixel_x after horizontal move
-                if presentation.cursor_render_state.sticky_x_dirty {
-                    presentation.cursor_render_state.sticky_x =
-                        presentation.cursor_render_state.cursor_pixel_x;
-                    presentation.cursor_render_state.sticky_x_dirty = false;
-                }
-            }
-        }
-
-        // Populate advance cache for hit-testing
-        let doc_line_idx = range.start + i;
-        let entries = build_advance_cache_entries(
-            &visual_lines,
-            skip_visual_local,
-            &shaped,
-            &line_bytes,
+        let shaped_line = ShapedLineView {
+            shaped: &shaped,
+            visual_lines: &visual_lines,
+            bytes: line.bytes,
+            highlights: &highlights,
             char_width,
-            doc_line_idx,
-            cluster_pool,
-            ctx.left_margin,
+        };
+        self.render_fresh_line(
+            line,
+            shaped_line,
+            &plan,
+            ShapeMissTiming { started_at: shape_started_at, map_stats, has_font_overrides },
         );
-        presentation.display.advance_cache.extend(entries);
+        LineProgress::CheckViewport
+    }
 
-        // Render line number in gutter (first VL of each doc line)
-        let doc_line_idx = range.start + i;
-        if ctx.gutter_width > 0.0
-            && skip_visual_local == 0
-            && (!shape_subset_only || (i == 0 && skip_visual == 0) || i > 0)
-        {
-            let _line_num_buf = format_line_num(doc_line_idx + 1);
-            let line_num_str = line_num_str(&_line_num_buf);
-            if let Ok(line_num_shaped) = text.shaper.shape(line_num_str) {
-                let sub_line_offset = sub_line_offset;
-                let ln_y = (visual_line_counter) as f32 * metrics.line_height + sub_line_offset;
-                let ln_font_size = text.shaper.font_size() * ui::constants::LN_FONT_SCALE;
-                let ln_verts = generate_line_number_vertices(
-                    ctx,
-                    &line_num_shaped,
-                    &mut text.atlas,
-                    &text.atlas_texture,
-                    &gpu.ctx.queue,
-                    &mut text.shaper,
-                    ln_font_size,
-                    ln_y,
-                    is_active_line,
-                    metrics.gutter_padding,
-                    metrics.line_height,
-                );
-                all_vertices.extend(ln_verts);
-            }
-        }
+    fn render_fresh_line(
+        &mut self,
+        line: UncachedLine<'_>,
+        shaped: ShapedLineView<'_>,
+        plan: &LineShapePlan<'_>,
+        timing: ShapeMissTiming,
+    ) {
+        let skip_visual = if plan.is_subset() { 0 } else { line.placement.skipped_rows };
+        let skip_visual = skip_visual.min(shaped.visual_lines.len());
+        update_frame_edge_lines(
+            shaped,
+            (line.relative_line == 0).then_some(line.doc_offset),
+            &mut self.frame_cache.first_line,
+            &mut self.frame_cache.last_line,
+        );
 
-        let shape_elapsed_us = _shape_t0.elapsed().as_micros();
-        _perf_shape_time_us += shape_elapsed_us;
-        if should_perf_log(shape_elapsed_us) {
-            let (
-                entry_present,
-                hash_matches,
-                visual_break_count,
-                visual_line_count,
-                byte_offset,
-                byte_length,
-            ) = map_stats
-                .map(|stats| {
-                    (
-                        true,
-                        stats.hash_matches,
-                        stats.visual_break_count,
-                        stats.visual_line_count,
-                        stats.byte_offset,
-                        stats.byte_length,
-                    )
-                })
-                .unwrap_or((false, false, 0, 0, 0, 0));
-            eprintln!(
-                "[perf:shape_miss] doc_line={} line_len={} shape={}us subset={} subset_len={} subset_vl={}..{} visible_needed={} cursor_needed={} entry={} hash_match={} breaks={} entry_vl={} entry_offset={} entry_len={} placeholder={} has_style={} doc_vl_count={}",
-                doc_line_idx_miss,
-                line_len,
-                shape_elapsed_us,
-                shape_subset_only,
-                line_str_to_shape.len(),
-                subset_start_visual_line,
-                subset_end_visual_line,
-                visible_visual_lines_needed,
-                cursor_visual_lines_needed,
-                entry_present,
-                hash_matches,
-                visual_break_count,
-                visual_line_count,
-                byte_offset,
-                byte_length,
-                is_placeholder,
-                has_bold_italic,
-                doc_vl_count,
+        let cursor_doc_line = self.document.cursor_line_cached();
+        let range = self.presentation.display.viewport.visible_doc_range_from_anchor(
+            &self.presentation.display.display_map,
+            self.options.metrics.line_height,
+        );
+        let left_margin = self.options.render_context.left_margin;
+        if range.contains(&cursor_doc_line) && cursor_doc_line - range.start == line.relative_line {
+            update_cursor_from_shaped_line(
+                self.document,
+                &mut self.presentation.cursor_render_state,
+                shaped,
+                line.placement,
+                cursor_doc_line == line.placement.doc_index,
+                plan.scope(),
+                left_margin,
             );
         }
-        let _vtx_t0 = std::time::Instant::now();
-        // Render each visual line
-        let sub_line_offset = sub_line_offset;
-        for (vl_idx, &(vl_start, vl_end, _vl_width)) in visual_lines.iter().enumerate() {
-            if vl_idx < skip_visual_local {
-                continue;
+
+        let projected_doc_index = range.start + line.relative_line;
+        self.presentation.display.advance_cache.extend(build_advance_cache_entries(
+            shaped.visual_lines,
+            skip_visual,
+            shaped.shaped,
+            shaped.bytes,
+            shaped.char_width,
+            projected_doc_index,
+            &mut self.frame_cache.cluster_pool,
+            left_margin,
+        ));
+
+        let elapsed_us = timing.started_at.elapsed().as_micros();
+        self.timing.shape_us += elapsed_us;
+        timing.log_if_slow(line, plan, elapsed_us);
+
+        let started_at = std::time::Instant::now();
+        let show_line_number =
+            skip_visual == 0 && (!plan.is_subset() || line.placement.skipped_rows == 0);
+        emit_line_and_gutter_vertices(
+            FreshLineEmission {
+                line: shaped,
+                placement: LinePlacement {
+                    doc_index: projected_doc_index,
+                    skipped_rows: skip_visual,
+                    ..line.placement
+                },
+                show_line_number,
+                preedit_on_cursor_line: self.options.render_context.preedit_advance_px > 0.0
+                    && projected_doc_index == cursor_doc_line,
+            },
+            self.options,
+            self.text,
+            self.gpu,
+            &mut self.vertices,
+        );
+        self.rendered_rows += match plan.scope() {
+            ShapedLineScope::FullLine => shaped.visual_lines.len().saturating_sub(skip_visual),
+            ShapedLineScope::VisualSubset => {
+                plan.doc_rows.saturating_sub(line.placement.skipped_rows)
             }
-            let line_y = (visual_line_counter + vl_idx - skip_visual_local) as f32
-                * metrics.line_height
-                + sub_line_offset;
-            let y_base =
-                line_y + metrics.line_height * ui::constants::BASELINE_RATIO + ctx.tab_bar_height;
+        };
+        self.timing.vertex_us += started_at.elapsed().as_micros();
+        self.cache_fresh_line(line, shaped, plan, skip_visual);
+    }
 
-            // Get highlight spans for this document line.
-            let highlight_spans: Vec<(usize, HighlightKind)> =
-                highlights_for_line(dv, presentation, doc_line_idx)
-                    .iter()
-                    .map(|highlight| (highlight.start, highlight.kind))
-                    .collect();
-
-            let mut x_cursor = ctx.left_margin;
-
-            for cluster in &shaped.clusters[vl_start..vl_end] {
-                let glyph_id = cluster.glyph_id as u16;
-                let font_id = cluster.font_id;
-                let font_size = text.shaper.font_size();
-
-                let cluster_bytes = &line_bytes[cluster.byte_range.clone()];
-                let (is_ws, advance) =
-                    precise_cluster_advance(cluster_bytes, cluster.advance, char_width);
-                if is_ws {
-                    x_cursor += advance;
-                    continue;
-                }
-
-                // Apply composition displacement before choosing the raster phase and pixel origin.
-                let preedit_shift = if ctx.preedit_advance_px > 0.0
-                    && doc_line_idx == cursor_doc_line
-                    && cluster.byte_range.start >= ctx.preedit_cursor_col
-                {
-                    ctx.preedit_advance_px
-                } else {
-                    0.0
-                };
-                let (int_x, phase) = crate::text_rasterize::glyph_position(
-                    &mut text.shaper,
-                    font_id,
-                    x_cursor + cluster.x_offset + preedit_shift,
-                );
-                let Some(slot) = crate::text_rasterize::resolve_glyph(
-                    font_id,
-                    glyph_id,
-                    font_size,
-                    phase,
-                    &mut text.shaper,
-                    &mut text.atlas,
-                    &text.atlas_texture,
-                    &gpu.ctx.queue,
-                ) else {
-                    x_cursor += advance;
-                    continue;
-                };
-
-                // Look up highlight color for this cluster's byte range.
-                let color = if highlight_spans.is_empty() {
-                    ctx.theme.editor.foreground
-                } else {
-                    highlight_color_for_offset(
-                        &highlight_spans,
-                        cluster.byte_range.start,
-                        ctx.theme,
-                    )
-                };
-
-                let verts = GlyphRenderer::generate_vertices(
-                    &[(slot, int_x, y_base)],
-                    ATLAS_SIZE,
-                    ATLAS_SIZE,
-                    ctx.screen_w,
-                    ctx.screen_h,
-                    color,
-                );
-                all_vertices.extend(verts);
-                x_cursor += advance;
-            }
-        }
-        if shape_subset_only {
-            visual_line_counter +=
-                doc_vl_count.saturating_sub(if i == 0 { skip_visual } else { 0 });
-        } else {
-            visual_line_counter += visual_lines.len().saturating_sub(skip_visual_local);
-        }
-
-        _perf_vertex_time_us += _vtx_t0.elapsed().as_micros();
-        // ── Populate RenderCache ──
-        // Skip caching during IME preedit on the cursor line (positions are shifted)
-        let cache_doc_line = doc_idx;
-        let shaped_line_scope = ShapedLineScope::from_subset_flag(shape_subset_only);
-        let cache_exists = presentation.display.render_cache.contains(cache_doc_line);
-        if should_store_shaped_line_in_render_cache(
-            shaped_line_scope,
-            preedit_on_cursor_line,
+    fn cache_fresh_line(
+        &mut self,
+        line: UncachedLine<'_>,
+        shaped: ShapedLineView<'_>,
+        plan: &LineShapePlan<'_>,
+        skip_visual: usize,
+    ) {
+        let doc_index = line.placement.doc_index;
+        let cache_exists = self.presentation.display.render_cache.contains(doc_index);
+        if !should_store_shaped_line_in_render_cache(
+            plan.scope(),
+            line.preedit_on_cursor_line,
             cache_exists,
         ) {
-            let content_hash = current_content_hash;
-            let mut all_instances: Vec<GlyphInstance> = Vec::new();
-            let mut vl_instance_starts: Vec<usize> = Vec::new();
-
-            // Cache highlight spans for per-glyph coloring
-            let cache_hl_spans: Vec<(usize, HighlightKind)> =
-                highlights_for_line(dv, presentation, cache_doc_line)
-                    .iter()
-                    .map(|highlight| (highlight.start, highlight.kind))
-                    .collect();
-
-            for &(vl_start, vl_end, _vl_width) in visual_lines.iter() {
-                vl_instance_starts.push(all_instances.len());
-                let mut x_c = ctx.left_margin;
-
-                for cluster in &shaped.clusters[vl_start..vl_end] {
-                    let c_font_id = cluster.font_id;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::hash::DefaultHasher::new();
-                    c_font_id.hash(&mut h);
-                    let c_fid = h.finish() as usize;
-                    let c_fs = text.shaper.font_size();
-
-                    let (c_ws, c_adv) = precise_cluster_advance(
-                        &line_bytes[cluster.byte_range.clone()],
-                        cluster.advance,
-                        char_width,
-                    );
-
-                    if c_ws {
-                        x_c += c_adv;
-                        continue;
-                    }
-
-                    let (int_x, phase) = crate::text_rasterize::glyph_position(
-                        &mut text.shaper,
-                        c_font_id,
-                        x_c + cluster.x_offset,
-                    );
-                    let c_key = GlyphKey {
-                        glyph_id: cluster.glyph_id,
-                        font_id: c_fid,
-                        font_size: (c_fs * 64.0) as u32,
-                        subpixel_phase: phase,
-                    };
-
-                    if let Some(c_slot) = text.atlas.get(&c_key) {
-                        let aw = ATLAS_SIZE as f32;
-                        let ah = ATLAS_SIZE as f32;
-                        all_instances.push(GlyphInstance {
-                            x: int_x,
-                            y: 0.0,
-                            bearing_x: c_slot.bearing_x,
-                            bearing_y: c_slot.bearing_y,
-                            width: c_slot.width as f32,
-                            height: c_slot.height as f32,
-                            uv: [
-                                c_slot.x as f32 / aw,
-                                c_slot.y as f32 / ah,
-                                (c_slot.x + c_slot.width) as f32 / aw,
-                                (c_slot.y + c_slot.height) as f32 / ah,
-                            ],
-                            atlas_page: c_slot.page,
-                            highlight_kind: if cache_hl_spans.is_empty() {
-                                0
-                            } else {
-                                // Highlight spans: [(start0, kind0), (start1, kind1), ..., sentinel]
-                                // A cluster belongs to the last span whose start <= byte_start.
-                                cache_hl_spans
-                                    .iter()
-                                    .rev()
-                                    .find(|(start, _)| *start <= cluster.byte_range.start)
-                                    .map(|(_, kind)| *kind as u8)
-                                    .unwrap_or(0)
-                            },
-                        });
-                    }
-                    x_c += c_adv;
-                }
-            }
-
-            let cluster_data: Vec<_> = shaped
-                .clusters
-                .iter()
-                .map(|c| {
-                    let (_is_ws, adv) = precise_cluster_advance(
-                        &line_bytes[c.byte_range.clone()],
-                        c.advance,
-                        char_width,
-                    );
-                    (c.byte_range.start, c.byte_range.end, adv)
-                })
-                .collect();
-
-            let cache_metadata = render_cache_metadata_for_shaped_line(
-                shaped_line_scope,
-                visual_lines.len(),
-                visual_line_count_from_len(doc_vl_count),
-                skip_visual_local,
-                subset_start_visual_line,
-            );
-
-            if shaped_line_scope == ShapedLineScope::FullLine {
-                let breaks: smallvec::SmallVec<[crate::snap_tree::VisualBreak; 1]> = visual_lines
-                    .iter()
-                    .map(|&(start, end, width)| {
-                        let byte_start = shaped
-                            .clusters
-                            .get(start)
-                            .map(|c| c.byte_range.start as u32)
-                            .unwrap_or(0);
-                        let byte_end_val = shaped
-                            .clusters
-                            .get(end.saturating_sub(1))
-                            .map(|c| c.byte_range.end as u32)
-                            .unwrap_or(0);
-                        crate::snap_tree::VisualBreak {
-                            byte_start,
-                            byte_end: byte_end_val,
-                            pixel_width: width,
-                        }
-                    })
-                    .collect();
-                let entry = crate::snap_tree::DisplayLineEntry {
-                    visual_line_count: cache_metadata.visual_line_count,
-                    visual_breaks: breaks,
-                    byte_offset: dv.line_byte_offset(cache_doc_line).unwrap_or(0),
-                    byte_length: line_bytes.len() as u32,
-                    content_hash,
-                };
-                let old_vl_count = presentation
-                    .display
-                    .display_map
-                    .get_entry(cache_doc_line)
-                    .map(|e| e.visual_line_count)
-                    .unwrap_or(1);
-                presentation.display.display_map.update_entry_in_place(cache_doc_line, entry);
-                if old_vl_count != cache_metadata.visual_line_count {
-                    tree_dirty_local = true;
-                }
-            }
-
-            presentation.display.render_cache.insert(
-                cache_doc_line,
-                CachedLine {
-                    instances: all_instances,
-                    line_number_glyphs: vec![],
-                    atlas_generation,
-                    visual_line_count: cache_metadata.visual_line_count,
-                    content_hash,
-                    visual_lines: visual_lines.clone(),
-                    visual_line_instance_starts: vl_instance_starts,
-                    cluster_data,
-                    subset_start: cache_metadata.subset_start,
-                },
-            );
+            return;
         }
-        // ── End RenderCache population ──
-
-        let cursor_line_done = cursor_rel_line.is_none() || i >= cursor_rel_line.unwrap();
-        if visual_line_counter >= vp_height && cursor_line_done {
-            break;
-        }
-    }
-
-    if tree_dirty_local {
-        presentation.display.display_map.rebuild_tree();
-        *tree_dirty = true;
-    }
-
-    // Post-shape update
-
-    let _perf_total = _perf_t0.elapsed().as_micros();
-    if should_perf_log(_perf_total) {
-        eprintln!(
-            "[perf:shape] total={}us setup={}us hits={} misses={} hit_block={}us empty={}us hl={}us shape={}us vtx={}us",
-            _perf_total,
-            _perf_setup_us,
-            _perf_cache_hits,
-            _perf_cache_misses,
-            _perf_hit_block_us,
-            _perf_empty_us,
-            _perf_hl_time_us,
-            _perf_shape_time_us,
-            _perf_vertex_time_us,
+        let metadata = render_cache_metadata_for_shaped_line(
+            plan.scope(),
+            shaped.visual_lines.len(),
+            visual_line_count_from_len(plan.doc_rows),
+            skip_visual,
+            plan.start_row,
+        );
+        self.tree_dirty |= cache_shaped_line(
+            shaped,
+            CacheLineCommit {
+                doc_index,
+                doc_offset: line.doc_offset,
+                layout_hash: line.layout_hash,
+                atlas_generation: self.atlas_generation,
+                scope: plan.scope(),
+                metadata,
+            },
+            self.presentation,
+            self.text,
+            self.options.render_context,
         );
     }
-    all_vertices
+
+    fn emit_placeholder(&mut self, placement: LinePlacement, rows: usize) {
+        let ctx = self.options.render_context;
+        let metrics = self.options.metrics;
+        if ctx.gutter_width > 0.0 && placement.skipped_rows == 0 {
+            emit_gutter_line_number(
+                metrics,
+                ctx,
+                self.text,
+                self.gpu,
+                GutterLine {
+                    doc_index: placement.doc_index,
+                    top: placement.screen_row as f32 * metrics.line_height
+                        + placement.sub_line_offset,
+                    active: placement.active,
+                },
+                &mut self.vertices,
+            );
+        }
+        self.presentation.display.advance_cache.push(AdvanceCacheEntry {
+            doc_line: placement.doc_index,
+            vl_byte_start: 0,
+            vl_grapheme_start: 0,
+            clusters: Vec::new(),
+        });
+        self.rendered_rows += rows;
+    }
+
+    fn update_empty_line_cursor(&mut self, placement: LinePlacement, doc_offset: usize) {
+        let cursor = &mut self.presentation.cursor_render_state;
+        if self.viewport.cursor_doc_line == placement.doc_index {
+            cursor.cursor_visual_line = Some(placement.screen_row);
+            cursor.cursor_visual_line_in_doc = 0;
+        }
+        if self.document.cursor().offset.to_usize() == doc_offset {
+            cursor.cursor_pixel_x = self.options.render_context.left_margin;
+            if cursor.sticky_x_dirty {
+                cursor.sticky_x = cursor.cursor_pixel_x;
+                cursor.sticky_x_dirty = false;
+            }
+        }
+    }
+
+    fn finish(self) -> ShapedVisibleLines {
+        if self.tree_dirty {
+            self.presentation.display.display_map.rebuild_tree();
+        }
+        self.timing.log_if_slow();
+        ShapedVisibleLines { vertices: self.vertices, tree_dirty: self.tree_dirty }
+    }
+}
+
+fn line_contains_cursor_or_selection(
+    document: &DocumentModel,
+    start: usize,
+    length: usize,
+) -> bool {
+    let end = start + length;
+    let cursor = document.cursor().offset.to_usize();
+    if (start..=end).contains(&cursor) {
+        return true;
+    }
+    document
+        .cursor()
+        .selection_anchor
+        .is_some_and(|anchor| start <= anchor.max(cursor) && end >= anchor.min(cursor))
+}
+
+#[derive(Clone, Copy)]
+struct UncachedLine<'a> {
+    placement: LinePlacement,
+    relative_line: usize,
+    doc_offset: usize,
+    length: usize,
+    bytes: &'a [u8],
+    spacing: TextSpacingMode,
+    layout_hash: u64,
+    protected_ranges: &'a [Range<usize>],
+    preedit_on_cursor_line: bool,
+}
+
+struct LineShapePlan<'a> {
+    text: &'a str,
+    cluster_byte_offset: usize,
+    visible_breaks: Option<Vec<crate::snap_tree::VisualBreak>>,
+    doc_rows: usize,
+    start_row: usize,
+    end_row: usize,
+    visible_rows_needed: usize,
+    cursor_rows_needed: usize,
+}
+
+impl<'a> LineShapePlan<'a> {
+    fn resolve(
+        bytes: &'a [u8],
+        entry: Option<&crate::snap_tree::DisplayLineEntry>,
+        layout_hash: u64,
+        skipped_rows: usize,
+        visible_rows: usize,
+        cursor_offset: Option<u32>,
+    ) -> Self {
+        let mut plan = Self {
+            text: std::str::from_utf8(bytes).unwrap_or_default(),
+            cluster_byte_offset: 0,
+            visible_breaks: None,
+            doc_rows: 1,
+            start_row: 0,
+            end_row: 0,
+            visible_rows_needed: 0,
+            cursor_rows_needed: 0,
+        };
+        let Some(entry) = entry
+            .filter(|entry| entry.content_hash == layout_hash && !entry.visual_breaks.is_empty())
+        else {
+            return plan;
+        };
+
+        let breaks = &entry.visual_breaks;
+        let cursor_rows = cursor_offset.map_or(0, |offset| {
+            let cursor_row =
+                breaks.partition_point(|item| item.byte_start <= offset).saturating_sub(1);
+            cursor_row.checked_sub(skipped_rows).map_or(0, |row| row + 1)
+        });
+        let end_row = (skipped_rows + visible_rows.max(cursor_rows) + 1).min(breaks.len());
+        plan.doc_rows = breaks.len();
+        plan.start_row = skipped_rows;
+        plan.end_row = end_row;
+        plan.visible_rows_needed = visible_rows;
+        plan.cursor_rows_needed = cursor_rows;
+        if skipped_rows < end_row {
+            let start_byte = breaks[skipped_rows].byte_start as usize;
+            let end_byte = breaks[end_row - 1].byte_end as usize;
+            plan.text = std::str::from_utf8(&bytes[start_byte..end_byte]).unwrap_or_default();
+            plan.cluster_byte_offset = start_byte;
+            plan.visible_breaks = Some(breaks[skipped_rows..end_row].to_vec());
+        }
+        plan
+    }
+
+    fn is_subset(&self) -> bool {
+        self.visible_breaks.is_some()
+    }
+
+    fn scope(&self) -> ShapedLineScope {
+        ShapedLineScope::from_subset_flag(self.is_subset())
+    }
+}
+
+struct ShapeMissTiming {
+    started_at: std::time::Instant,
+    map_stats: Option<ShapeMissMapStats>,
+    has_font_overrides: bool,
+}
+
+impl ShapeMissTiming {
+    fn log_if_slow(self, line: UncachedLine<'_>, plan: &LineShapePlan<'_>, elapsed_us: u128) {
+        if !should_perf_log(elapsed_us) {
+            return;
+        }
+        let stats = self.map_stats;
+        eprintln!(
+            "[perf:shape_miss] doc_line={} line_len={} shape={}us subset={} subset_len={} subset_vl={}..{} visible_needed={} cursor_needed={} entry={} hash_match={} breaks={} entry_vl={} entry_offset={} entry_len={} placeholder={} has_style={} doc_vl_count={}",
+            line.placement.doc_index,
+            line.length,
+            elapsed_us,
+            plan.is_subset(),
+            plan.text.len(),
+            plan.start_row,
+            plan.end_row,
+            plan.visible_rows_needed,
+            plan.cursor_rows_needed,
+            stats.is_some(),
+            stats.is_some_and(|item| item.hash_matches),
+            stats.map_or(0, |item| item.visual_break_count),
+            stats.map_or(0, |item| item.visual_line_count),
+            stats.map_or(0, |item| item.byte_offset),
+            stats.map_or(0, |item| item.byte_length),
+            stats.is_none_or(|item| item.is_placeholder),
+            self.has_font_overrides,
+            plan.doc_rows,
+        );
+    }
+}
+
+struct SourceShapeTiming {
+    started_at: std::time::Instant,
+    setup_us: u128,
+    cache_hits: usize,
+    cache_misses: usize,
+    hit_block_us: u128,
+    empty_us: u128,
+    highlight_us: u128,
+    shape_us: u128,
+    vertex_us: u128,
+}
+
+impl SourceShapeTiming {
+    fn new() -> Self {
+        Self {
+            started_at: std::time::Instant::now(),
+            setup_us: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            hit_block_us: 0,
+            empty_us: 0,
+            highlight_us: 0,
+            shape_us: 0,
+            vertex_us: 0,
+        }
+    }
+
+    fn log_if_slow(self) {
+        let elapsed = self.started_at.elapsed().as_micros();
+        if should_perf_log(elapsed) {
+            eprintln!(
+                "[perf:shape] total={}us setup={}us hits={} misses={} hit_block={}us empty={}us hl={}us shape={}us vtx={}us",
+                elapsed,
+                self.setup_us,
+                self.cache_hits,
+                self.cache_misses,
+                self.hit_block_us,
+                self.empty_us,
+                self.highlight_us,
+                self.shape_us,
+                self.vertex_us,
+            );
+        }
+    }
 }
 
 /// Compute cursor pixel_x from cached cluster data.
@@ -1685,8 +1766,6 @@ fn compute_cursor_pixel_x_cached(
 // Tests live in a separate file to keep this module readable.
 #[path = "render_pipeline_tests.rs"]
 mod tests;
-
-/// Generate vertices for the search bar text overlay.
 
 /// Generate vertices for IME preedit (composing) text rendered at the cursor position.
 pub fn preedit_text_vertices(

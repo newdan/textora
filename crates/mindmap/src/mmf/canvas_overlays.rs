@@ -166,11 +166,11 @@ pub(crate) fn node_font_size(
 pub(crate) fn render_text(
     dl: &mut DrawList,
     layout: &LayoutTree,
-    visible_node_indices: &[usize],
+    visible_node_indices: &[VisibleNodeIdx],
     theme: &MindmapRenderTheme<'_>,
     constants: &LayoutConstants,
     shaper: &mut shaping::Shaper,
-    nodes: &[&Node],
+    node_at: &NodeLookup<'_>,
     projection: &MindmapRenderProjection<'_>,
     viewport: CanvasViewportSnapshot,
 ) {
@@ -178,11 +178,11 @@ pub(crate) fn render_text(
     let font_weight = shaper.font_weight();
     let font_style = shaper.font_style();
     for &i in visible_node_indices {
-        let ln = &layout.nodes[i];
-        let Some(node) = nodes.get(ln.source_node_index) else {
+        let ln = &layout.nodes[i.0];
+        let Some(node) = node_at(ln.source_node_index.0) else {
             continue;
         };
-        let title = projection.projected_title(ln.source_node_index);
+        let title = projection.projected_title(ln.source_node_index.0);
         let style = get_node_style(node, ln, theme);
         let color = if node.title.is_empty() && title == EMPTY_TITLE_PLACEHOLDER {
             placeholder_color(style.text)
@@ -254,7 +254,7 @@ pub(in crate::mmf::canvas) fn render_node_selection(
     layout: &LayoutTree,
     theme: &MindmapRenderTheme<'_>,
     constants: &LayoutConstants,
-    nodes: &[&Node],
+    node_at: &NodeLookup<'_>,
     projection: &MindmapRenderProjection<'_>,
     viewport: CanvasViewportSnapshot,
 ) {
@@ -264,7 +264,7 @@ pub(in crate::mmf::canvas) fn render_node_selection(
     let Some(layout_node) = layout_node_for_source(layout, node_index) else {
         return;
     };
-    let Some(source_node) = nodes.get(layout_node.source_node_index) else {
+    let Some(source_node) = node_at(layout_node.source_node_index.0) else {
         return;
     };
     let rect = viewport.content_rect_to_screen(layout_rect(layout_node));
@@ -305,7 +305,7 @@ pub(in crate::mmf::canvas) fn render_drag_preview(
     theme: &MindmapRenderTheme<'_>,
     constants: &LayoutConstants,
     shaper: &mut shaping::Shaper,
-    nodes: &[&Node],
+    node_at: &NodeLookup<'_>,
     viewport: CanvasViewportSnapshot,
 ) {
     let preview_rect = viewport.content_rect_to_screen(preview.preview_rect);
@@ -314,8 +314,7 @@ pub(in crate::mmf::canvas) fn render_drag_preview(
     let (fill, border) = if preview.is_valid {
         let style = source_layout_node
             .and_then(|layout_node| {
-                nodes
-                    .get(layout_node.source_node_index)
+                node_at(layout_node.source_node_index.0)
                     .map(|node| get_node_style(node, layout_node, theme))
             })
             .unwrap_or_else(|| theme.node.default.clone());
@@ -436,7 +435,7 @@ pub(in crate::mmf::canvas) fn layout_node_for_source(
     layout: &LayoutTree,
     source_node_index: usize,
 ) -> Option<&LayoutNode> {
-    layout.nodes.iter().find(|node| node.source_node_index == source_node_index)
+    layout.nodes.iter().find(|node| node.source_node_index.0 == source_node_index)
 }
 
 pub(in crate::mmf::canvas) fn hit_geometry_for_source(
@@ -450,7 +449,7 @@ pub(in crate::mmf::canvas) fn render_title_selection(
     dl: &mut DrawList,
     layout: &LayoutTree,
     hit_map: &HitMap,
-    visible_node_indices: &[usize],
+    visible_node_indices: &[VisibleNodeIdx],
     theme: &MindmapRenderTheme<'_>,
     projection: &MindmapRenderProjection<'_>,
     viewport: CanvasViewportSnapshot,
@@ -461,7 +460,7 @@ pub(in crate::mmf::canvas) fn render_title_selection(
     if !projection.preedit_text.is_empty()
         || !visible_node_indices
             .iter()
-            .any(|index| layout.nodes[*index].source_node_index == node_index)
+            .any(|index| layout.nodes[index.0].source_node_index.0 == node_index)
     {
         return;
     }
@@ -533,7 +532,7 @@ pub(in crate::mmf::canvas) fn render_caret(
     layout: &LayoutTree,
     hit_map: &HitMap,
     theme: &MindmapRenderTheme<'_>,
-    nodes: &[&Node],
+    node_at: &NodeLookup<'_>,
     projection: &MindmapRenderProjection<'_>,
     viewport: CanvasViewportSnapshot,
 ) {
@@ -546,11 +545,11 @@ pub(in crate::mmf::canvas) fn render_caret(
     let Some(geometry) = hit_geometry_for_source(hit_map, node_index) else {
         return;
     };
-    let Some(layout_node) = layout.nodes.iter().find(|node| node.source_node_index == node_index)
+    let Some(layout_node) = layout.nodes.iter().find(|node| node.source_node_index.0 == node_index)
     else {
         return;
     };
-    let Some(node) = nodes.get(node_index) else {
+    let Some(node) = node_at(node_index) else {
         return;
     };
     let edge_index = grapheme_edge_at_or_before(&geometry.grapheme_byte_offsets, byte_offset);
@@ -586,7 +585,7 @@ pub(crate) fn render(
     theme: &MindmapRenderTheme<'_>,
     constants: &LayoutConstants,
     shaper: &mut shaping::Shaper,
-    nodes: &[&Node],
+    node_at: &NodeLookup<'_>,
     hit_map: Option<&HitMap>,
     projection: &MindmapRenderProjection<'_>,
     connector_mesh_cache: Option<&ConnectorMeshCache>,
@@ -598,7 +597,7 @@ pub(crate) fn render(
         theme,
         constants,
         shaper,
-        nodes,
+        node_at,
         hit_map,
         projection,
         connector_mesh_cache,
@@ -613,7 +612,7 @@ pub(crate) fn render_cards_and_connectors(
     theme: &MindmapRenderTheme<'_>,
     constants: &LayoutConstants,
     shaper: &mut shaping::Shaper,
-    nodes: &[&Node],
+    node_at: &NodeLookup<'_>,
     hit_map: Option<&HitMap>,
     projection: &MindmapRenderProjection<'_>,
     connector_mesh_cache: Option<&ConnectorMeshCache>,
@@ -636,7 +635,7 @@ pub(crate) fn render_cards_and_connectors(
         &visible,
         theme,
         constants,
-        nodes,
+        node_at,
         projection.drag_preview,
         viewport,
         hit_map,
@@ -648,7 +647,7 @@ pub(crate) fn render_cards_and_connectors(
             dl,
             layout,
             hit_map,
-            nodes,
+            node_at,
             theme,
             shaper,
             projection,
@@ -656,17 +655,17 @@ pub(crate) fn render_cards_and_connectors(
             projection.drag_preview.is_some(),
         );
     }
-    render_node_selection(dl, layout, theme, constants, nodes, projection, viewport);
+    render_node_selection(dl, layout, theme, constants, node_at, projection, viewport);
     if let Some(preview) = projection.drag_preview {
-        render_drag_preview(dl, preview, layout, theme, constants, shaper, nodes, viewport);
+        render_drag_preview(dl, preview, layout, theme, constants, shaper, node_at, viewport);
         render_drag_target_feedback(dl, preview, layout, theme, constants, viewport);
     }
     if let Some(hit_map) = hit_map {
         render_title_selection(dl, layout, hit_map, &visible, theme, projection, viewport);
     }
-    render_text(dl, layout, &visible, theme, constants, shaper, nodes, projection, viewport);
+    render_text(dl, layout, &visible, theme, constants, shaper, node_at, projection, viewport);
     if let Some(hit_map) = hit_map {
         render_preedit_underline(dl, hit_map, theme, projection, viewport);
-        render_caret(dl, layout, hit_map, theme, nodes, projection, viewport);
+        render_caret(dl, layout, hit_map, theme, node_at, projection, viewport);
     }
 }

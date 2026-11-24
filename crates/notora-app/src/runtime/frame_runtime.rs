@@ -14,7 +14,7 @@ use winit::dpi::{PhysicalPosition, PhysicalSize};
 
 use crate::NotoraState;
 use crate::autosave::AutoSaveState;
-use crate::render::{EditorPaneState, NotoraRenderModel, NotoraShell};
+use crate::render::{EditorPaneState, NotoraRenderCache, NotoraRenderModel, NotoraShell};
 use crate::settings::ProductSettings;
 use crate::settings_overlay::NotoraSettingsPersistenceView;
 use crate::shell::layout::ShellLayout;
@@ -109,6 +109,7 @@ pub(super) struct FrameRuntime {
     document_search_tab: Option<appkit_core::tab_set::types::TabId>,
     document_search_composition: DocumentSearchComposition,
     window_frame: ui::window_frame::WindowFrameWidget,
+    render_model_cache: NotoraRenderCache,
     #[cfg(not(test))]
     shell: NotoraShell,
     #[cfg(test)]
@@ -153,6 +154,7 @@ impl FrameRuntime {
             document_search_tab: None,
             document_search_composition: DocumentSearchComposition::Idle,
             window_frame: ui::window_frame::WindowFrameWidget::default(),
+            render_model_cache: NotoraRenderCache::default(),
             shell: NotoraShell::new(),
             settings,
             theme,
@@ -436,8 +438,11 @@ impl FrameRuntime {
         document_runtime: &mut DocumentRuntime,
         mut input: FrameInput<'_>,
     ) -> Result<EditorSurfacePaint, RenderError> {
-        let mut model =
-            NotoraRenderModel::from_state_and_settings(input.state, input.product_settings);
+        let mut model = NotoraRenderModel::with_cache(
+            input.state,
+            input.product_settings,
+            &mut self.render_model_cache,
+        );
         model.settings_overlay.persistence = std::mem::take(&mut input.persistence_view);
         model.editor_pane = if model.encrypted_note_unlock.is_some() {
             EditorPaneState::EncryptedUnlock
@@ -512,12 +517,10 @@ impl FrameRuntime {
                 background: self.theme.application_theme().editor_surface,
                 empty_frame_target: EmptyFrameTarget::Surface,
                 window_corner_clip: WindowCornerClip::Synchronize(window_corner_radius),
-                gamma_override: None,
             },
         ) {
             eprintln!("[window] 无法同步合成窗口圆角：{error}");
         }
-        let _ = frame.present()?;
         Ok(editor_surface)
     }
 

@@ -31,18 +31,16 @@ impl MindmapView {
         else {
             return None;
         };
-        let nodes = collect_nodes_dfs(&tree.root);
-        let source_index =
-            nodes.iter().position(|node| node.subtree_source_range == request.source_range)?;
-        let source_node = *nodes.get(source_index)?;
+        let source_index = tree.subtree_index(&request.source_range)?;
+        let source_node = tree.node(source_index)?;
         let source_layout = layout_node_for_source(layout, source_index)?;
-        let card = &drag_preview_cards[source_layout.node_idx];
+        let card = &drag_preview_cards[source_layout.node_idx.0];
         let label = drag_preview_label(&source_node.title, card.descendant_count);
-        let source_subtree_indices = source_index..=source_index + card.descendant_count;
+        let source_subtree_indices = tree.subtree_indices(source_index)?;
         let source_subtree_rects = layout
             .nodes
             .iter()
-            .filter(|node| source_subtree_indices.contains(&node.source_node_index))
+            .filter(|node| source_subtree_indices.contains(&node.source_node_index.0))
             .map(layout_rect)
             .collect();
         let pointer = self.screen_to_content(request.pointer_x, request.pointer_y)?;
@@ -72,7 +70,7 @@ impl MindmapView {
 
         if let Some(candidate) = candidate {
             canvas.target_rect = Some(layout_rect(candidate));
-            let candidate_index = candidate.source_node_index;
+            let candidate_index = candidate.source_node_index.0;
             let same_level = preview_rect.x <= candidate.x + candidate.w;
             let (anchor_index, candidate_target) = if same_level {
                 if preview_center_y < candidate.y + candidate.h * 0.5 {
@@ -89,8 +87,7 @@ impl MindmapView {
             };
             let target_parent_index = match candidate_target {
                 mmf::edit::MoveSubtreeTarget::BeforeSibling
-                | mmf::edit::MoveSubtreeTarget::AfterSibling => find_parent(tree, anchor_index)
-                    .and_then(|parent| nodes.iter().position(|node| std::ptr::eq(*node, parent))),
+                | mmf::edit::MoveSubtreeTarget::AfterSibling => tree.parent_index(anchor_index),
                 mmf::edit::MoveSubtreeTarget::BeforeChild => Some(candidate_index),
                 mmf::edit::MoveSubtreeTarget::LastChild => Some(anchor_index),
             };
@@ -103,7 +100,7 @@ impl MindmapView {
                 && source_index != 0
                 && !is_noop_sibling_target(tree, source_index, anchor_index, candidate_target);
             if valid {
-                let anchor_node = nodes[anchor_index];
+                let anchor_node = tree.node(anchor_index)?;
                 anchor_range = Some(anchor_node.subtree_source_range.clone());
                 target = Some(candidate_target);
                 canvas.is_valid = true;
@@ -136,8 +133,7 @@ impl MindmapView {
             .controls
             .iter()
             .find(|control| control.bounds.contains(pointer.x, pointer.y))?;
-        let nodes = collect_nodes_dfs(&tree.root);
-        Some(nodes.get(control.source_node_index)?.subtree_source_range.clone())
+        Some(tree.node(control.source_node_index)?.subtree_source_range.clone())
     }
 
     pub(in crate::mindmap_view) fn semantic_hit_target(
@@ -274,22 +270,16 @@ impl MindmapView {
         let MindmapDocumentState::Ready { tree, .. } = &self.document_state else {
             return None;
         };
-        let nodes = collect_nodes_dfs(&tree.root);
-        let node = *nodes.get(node_index)?;
         let target_index = match direction {
             MoveDirection::Up | MoveDirection::Down => {
                 self.visible_dfs_neighbor(node_index, direction)
             }
-            MoveDirection::Left => find_parent(tree, node_index).and_then(|parent| {
-                nodes.iter().position(|candidate| std::ptr::eq(*candidate, parent))
-            }),
-            MoveDirection::Right => node.children.first().and_then(|child| {
-                nodes.iter().position(|candidate| std::ptr::eq(*candidate, child))
-            }),
+            MoveDirection::Left => tree.parent_index(node_index),
+            MoveDirection::Right => tree.child_indices(node_index).next(),
             MoveDirection::LineStart | MoveDirection::LineEnd => Some(node_index),
         }
         .unwrap_or(node_index);
-        let target = *nodes.get(target_index)?;
+        let target = tree.node(target_index)?;
         Some(EditHitTarget::SourceObject { source_range: target.subtree_source_range.clone() })
     }
 
@@ -382,7 +372,7 @@ impl MindmapView {
             return None;
         };
         let target_index = self.visible_dfs_neighbor(node_index, direction)?;
-        let target = *collect_nodes_dfs(&tree.root).get(target_index)?;
+        let target = tree.node(target_index)?;
         Some(EditHitTarget::SourceObject { source_range: target.subtree_source_range.clone() })
     }
 
@@ -394,36 +384,49 @@ impl MindmapView {
         let MindmapDocumentState::Ready { tree, layout, .. } = &self.document_state else {
             return None;
         };
-        let visible_source_indices = if let Some(layout) = layout {
-            layout.nodes.iter().map(|node| node.source_node_index).collect::<Vec<_>>()
+        if let Some(layout) = layout {
+            visible_neighbor(
+                layout.nodes.iter().map(|node| node.source_node_index.0),
+                source_node_index,
+                direction,
+            )
         } else {
-            visible_source_indices(&tree.root)
-        };
-        let visible_position =
-            visible_source_indices.iter().position(|index| *index == source_node_index)?;
-        let target_position = match direction {
-            MoveDirection::Up => visible_position.checked_sub(1)?,
-            MoveDirection::Down => visible_position.checked_add(1)?,
-            MoveDirection::Left
-            | MoveDirection::Right
-            | MoveDirection::LineStart
-            | MoveDirection::LineEnd => return None,
-        };
-        visible_source_indices.get(target_position).copied()
+            visible_neighbor(visible_source_indices(tree), source_node_index, direction)
+        }
     }
+}
+
+fn visible_neighbor(
+    indices: impl Iterator<Item = usize>,
+    source_index: usize,
+    direction: MoveDirection,
+) -> Option<usize> {
+    let mut previous = None;
+    let mut indices = indices;
+    while let Some(index) = indices.next() {
+        if index == source_index {
+            return match direction {
+                MoveDirection::Up => previous,
+                MoveDirection::Down => indices.next(),
+                _ => None,
+            };
+        }
+        previous = Some(index);
+    }
+    None
 }
 
 fn nearest_drag_candidate(
     layout: &LayoutTree,
-    source_subtree_indices: std::ops::RangeInclusive<usize>,
+    source_subtree_indices: std::ops::Range<usize>,
     preview_rect: Rect,
 ) -> Option<&mmf::layout::LayoutNode> {
     layout
         .nodes
         .iter()
         .filter(|node| {
-            !source_subtree_indices.contains(&node.source_node_index)
-                && (node.source_node_index != 0 || preview_rect.x > node.x + node.w)
+            !source_subtree_indices.contains(&node.source_node_index.0)
+                && (node.source_node_index.0 != 0 || preview_rect.x > node.x + node.w)
         })
         .min_by(|left, right| {
             drag_distance(left, preview_rect)
@@ -438,16 +441,12 @@ pub(in crate::mindmap_view) fn next_child_at_or_below_y(
     parent_index: usize,
     pointer_y: f32,
 ) -> Option<usize> {
-    let nodes = collect_nodes_dfs(&tree.root);
     layout
         .nodes
         .iter()
-        .filter(|child| {
-            find_parent(tree, child.source_node_index)
-                .is_some_and(|parent| std::ptr::eq(parent, nodes[parent_index]))
-        })
+        .filter(|child| tree.parent_index(child.source_node_index.0) == Some(parent_index))
         .find(|child| pointer_y < child.y + child.h * 0.5)
-        .map(|child| child.source_node_index)
+        .map(|child| child.source_node_index.0)
 }
 
 pub(in crate::mindmap_view) fn drag_distance(
@@ -468,13 +467,15 @@ pub(in crate::mindmap_view) fn is_noop_sibling_target(
     if target == mmf::edit::MoveSubtreeTarget::BeforeChild && source_index == anchor_index {
         return true;
     }
-    let Some(siblings) = find_siblings(tree, source_index) else {
+    let Some(parent_index) = tree.parent_index(source_index) else {
         return false;
     };
-    let Some(source_position) = siblings.iter().position(|index| *index == source_index) else {
+    if tree.parent_index(anchor_index) != Some(parent_index) {
         return false;
-    };
-    let Some(anchor_position) = siblings.iter().position(|index| *index == anchor_index) else {
+    }
+    let (Some(source_position), Some(anchor_position)) =
+        (tree.sibling_slot(source_index), tree.sibling_slot(anchor_index))
+    else {
         return false;
     };
     match target {
@@ -497,28 +498,26 @@ pub(in crate::mindmap_view) fn insertion_line(
     constants: &LayoutConstants,
 ) -> Option<((f32, f32), (f32, f32))> {
     let anchor = layout_node_for_source(layout, anchor_index)?;
-    let sibling_indices = find_siblings(tree, anchor_index)?;
-    let sibling_position = sibling_indices.iter().position(|index| *index == anchor_index)?;
-    let sibling_gap = find_parent(tree, anchor_index)
-        .and_then(|parent| {
-            collect_nodes_dfs(&tree.root).iter().position(|node| std::ptr::eq(*node, parent))
-        })
-        .and_then(|parent_index| layout_node_for_source(layout, parent_index))
+    let parent_index = tree.parent_index(anchor_index)?;
+    let sibling_position = tree.sibling_slot(anchor_index)?;
+    let sibling_gap = layout_node_for_source(layout, parent_index)
         .map(|parent| constants.sibling_gap_for_parent_depth(parent.depth))
         .unwrap_or(constants.sibling_gap);
     let y = match target {
         mmf::edit::MoveSubtreeTarget::BeforeSibling | mmf::edit::MoveSubtreeTarget::BeforeChild => {
             sibling_position
                 .checked_sub(1)
-                .and_then(|previous_position| sibling_indices.get(previous_position))
-                .and_then(|index| layout_node_for_source(layout, *index))
+                .and_then(|previous_position| {
+                    tree.child_indices(parent_index).nth(previous_position)
+                })
+                .and_then(|index| layout_node_for_source(layout, index))
                 .map(|previous| (previous.y + previous.h + anchor.y) * 0.5)
                 .unwrap_or(anchor.y - sibling_gap * 0.5)
         }
         mmf::edit::MoveSubtreeTarget::AfterSibling => sibling_position
             .checked_add(1)
-            .and_then(|next_position| sibling_indices.get(next_position))
-            .and_then(|index| layout_node_for_source(layout, *index))
+            .and_then(|next_position| tree.child_indices(parent_index).nth(next_position))
+            .and_then(|index| layout_node_for_source(layout, index))
             .map(|next| (anchor.y + anchor.h + next.y) * 0.5)
             .unwrap_or(anchor.y + anchor.h + sibling_gap * 0.5),
         mmf::edit::MoveSubtreeTarget::LastChild => return None,

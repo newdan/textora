@@ -1,6 +1,6 @@
 //! A text buffer for a text editor.
 //!
-//! Implements a Unicode-aware, layout-aware text buffer for terminals.
+//! Implements a Unicode-aware, layout-aware text buffer.
 //! It's based on a gap buffer. It has no line cache and instead relies
 //! on the performance of the ucd module for fast text navigation.
 //!
@@ -89,9 +89,7 @@ pub struct TextBuffer {
     pub(crate) margin_enabled: bool,
     pub(crate) tab_size: CoordType,
     pub(crate) indent_with_tabs: bool,
-    pub(crate) line_highlight_enabled: bool,
     pub(crate) language: Option<&'static Language>,
-    pub(crate) ruler: CoordType,
     pub(crate) newlines_are_crlf: bool,
     pub(crate) insert_final_newline: bool,
     pub(crate) overtype: bool,
@@ -136,9 +134,7 @@ impl TextBuffer {
 
             tab_size: 4,
             indent_with_tabs: false,
-            line_highlight_enabled: false,
             language: None,
-            ruler: 0,
             newlines_are_crlf: cfg!(windows), // Windows users want CRLF
             insert_final_newline: false, // NOTE: Even with POSIX, single-line buffers need this to be false
             overtype: false,
@@ -187,9 +183,7 @@ impl TextBuffer {
             margin_enabled: false,
             tab_size: 4,
             indent_with_tabs: false,
-            line_highlight_enabled: false,
             language: None,
-            ruler: 0,
             newlines_are_crlf: cfg!(windows),
             insert_final_newline: false,
             overtype: false,
@@ -424,11 +418,6 @@ impl TextBuffer {
         self.indent_with_tabs = indent_with_tabs;
     }
 
-    /// Sets whether the line the cursor is on should be highlighted.
-    pub fn set_line_highlight_enabled(&mut self, enabled: bool) {
-        self.line_highlight_enabled = enabled;
-    }
-
     pub fn language(&self) -> Option<&'static Language> {
         self.language
     }
@@ -436,11 +425,6 @@ impl TextBuffer {
     pub fn set_language(&mut self, language: Option<&'static Language>) {
         self.language = language;
         self.highlighter_cache.invalidate_from(0);
-    }
-
-    /// Sets a ruler column, e.g. 80.
-    pub fn set_ruler(&mut self, column: CoordType) {
-        self.ruler = column;
     }
 
     pub fn reflow(&mut self) {

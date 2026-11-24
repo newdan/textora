@@ -504,7 +504,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             global_alpha: 1.0,
             shaper: Some(&mut shaper),
         };
@@ -886,7 +885,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             global_alpha: 1.0,
             shaper: Some(&mut shaper),
         };
@@ -928,7 +926,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             global_alpha: 1.0,
             shaper: Some(&mut shaper),
         };

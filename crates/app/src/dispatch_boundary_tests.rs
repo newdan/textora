@@ -4,14 +4,15 @@
 //! `dispatch()` method, which is the *sole* place `apply_effect()` is
 //! called. The tests below scan production source to guarantee this.
 
-fn dispatch_sources() -> [(&'static str, &'static str); 9] {
+fn dispatch_sources() -> [(&'static str, &'static str); 10] {
     [
-        ("app_dispatch.rs", include_str!("app_dispatch.rs")),
+        ("dispatch/mod.rs", include_str!("dispatch/mod.rs")),
         ("app_scroll.rs", include_str!("app_scroll.rs")),
         ("commands.rs", include_str!("dispatch/commands.rs")),
         ("editor.rs", include_str!("dispatch/editor.rs")),
         ("mouse.rs", include_str!("dispatch/mouse.rs")),
         ("search.rs", include_str!("dispatch/search.rs")),
+        ("settings.rs", include_str!("dispatch/settings.rs")),
         ("tabs.rs", include_str!("dispatch/tabs.rs")),
         ("chrome.rs", include_str!("dispatch/chrome.rs")),
         ("viewport.rs", include_str!("dispatch/viewport.rs")),
@@ -29,7 +30,7 @@ fn only_router_applies_effect() {
     for (name, source) in dispatch_sources() {
         let source = production_source(source);
         let count = source.match_indices("apply_effect(").count();
-        let expected = usize::from(name == "app_dispatch.rs");
+        let expected = usize::from(name == "dispatch/mod.rs");
         assert_eq!(count, expected, "{name}");
     }
 }
@@ -38,6 +39,7 @@ fn only_router_applies_effect() {
 fn dispatch_domains_do_not_apply_global_followups_directly() {
     let forbidden = [
         "needs_redraw =",
+        "schedule_redraw(",
         "request_redraw(",
         "invalidate_reshape(",
         "update_window_title(",
@@ -77,7 +79,7 @@ fn workspace_stores_document_models_without_doc_item_runtime_fallback() {
 #[test]
 fn textora_uses_the_shared_action_pump_and_single_product_inbox() {
     let app_source = include_str!("app.rs");
-    let dispatch_source = include_str!("app_dispatch.rs");
+    let dispatch_source = include_str!("dispatch/mod.rs");
     let product_source = include_str!("textora_product.rs");
 
     assert!(app_source.contains("action_pump: EventPump<crate::actions::AppAction>"));

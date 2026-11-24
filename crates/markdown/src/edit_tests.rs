@@ -39,6 +39,20 @@ fn make_span(
     StyleSpan { start, len, style, source_range: source_start..source_end }
 }
 
+fn project_fixture_line(
+    text: &str,
+    styles: &[StyleSpan],
+    source: &str,
+    context: &EditContext,
+    source_line: Option<&SourceLineContext>,
+) -> (ProjectedText, Vec<StyleSpan>) {
+    let base = project_folded_line(text, styles, source_line);
+    let projected = materialize_projected_line(&base, styles, source, Some(context), source_line);
+    let styles =
+        materialized_spans_for_projected_line(&base, &projected, styles, source, Some(context));
+    (projected, styles)
+}
+
 fn slice_visual_line_linear_reference(
     projected: &ProjectedText,
     logical_line: usize,
@@ -266,15 +280,10 @@ fn inline_code_preedit_at_content_boundaries_keeps_markers_separate() {
             preedit_text: Some("中文".to_owned()),
             preedit_cursor: Some(("中文".len(), "中文".len())),
         };
-        let line = materialize_line_with_source_context(
-            "before ab after",
-            &spans,
-            source,
-            Some(&context),
-            Some(&source_line),
-        );
+        let (line, styles) =
+            project_fixture_line("before ab after", &spans, source, &context, Some(&source_line));
         assert_eq!(
-            line.spans
+            styles
                 .iter()
                 .map(|span| (&span.style, &line.text[span.start..span.start + span.len]))
                 .collect::<Vec<_>>(),
@@ -301,16 +310,9 @@ fn inline_code_preedit_outside_closing_marker_does_not_extend_adjacent_style() {
         preedit_text: Some("中文".to_owned()),
         preedit_cursor: Some(("中文".len(), "中文".len())),
     };
-    let line = materialize_line_with_source_context(
-        "abcd",
-        &spans,
-        source,
-        Some(&context),
-        Some(&source_line),
-    );
+    let (line, styles) = project_fixture_line("abcd", &spans, source, &context, Some(&source_line));
     assert_eq!(line.text, "`ab`中文cd");
-    let bold = line
-        .spans
+    let bold = styles
         .iter()
         .find(|span| span.style == InlineStyle::Bold)
         .expect("adjacent text must remain bold");
@@ -324,12 +326,12 @@ fn materialized_line_maps_expanded_bold_markers_to_source_bytes() {
     let spans = vec![make_span(6, 5, 6, 15, InlineStyle::Bold)];
     let ctx = EditContext { cursor_byte: 10, preedit_text: None, preedit_cursor: None };
 
-    let line = materialize_line(line_text, &spans, source, Some(&ctx));
+    let (line, _) = project_fixture_line(line_text, &spans, source, &ctx, None);
 
     assert_eq!(line.text, "hello **world** here");
-    assert_eq!(line.visual_grapheme_to_source_byte(6), Some(6));
-    assert_eq!(line.visual_grapheme_to_source_byte(8), Some(8));
-    assert_eq!(line.source_byte_to_visual_grapheme(10), Some(10));
+    assert_eq!(line.boundaries[6].byte.get(), 6);
+    assert_eq!(line.boundaries[8].byte.get(), 8);
+    assert_eq!(line.boundaries.iter().position(|anchor| anchor.byte.get() == 10), Some(10));
 }
 
 #[test]
@@ -375,11 +377,11 @@ fn materialized_line_keeps_folded_text_when_cursor_outside_span() {
     let spans = vec![make_span(6, 5, 6, 15, InlineStyle::Bold)];
     let ctx = EditContext { cursor_byte: 2, preedit_text: None, preedit_cursor: None };
 
-    let line = materialize_line(line_text, &spans, source, Some(&ctx));
+    let (line, _) = project_fixture_line(line_text, &spans, source, &ctx, None);
 
     assert_eq!(line.text, "hello world here");
-    assert_eq!(line.visual_grapheme_to_source_byte(6), Some(8));
-    assert_eq!(line.source_byte_to_visual_grapheme(10), Some(8));
+    assert_eq!(line.boundaries[6].byte.get(), 8);
+    assert_eq!(line.boundaries.iter().position(|anchor| anchor.byte.get() == 10), Some(8));
 }
 
 #[test]
@@ -390,14 +392,14 @@ fn materialized_line_maps_combining_grapheme_to_single_source_position() {
     let spans = vec![make_span(0, line_text.len(), 0, source.len(), InlineStyle::Bold)];
     let ctx = EditContext { cursor_byte: 3, preedit_text: None, preedit_cursor: None };
 
-    let line = materialize_line(line_text, &spans, source, Some(&ctx));
+    let (line, _) = project_fixture_line(line_text, &spans, source, &ctx, None);
 
     assert_eq!(line.text, source);
     // ** markers at grapheme 0 and 1; é at grapheme 2; ** at 3 and 4
-    assert_eq!(line.visual_grapheme_to_source_byte(0), Some(0));
-    assert_eq!(line.visual_grapheme_to_source_byte(2), Some(2));
+    assert_eq!(line.boundaries[0].byte.get(), 0);
+    assert_eq!(line.boundaries[2].byte.get(), 2);
     // Next grapheme after é starts at byte 2 + "e\u{0301}".len() = 2 + 3 = 5
-    assert_eq!(line.visual_grapheme_to_source_byte(3), Some(2 + "e\u{0301}".len()));
+    assert_eq!(line.boundaries[3].byte.get(), 2 + "e\u{0301}".len());
 }
 
 #[test]

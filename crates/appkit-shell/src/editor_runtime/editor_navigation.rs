@@ -225,9 +225,7 @@ impl EditorRuntime {
             return None;
         }
 
-        let viewport_height =
-            super::editor_painter::plugin_bounds(editor_bounds, self.scale_factor() as f32, false)
-                .h;
+        let viewport_height = self.plugin_input_bounds(editor_bounds, false).h;
         if viewport_height <= 0.0 {
             return None;
         }
@@ -330,7 +328,7 @@ pub fn apply_target_to_document(doc: &mut DocumentModel, target: EditHitTarget) 
     }
 }
 
-fn validated_source_object_range(
+pub(super) fn validated_source_object_range(
     doc: &DocumentModel,
     source_range: std::ops::Range<usize>,
 ) -> Option<std::ops::Range<usize>> {

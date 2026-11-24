@@ -1,11 +1,35 @@
+use std::time::Instant;
+
+use appkit_shell::ShellEffect;
 use notora_core::NavigationScope;
 
 use crate::action::{NotoraAction, NotoraEffect};
 
-use super::NotoraRuntime;
+use super::{NotoraRuntime, action_requires_session_persistence};
 
 impl NotoraRuntime {
-    pub(super) fn execute_product_effect(&mut self, effect: NotoraEffect) -> Vec<NotoraAction> {
+    pub(super) fn reduce_action(&mut self, action: NotoraAction) {
+        let should_persist_session = action_requires_session_persistence(&action);
+        let reduction = self.action_runtime.reduce(action, Instant::now(), should_persist_session);
+        for effect in reduction.effects {
+            let redraw = matches!(effect, NotoraEffect::Redraw | NotoraEffect::ToggleEditorView);
+            for follow_up_action in self.execute_product_effect(effect) {
+                self.action_runtime.enqueue(follow_up_action);
+            }
+            if redraw {
+                self.apply_shell_effect(ShellEffect::REDRAW);
+            }
+        }
+        self.synchronize_product_focus();
+        for follow_up_action in reduction.follow_up_actions {
+            self.action_runtime.enqueue(follow_up_action);
+        }
+        if reduction.should_persist_session {
+            self.schedule_session_persistence();
+        }
+    }
+
+    fn execute_product_effect(&mut self, effect: NotoraEffect) -> Vec<NotoraAction> {
         match effect {
             NotoraEffect::QueryCards(query) => return self.query_cards(query),
             NotoraEffect::RequestNoteCreation { kind, target } => {
@@ -74,7 +98,7 @@ impl NotoraRuntime {
             }
             NotoraEffect::PersistProductSettings => self.persist_product_settings(),
             NotoraEffect::PersistLayout => self.persist_layout(),
-            NotoraEffect::Redraw => unreachable!("redraw is handled by EffectExecutor"),
+            NotoraEffect::Redraw => {}
         }
         Vec::new()
     }

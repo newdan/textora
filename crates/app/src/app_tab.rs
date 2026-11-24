@@ -5,8 +5,9 @@ use crate::app::App;
 use crate::workspace_persistence::snapshot_runtime_workspace;
 use appkit_core::file_history::{FileHistoryEntry, compute_workspace_root};
 use appkit_core::tab_set::types::TabId;
-use appkit_shell::editor_runtime::OpenDisposition;
-use appkit_shell::editor_tab_set::EditorTabSet;
+use appkit_shell::editor_runtime::{
+    CloseConfirmation, EditorNotification, EditorOutcome, OpenDisposition,
+};
 #[cfg(test)]
 use appkit_shell::prepared_tab::PreparedTab;
 #[cfg(test)]
@@ -20,25 +21,17 @@ pub(crate) struct EditorSaveContext {
 }
 
 impl App {
-    /// 安装产品准备好的 tab，并在 runtime 内完成生命周期收口。
     pub(crate) fn install_editor_tab(
         &mut self,
         prepared: appkit_shell::prepared_tab::PreparedTab,
         suggested_file_name: Option<String>,
         disposition: OpenDisposition,
-    ) -> appkit_shell::editor_tab_set::WorkspaceEffect {
-        self.editor_runtime.install_prepared_tab_for_product(
-            prepared,
-            suggested_file_name,
-            disposition,
-        )
+    ) -> EditorOutcome {
+        self.editor_runtime.install_prepared_tab(prepared, suggested_file_name, disposition)
     }
 
-    pub(crate) fn activate_editor_tab(
-        &mut self,
-        tab_id: TabId,
-    ) -> Option<appkit_shell::editor_tab_set::WorkspaceEffect> {
-        self.editor_runtime.activate_for_product(tab_id)
+    pub(crate) fn activate_editor_tab(&mut self, tab_id: TabId) -> EditorOutcome {
+        self.editor_runtime.activate(tab_id)
     }
 
     /// 追加产品准备好的 tab，但保留当前活动 tab；用于启动文件和恢复流程。
@@ -57,11 +50,11 @@ impl App {
         self.editor_runtime.close_decision(tab_id)
     }
 
-    pub(crate) fn close_editor_tab(
-        &mut self,
-        tab_id: TabId,
-    ) -> Option<appkit_shell::editor_tab_set::WorkspaceEffect> {
-        self.editor_runtime.close_for_product(tab_id)
+    pub(crate) fn discard_editor_tab(&mut self, tab_id: TabId) -> Option<EditorOutcome> {
+        let outcome = self.editor_runtime.confirm_close(tab_id, CloseConfirmation::Discard);
+        outcome.notifications.iter().any(
+            |notification| matches!(notification, EditorNotification::TabClosed { tab_id: closed } if *closed == tab_id),
+        ).then_some(outcome)
     }
 
     pub(crate) fn active_tab_id(&self) -> Option<TabId> {
@@ -121,10 +114,6 @@ impl App {
         self.editor_runtime.toggle_target()
     }
 
-    pub(crate) fn active_document_line_count(&self) -> usize {
-        self.active_tab_session().map_or(0, |tab| tab.document().line_count())
-    }
-
     pub(crate) fn active_editor_title(&mut self) -> Option<String> {
         let tab_id = self.active_tab_id()?;
         self.editor_save_context(tab_id).map(|context| context.title)
@@ -173,7 +162,7 @@ impl App {
             Some(path) => self.editor_runtime.prepare_save_as(tab_id, path),
             None => self.editor_runtime.prepare_save(tab_id),
         }?;
-        let Some(event_loop_proxy) = self.event_loop_proxy.clone() else {
+        let Some(event_loop_proxy) = self.platform.event_loop_proxy().cloned() else {
             return Err(appkit_shell::editor_runtime::SavePrepareError::SubmitFailed {
                 message: "event loop proxy is not available".to_owned(),
             });
@@ -193,7 +182,7 @@ impl App {
         path: Option<&std::path::Path>,
     ) -> Result<(), appkit_shell::editor_runtime::SavePrepareError> {
         self.submit_editor_save(tab_id, path)?;
-        self.pending_close_after_save.insert(tab_id);
+        self.workspace_services.await_tab_close_after_save(tab_id);
         Ok(())
     }
 
@@ -293,24 +282,6 @@ impl App {
         self.editor_runtime.upgrade_active_preview()
     }
 
-    pub(crate) fn switch_editor_tab(
-        &mut self,
-        tab_id: TabId,
-    ) -> Option<appkit_shell::editor_tab_set::WorkspaceEffect> {
-        if self.active_tab_id() == Some(tab_id) {
-            return None;
-        }
-        self.activate_editor_tab(tab_id)
-    }
-
-    pub(crate) fn replace_editor_model(
-        &mut self,
-        workspace: EditorTabSet,
-        runtimes: appkit_shell::tab_runtime::TabRuntimeStore,
-    ) {
-        self.editor_runtime.replace_model_state(workspace, runtimes);
-    }
-
     pub(crate) fn restore_editor_pinned_paths(&mut self, paths: &[std::path::PathBuf]) {
         self.editor_runtime.restore_pinned(paths);
     }
@@ -330,20 +301,6 @@ impl App {
         if let Some(mut tab) = self.tab_session_mut(tab_id) {
             tab.clear_advance_cache();
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_editor_document_and_mouse_for_test<R>(
-        &mut self,
-        tab_id: TabId,
-        callback: impl FnOnce(
-            &mut crate::mouse::MouseState,
-            &mut appkit_core::document::DocumentModel,
-        ) -> R,
-    ) -> Option<R> {
-        let App { editor_runtime, mouse, .. } = self;
-        let mut tab = editor_runtime.tab_session_mut(tab_id)?;
-        Some(callback(mouse, tab.document_mut()))
     }
 
     #[cfg(test)]
@@ -373,7 +330,11 @@ impl App {
     }
 
     pub(crate) fn switch_active_plugin(&mut self) {
+        let toc_was_visible = self.active_toc_visible();
         self.editor_runtime.switch_active_plugin();
+        if toc_was_visible != self.active_toc_visible() {
+            self.ui_shell.mark_dock_dirty();
+        }
     }
 
     #[cfg(test)]
@@ -424,22 +385,19 @@ impl App {
         self.editor_runtime.active_is_toggled(&plugin_name)
     }
 
-    pub(crate) fn active_shows_gutter(&self) -> bool {
-        self.active_tab_session().is_none_or(|session| session.shows_gutter())
-    }
-
     pub(crate) fn active_needs_cursor_blink_wakeup(&self) -> bool {
         self.active_tab_session().is_some_and(|session| session.needs_cursor_blink_wakeup())
     }
 
     pub(crate) fn active_toc_visible(&self) -> bool {
-        self.active_tab_session().is_some_and(|session| session.toc_visible())
+        self.active_tab_session()
+            .is_some_and(|session| session.handles_own_rendering() && session.toc_visible())
     }
 
     /// Persist workspace snapshot with correct sidebar settings.
     pub(crate) fn persist_workspace_state(&mut self) {
         let sidebar_pinned = self.ui_shell.sidebar_pinned();
-        let sidebar_width = self.ui_shell.sidebar_width();
+        let sidebar_width = self.ui_shell.sidebar_width_logical();
         let snapshots_directory = &self.paths.snapshots_dir;
         let runtime_snapshot = self.editor_runtime.workspace_snapshot();
         let snap = snapshot_runtime_workspace(
@@ -448,7 +406,7 @@ impl App {
             Some(sidebar_width),
             snapshots_directory,
         );
-        if let Err(e) = self.workspace_store.save_workspace(&snap) {
+        if let Err(e) = self.workspace_services.store().save_workspace(&snap) {
             eprintln!("[workspace] save_workspace error: {}", e);
         }
         self.save_pinned_paths();
@@ -456,7 +414,7 @@ impl App {
 
     pub(crate) fn save_pinned_paths(&mut self) {
         let paths = self.editor_runtime.pinned_paths();
-        if let Err(e) = self.workspace_store.save_pinned_paths(&paths) {
+        if let Err(e) = self.workspace_services.store().save_pinned_paths(&paths) {
             eprintln!("[workspace] save_pinned_paths error: {}", e);
         }
     }
@@ -485,7 +443,7 @@ impl App {
             scroll_anchor_offset: tab.scroll_anchor_offset,
         });
         if let Some(entry) = entry {
-            self.file_history.record(entry);
+            self.workspace_services.record_history(entry);
         }
     }
 
@@ -510,12 +468,12 @@ impl App {
                 })
             })
             .collect::<Vec<_>>();
-        self.file_history.record_batch(entries);
+        self.workspace_services.record_history_batch(entries);
     }
 
     /// Persist history to disk (non-fatal on error).
     pub(crate) fn save_history(&self) {
-        if let Err(e) = self.file_history.save(&self.paths.history_file) {
+        if let Err(e) = self.workspace_services.history().save(&self.paths.history_file) {
             eprintln!("[file_history] save failed: {e}");
         }
     }
@@ -554,7 +512,8 @@ impl App {
     /// Rebuild the native menu bar with current recent files.
     pub(crate) fn rebuild_native_menu(&mut self) {
         let recent: Vec<std::path::PathBuf> = self
-            .file_history
+            .workspace_services
+            .history()
             .get_valid_entries(appkit_core::file_history::MENU_LIMIT)
             .iter()
             .map(|e| e.file_path.clone())

@@ -39,7 +39,7 @@ pub fn build_new_document_menu(
     let mut top_px = anchor_y + pad_y;
     let mut item_rects = Vec::with_capacity(items.len());
     for item in &items {
-        let item_height = if item.is_separator { 8.0 * dpi } else { item_h };
+        let item_height = if item.is_separator() { 8.0 * dpi } else { item_h };
         item_rects.push(Rect::new(
             menu_left + pad_x,
             top_px,
@@ -91,19 +91,19 @@ pub fn build_settings_menu(
         PopupMenuItem::action("显示行号", PMA::ToggleLineNumbers).with_active(show_line_numbers),
         PopupMenuItem::action("自动换行", PMA::ToggleWordWrap).with_active(word_wrap),
         PopupMenuItem::action("显示状态栏", PMA::ToggleStatusBar).with_active(show_status_bar),
-        PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+        PopupMenuItem::Separator,
         PopupMenuItem::action("跟随系统", PMA::SetThemeMode(crate::settings::ThemeMode::System))
             .with_active(theme_mode == crate::settings::ThemeMode::System),
         PopupMenuItem::action("深色模式", PMA::SetThemeMode(crate::settings::ThemeMode::Dark))
             .with_active(theme_mode == crate::settings::ThemeMode::Dark),
         PopupMenuItem::action("浅色模式", PMA::SetThemeMode(crate::settings::ThemeMode::Light))
             .with_active(theme_mode == crate::settings::ThemeMode::Light),
-        PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+        PopupMenuItem::Separator,
         PopupMenuItem::action("Sidebar 模式", PMA::SetViewMode(ViewMode::Sidebar))
             .with_active(current_mode == ViewMode::Sidebar),
         PopupMenuItem::action("Tabs 模式", PMA::SetViewMode(ViewMode::Tabs))
             .with_active(current_mode == ViewMode::Tabs),
-        PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+        PopupMenuItem::Separator,
         PopupMenuItem::action("打开Settings", PMA::OpenSettingsFile),
     ];
     let menu_left = anchor_x.min(screen_w - menu_w).max(0.0);
@@ -113,7 +113,7 @@ pub fn build_settings_menu(
     let mut top_px = anchor_y + pad_y;
     let mut item_rects = Vec::with_capacity(items.len());
     for item in &items {
-        let h = if item.is_separator { 8.0 * dpi } else { item_h };
+        let h = if item.is_separator() { 8.0 * dpi } else { item_h };
         item_rects.push(Rect::new(
             menu_left + pad_x,
             top_px,
@@ -160,11 +160,11 @@ mod tests {
         let menu = build_settings_menu(None, &input, 800.0, 600.0, &metrics).expect("menu");
 
         assert_eq!(menu.menu_rect.w, 400.0);
-        assert!(!menu.items[0].is_active);
-        assert!(!menu.items[1].is_active);
-        assert!(menu.items[2].is_active);
-        assert!(menu.items[5].is_active);
-        assert!(menu.items[9].is_active);
+        assert!(!menu.items[0].is_active());
+        assert!(!menu.items[1].is_active());
+        assert!(menu.items[2].is_active());
+        assert!(menu.items[5].is_active());
+        assert!(menu.items[9].is_active());
     }
 
     #[test]
@@ -175,7 +175,7 @@ mod tests {
             build_settings_menu(None, &SidebarSettingsInput::default(), 800.0, 600.0, &metrics)
                 .expect("settings menu should be constructed");
 
-        assert!(menu.items.iter().all(|item| item.label != "打开同步面板"));
+        assert!(menu.items.iter().all(|item| item.label() != "打开同步面板"));
     }
 
     #[test]
@@ -186,13 +186,22 @@ mod tests {
 
         let menu = build_new_document_menu(anchor, (800.0, 600.0), &metrics, true);
 
-        let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
+        let labels: Vec<&str> = menu.items.iter().map(|item| item.label()).collect();
         assert_eq!(labels, vec!["新建 TXT", "新建 MMAP", "新建 MD", "加密笔记"]);
-        assert!(matches!(menu.items[0].action, PMA::NewDocument(NewDocumentKind::Text)));
-        assert!(matches!(menu.items[1].action, PMA::NewDocument(NewDocumentKind::Mindmap)));
-        assert!(matches!(menu.items[2].action, PMA::NewDocument(NewDocumentKind::Markdown)));
         assert!(matches!(
-            menu.items[3].action,
+            menu.items[0].command().expect("new document command"),
+            PMA::NewDocument(NewDocumentKind::Text)
+        ));
+        assert!(matches!(
+            menu.items[1].command().expect("new document command"),
+            PMA::NewDocument(NewDocumentKind::Mindmap)
+        ));
+        assert!(matches!(
+            menu.items[2].command().expect("new document command"),
+            PMA::NewDocument(NewDocumentKind::Markdown)
+        ));
+        assert!(matches!(
+            menu.items[3].command().expect("new document command"),
             PMA::NewDocument(NewDocumentKind::EncryptedMarkdown)
         ));
     }

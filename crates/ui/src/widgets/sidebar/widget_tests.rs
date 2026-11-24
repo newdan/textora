@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn widget_input_replaces_geometry_metrics_and_behavior() {
-        let mut widget = SidebarWidget::new(SidebarConfig::new_default(1.0), metrics(1.0));
+        let mut widget = SidebarWidget::new(SidebarConfig::new_default(), metrics(1.0));
         let mut first = sidebar_widget_input(vec![make_tab("first")], Some(0));
         first.settings.word_wrap = false;
         widget.set_input(first);
@@ -284,14 +284,8 @@ mod tests {
         w.set_rect(Rect::new(0.0, 0.0, 220.0, 800.0), &mut lc);
 
         let mut dl = DrawList::new();
-        let mut pc = PaintCtx {
-            global_alpha: 1.0,
-            list: &mut dl,
-            theme: &t,
-            dpi: 1.0,
-            offset: (0.0, 0.0),
-            shaper: None,
-        };
+        let mut pc =
+            PaintCtx { global_alpha: 1.0, list: &mut dl, theme: &t, dpi: 1.0, shaper: None };
         w.paint(&mut pc);
 
         // bg + header + new_btn + settings_btn + hamburger text + new text + settings text
@@ -513,7 +507,7 @@ mod tests {
 
     #[test]
     fn click_in_list_emits_switch_tab() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -674,7 +668,7 @@ mod tests {
 
     #[test]
     fn dirty_tab_has_dot_indicator_in_list() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -705,7 +699,7 @@ mod tests {
 
     #[test]
     fn widget_downcast_works() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -718,7 +712,7 @@ mod tests {
 
     #[test]
     fn widget_open_menu_initially_none() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -729,7 +723,7 @@ mod tests {
     #[test]
     fn widget_set_open_menu_then_retrieve() {
         use crate::widgets::popup_menu::PopupMenu;
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -749,7 +743,7 @@ mod tests {
 
     #[test]
     fn widget_dispatch_menu_click_no_menu_returns_none() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -771,7 +765,7 @@ mod tests {
 
     #[test]
     fn widget_is_visible_hidden_state_false() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = false;
         let w = SidebarWidget::new(
             cfg,
@@ -783,7 +777,7 @@ mod tests {
 
     #[test]
     fn widget_is_visible_pinned_true() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let w = SidebarWidget::new(
             cfg,
@@ -792,7 +786,7 @@ mod tests {
         assert!(w.is_visible());
 
         let mut w2 = SidebarWidget::new(
-            SidebarConfig::new_default(1.0),
+            SidebarConfig::new_default(),
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
         );
         w2.set_visibility(Visibility::Pinned);
@@ -801,7 +795,7 @@ mod tests {
 
     #[test]
     fn widget_on_scroll_updates_offset() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -821,7 +815,7 @@ mod tests {
 
     #[test]
     fn widget_hovered_index_initially_none() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -831,7 +825,7 @@ mod tests {
 
     #[test]
     fn widget_set_hovered_index_works() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -844,7 +838,7 @@ mod tests {
 
     #[test]
     fn widget_pinned_default_true() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -854,7 +848,7 @@ mod tests {
 
     #[test]
     fn widget_set_pinned_works() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -867,7 +861,7 @@ mod tests {
 
     #[test]
     fn widget_sidebar_width_get_set() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -880,7 +874,7 @@ mod tests {
 
     #[test]
     fn widget_set_sidebar_width_clamps() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -921,7 +915,7 @@ mod tests {
 
     #[test]
     fn widget_current_layout_delegates() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -943,7 +937,7 @@ mod tests {
 
     #[test]
     fn widget_on_mouse_move_full_does_not_panic() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -964,7 +958,7 @@ mod tests {
 
     #[test]
     fn widget_open_settings_menu_creates_popup() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg.clone(),
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -988,7 +982,7 @@ mod tests {
 
     #[test]
     fn widget_right_click_on_tab_emits_context_menu() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg.clone(),
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -1028,7 +1022,7 @@ mod tests {
     #[test]
     fn widget_settings_menu_click_outside_dismisses() {
         use crate::widgets::popup_menu::PopupMenu;
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg.clone(),
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -1378,7 +1372,7 @@ mod tests {
 
     #[test]
     fn dirty_flag_prevents_rebuild_on_set_rect() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -1430,7 +1424,7 @@ mod tests {
 
     #[test]
     fn scroll_moves_items_and_hit_follows() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut w = SidebarWidget::new(
             cfg,
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
@@ -1500,7 +1494,7 @@ mod tests {
         let theme = test_theme();
         for dpi in [1.0, 2.0] {
             for width in [160.0, 220.0, 400.0] {
-                let cfg = SidebarConfig { pinned: true, width: width * dpi };
+                let cfg = SidebarConfig { pinned: true, width };
                 let mut widget = SidebarWidget::new(cfg, metrics(dpi));
                 let mut input = sidebar_widget_input(Vec::new(), None);
                 input.metrics = metrics(dpi);
@@ -1569,7 +1563,7 @@ mod sidebar_integration_tests {
 
     #[test]
     fn sidebar_config_defaults() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         assert!(cfg.pinned, "default SidebarConfig should be pinned");
         assert_eq!(cfg.width, 220.0);
     }
@@ -1578,7 +1572,7 @@ mod sidebar_integration_tests {
 
     #[test]
     fn sidebar_state_starts_pinned_by_default() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let state = SidebarState::new(&cfg);
         assert_eq!(state.visibility(), Visibility::Pinned);
         assert!(state.is_visible());
@@ -1603,7 +1597,7 @@ mod sidebar_integration_tests {
 
     #[test]
     fn cmdb_toggles_pin_and_config() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         let mut state = SidebarState::new(&cfg);
         assert_eq!(state.visibility(), Visibility::Pinned);
         let action = state.on_key(SidebarKey::TogglePin, &mut cfg);
@@ -1618,7 +1612,7 @@ mod sidebar_integration_tests {
 
     #[test]
     fn esc_collapses_hover_peek_only() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         let mut state = SidebarState::new(&cfg);
         let action = state.on_key(SidebarKey::Escape, &mut cfg);
         assert_eq!(action, None);
@@ -1867,7 +1861,7 @@ mod sidebar_integration_tests {
 
     #[test]
     fn mode_switch_resets_transient_state() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut state = SidebarState::new(&cfg);
         state.set_hovered_index(Some(3));
         assert_eq!(state.hovered_index(), Some(3));

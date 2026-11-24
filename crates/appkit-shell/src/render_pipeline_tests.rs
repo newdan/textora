@@ -879,6 +879,42 @@ fn visual_subset_shape_results_are_cacheable() {
 }
 
 #[test]
+fn long_line_shaping_plan_keeps_the_visible_rows_and_cursor_in_one_subset() {
+    const BYTES_PER_ROW: usize = 1_024;
+    const TOTAL_ROWS: usize = 8;
+    const LAYOUT_HASH: u64 = 47;
+    let bytes = vec![b'a'; BYTES_PER_ROW * TOTAL_ROWS];
+    let entry = DisplayLineEntry {
+        visual_line_count: TOTAL_ROWS as u16,
+        visual_breaks: (0..TOTAL_ROWS)
+            .map(|row| crate::snap_tree::VisualBreak {
+                byte_start: (row * BYTES_PER_ROW) as u32,
+                byte_end: ((row + 1) * BYTES_PER_ROW) as u32,
+                pixel_width: 64.0,
+            })
+            .collect(),
+        byte_offset: 0,
+        byte_length: bytes.len() as u32,
+        content_hash: LAYOUT_HASH,
+    };
+
+    let plan = super::LineShapePlan::resolve(
+        &bytes,
+        Some(&entry),
+        LAYOUT_HASH,
+        2,
+        1,
+        Some((4 * BYTES_PER_ROW) as u32),
+    );
+
+    assert!(plan.is_subset());
+    assert_eq!(plan.cluster_byte_offset, 2 * BYTES_PER_ROW);
+    assert_eq!(plan.start_row..plan.end_row, 2..6);
+    assert_eq!(plan.text.len(), 4 * BYTES_PER_ROW);
+    assert_eq!(plan.doc_rows, TOTAL_ROWS);
+}
+
+#[test]
 fn visual_subset_cache_metadata_preserves_doc_visual_range() {
     let metadata = super::render_cache_metadata_for_shaped_line(
         super::ShapedLineScope::VisualSubset,
@@ -927,10 +963,11 @@ fn render_viewport_state_reads_anchor_and_viewport_metrics_from_document_view() 
     presentation.display.viewport.scroll_anchor = ui::viewport::ScrollAnchor::new(3, 18.0);
     presentation.display.viewport.viewport_height = 2.2;
 
-    let state = super::compute_render_viewport_state_from_presentation(&model, &presentation, 10.0);
+    let state = super::resolve_visible_line_range(&presentation, 10.0, model.line_count(), 0);
 
     assert_eq!(state.skip_visual, 1);
     assert!((state.sub_line_offset + 8.0).abs() < 0.001);
     assert_eq!(state.start_doc, 3);
     assert_eq!(state.viewport_visual_rows, 5);
+    assert_eq!(state.candidate_lines, 3);
 }

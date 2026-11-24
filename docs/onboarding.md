@@ -6,7 +6,7 @@
 
 | 想知道什么 | 去哪里看 |
 | --- | --- |
-| 谁收到系统事件、决定当前操作？ | Textora 从 [`main.rs`](../crates/app/src/main.rs) 进入 [`app_lifecycle.rs`](../crates/app/src/app_lifecycle.rs)；Notora 从 [`main.rs`](../crates/notora-app/src/main.rs) 经 [`app.rs`](../crates/notora-app/src/app.rs) 进入 [`runtime.rs`](../crates/notora-app/src/runtime.rs)。产品层处理焦点、菜单、对话框及各自的业务策略。 |
+| 谁收到系统事件、决定当前操作？ | Textora 从 [`main.rs`](../crates/app/src/main.rs) 进入 [`app_lifecycle.rs`](../crates/app/src/app_lifecycle.rs)；Notora 从 [`main.rs`](../crates/notora-app/src/main.rs) 进入 [`events.rs`](../crates/notora-app/src/events.rs) 和 [`runtime.rs`](../crates/notora-app/src/runtime.rs)。产品层处理焦点、菜单、对话框及各自的业务策略。 |
 | 正文、选区、撤销和脏状态在哪？ | [`DocumentModel`](../crates/appkit-core/src/document/model.rs) 持有 [`TextBuffer`](../crates/core/src/buffer/text_buffer.rs)，并维护光标、行索引、内容修订号和保存状态。缓冲区负责正文与撤销历史。 |
 | 当前标签的视图和几何在哪？ | 共享宿主 [`EditorRuntime`](../crates/appkit-shell/src/editor_runtime/mod.rs) 按 `TabId` 组织编辑器工作区；[`TabRuntime`](../crates/appkit-shell/src/tab_runtime.rs) 持有视图插件和展示状态；[`TabSession`](../crates/appkit-shell/src/tab_session.rs) 借用模型和运行态。`DocumentPresentation` 不是正文的权威来源。 |
 | 笔记库和编辑器工作区是同一个东西吗？ | 不是。Notora 域的 [`Workspace`](../crates/notora-core/src/workspace.rs) 指笔记库根及其元数据；壳层的 [`EditorTabSet`](../crates/appkit-shell/src/editor_tab_set.rs) 管打开的编辑器标签。笔记标识和 `TabId` 不能互换。 |
@@ -37,15 +37,15 @@ cargo run -p textora-app --bin textora -- "$sample_path"
 
 ## 1. 点击映射：从屏幕像素回到源码字节
 
-1. **产品先路由事件。** Textora 的自绘视图分支在 [`dispatch/mouse.rs`](../crates/app/src/dispatch/mouse.rs)，从 `dispatch_editor_mouse_input` 找到 `query_plugin_edit_hit_target`。Notora 从 [`NotoraRuntime::route_pointer_event`](../crates/notora-app/src/runtime.rs) 进入共享宿主的 [`handle_pointer_event` / `place_plugin_pointer_selection`](../crates/appkit-shell/src/editor_runtime/editor_pointer.rs)。
+1. **产品先路由事件。** Textora 的 [`dispatch_editor_mouse_input`](../crates/app/src/dispatch/mouse.rs) 与 Notora 的 [`NotoraRuntime::route_pointer_event`](../crates/notora-app/src/runtime.rs) 把插件编辑区事件交给共享宿主的 [`handle_pointer_event`](../crates/appkit-shell/src/editor_runtime/editor_pointer.rs)。宿主使用当前绘制帧发布的内容矩形进行命中测试，并保存选区或画布拖拽会话。
 2. **视图做坐标转换。** 两路都通过 [`TabSession`](../crates/appkit-shell/src/tab_session.rs) 调用 [`EditableView::hit_test_edit_target`](../crates/ui/src/plugin.rs)。[`MarkdownEditorView`](../crates/markdown/src/view/editor_view.rs) 对正文返回 `EditHitTarget::TextCaret`。[`hit_test_anchor`](../crates/markdown/src/view/engine_navigation.rs) 用渲染原点和滚动量算出文档坐标，找到排版后的视觉行，再用横坐标求字素边界。
-3. **投影找回源码，宿主放置光标。** 在 [`anchor_from_flat_line_and_visual_grapheme`](../crates/markdown/src/view/engine_navigation.rs) 跟进 [`SourceProjectionIndex::source_anchor_at`](../crates/markdown/src/projection.rs)，可看到视觉行与字素索引如何还原为 `SourceAnchor`。Textora 还通过 `hit_test_caret` 获取视觉落点，保留亲和性并更新模型光标和选区。共享宿主按返回的源码字节更新模型，通过 `TabSessionMut::set_cursor_byte` 同步到视图。
+3. **投影找回源码，宿主放置光标。** 在 [`anchor_from_flat_line_and_visual_grapheme`](../crates/markdown/src/view/engine_navigation.rs) 跟进 [`SourceProjectionIndex::source_anchor_at`](../crates/markdown/src/projection.rs)，可看到视觉行与字素索引如何还原为 `SourceAnchor`。Textora 使用宿主的视觉光标策略，宿主通过 `hit_test_caret` 保留折行边界的亲和性，并以按下时的选区范围限制拖选。
 
 **排查时区分三种量：** 像素是几何位置，视觉行和字素是本次排版里的位置，源码偏移是 UTF-8 字节索引。粗体标记可能不显示，中文又占多个字节，不能靠数屏幕字符算偏移。投影同时关联源码代数和布局修订号；换行边界的同一源码字节还可能对应两个视觉落点，由光标亲和性区分。纯文本视图不走这条 Markdown 投影链。
 
-**纯文本视图：** Textora 的 [`hit_test_with_sub_line_offset`](../crates/app/src/mouse.rs) 和共享宿主的 [`hit_test_text_byte`](../crates/appkit-shell/src/editor_runtime/editor_pointer.rs) 在 [`cursor_motion.rs`](../crates/appkit-shell/src/cursor_motion.rs) 共用两步查找：`hit_test_visual_row` 用窗口 Y 坐标和折行滚动量找可视行，`hit_test_cluster_end` 用窗口 X 坐标找字符簇边界。`hit_test_row_grapheme` 和 `hit_test_row_byte` 保留各自的零宽簇处理和浮点中点算法；Textora 仍将行内字素偏移连同可视行返回，以区分折行边界的两个落点，共享宿主仍返回行内字节偏移。
+**纯文本视图。** 两端的源码指针都进入共享宿主。[`cursor_motion.rs`](../crates/appkit-shell/src/cursor_motion.rs) 按窗口 Y 坐标和滚动量找到可视行，再从排版后的字符簇确定横向落点。Textora 使用 [`source_pointer.rs`](../crates/appkit-shell/src/editor_runtime/source_pointer.rs) 中的视觉行策略，保留逻辑行、视觉行和字素，以区分折行边界和相邻空行。Notora 沿用按字符簇字节偏移命中的策略。
 
-**纯文本选区：** 三击选的是源码行，不是屏幕上的折行；两端都在 [`DocumentModel::source_line_selection_range`](../crates/appkit-core/src/document/model.rs) 取含换行符的字节范围。按住 Shift 单击时，两端也都用 `ensure_selection_active` 保留已有锚点，或以原光标为锚点。按词或行拖选时则分开读：Textora 的 [`handle_cursor_moved`](../crates/app/src/mouse.rs) 按第一次移动的方向固定锚点，共享宿主的 [`place_grouped_drag_selection`](../crates/appkit-shell/src/editor_runtime/editor_pointer.rs) 保存初始范围，拖回时恢复整词或整行。
+**纯文本选区。** 两端均通过 [`DocumentModel::source_line_selection_range`](../crates/appkit-core/src/document/model.rs) 获取三击选中的源码行，其中包含换行符。按住 Shift 单击时，宿主保留已有锚点。按词或行拖选时，Textora 按首次拖动的方向固定锚点。Notora 保存初始范围，指针拖回该范围时恢复原选区。
 
 可从 [`view_tests.rs`](../crates/markdown/src/view/view_tests.rs) 的粗体中文命中和后续视觉折行命中用例开始：
 

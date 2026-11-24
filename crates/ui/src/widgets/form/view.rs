@@ -9,12 +9,9 @@ use crate::core::{
     WidgetId, dispatch_child_event_route, next_focus_target,
 };
 use crate::widgets::form::section::FormSection;
-use crate::widgets::scrollbar::{
-    SCROLLBAR_RESERVE_PX, ScrollbarAction, ScrollbarInput, ScrollbarWidget,
-};
+use crate::widgets::scrollbar::{SCROLLBAR_RESERVE_PX, ScrollbarAction, ScrollbarWidget};
 
 const DEFAULT_FORM_VIEW_SECTION_GAP_LOGICAL: f32 = 24.0;
-const FORM_SCROLLBAR_COORDINATE_SCALE: f64 = 1_000.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FormViewStyle {
@@ -139,18 +136,12 @@ impl FormView {
         self.content_height > self.rect.h
     }
 
-    fn scrollbar_input(&self) -> ScrollbarInput {
-        ScrollbarInput {
-            viewport_height_px: self.rect.h as f64 * FORM_SCROLLBAR_COORDINATE_SCALE,
-            total_display_rows: (self.content_height.max(0.0)
-                * FORM_SCROLLBAR_COORDINATE_SCALE as f32)
-                .ceil() as usize,
-            scroll_top_rows: self.scroll_offset as f64 * FORM_SCROLLBAR_COORDINATE_SCALE,
-        }
-    }
-
     fn sync_scrollbar_input(&mut self) {
-        self.scrollbar.set_input(self.scrollbar_input());
+        self.scrollbar.set_pixel_input(
+            f64::from(self.rect.h),
+            f64::from(self.content_height),
+            f64::from(self.scroll_offset),
+        );
     }
 
     fn layout_scrollbar(&mut self, ctx: &mut LayoutCtx) {
@@ -271,8 +262,7 @@ impl FormView {
     fn apply_scrollbar_action(&mut self, action: ScrollbarAction) {
         match action {
             ScrollbarAction::DragTo(scroll_offset) => {
-                let _ = self
-                    .set_scroll_offset((scroll_offset / FORM_SCROLLBAR_COORDINATE_SCALE) as f32);
+                let _ = self.set_scroll_offset(scroll_offset as f32);
             }
             ScrollbarAction::PageUp => {
                 let _ = self.scroll_by(-self.rect.h);
@@ -381,7 +371,6 @@ impl Widget for FormView {
         let saved_offset = ctx.list.offset;
         let theme = ctx.theme;
         let dpi = ctx.dpi;
-        let offset = ctx.offset;
         let global_alpha = ctx.global_alpha;
         let shaper = &mut ctx.shaper;
 
@@ -391,14 +380,8 @@ impl Widget for FormView {
                     saved_offset.0 + section_rect.x,
                     saved_offset.1 + section_rect.y - self.scroll_offset,
                 );
-                let mut section_ctx = PaintCtx {
-                    list,
-                    theme,
-                    dpi,
-                    offset,
-                    global_alpha,
-                    shaper: shaper.as_deref_mut(),
-                };
+                let mut section_ctx =
+                    PaintCtx { list, theme, dpi, global_alpha, shaper: shaper.as_deref_mut() };
                 section.paint(&mut section_ctx);
             }
             list.offset = saved_offset;
@@ -560,7 +543,6 @@ mod tests {
     use crate::widgets::checkbox::Checkbox;
     use crate::widgets::form::{FormRow, FormRowStyle, FormSectionStyle};
     use crate::widgets::label::{Label, LabelForeground, LabelStyle};
-    use crate::widgets::scrollbar::ScrollbarInput;
     use crate::widgets::text_box::TextBox;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -708,7 +690,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         view.paint(&mut paint_ctx);
@@ -728,14 +709,7 @@ mod tests {
         let view = laid_out_form_view(content_height(900.0), viewport_height(300.0));
 
         assert_eq!(view.scrollbar_rect, Rect::new(706.0, 0.0, 14.0, 300.0));
-        assert_eq!(
-            view.scrollbar.input,
-            ScrollbarInput {
-                viewport_height_px: 300_000.0,
-                total_display_rows: 900_000,
-                scroll_top_rows: 0.0,
-            },
-        );
+        assert_eq!(view.scrollbar.pixel_input_for_test(), (300.0, 900.0, 0.0),);
     }
 
     #[test]
@@ -745,17 +719,18 @@ mod tests {
         assert_eq!(wheel(&mut view, -120.0), Some(WidgetAction::Consumed));
 
         assert_eq!(view.scroll_offset(), 120.0);
-        assert_eq!(view.scrollbar.input.scroll_top_rows, 120_000.0);
+        assert_eq!(view.scrollbar.pixel_input_for_test().2, 120.0);
     }
 
     #[test]
     fn form_view_scrollbar_preserves_fractional_scroll_range() {
         let mut view = laid_out_form_view(content_height(300.1), viewport_height(300.0));
 
-        assert_eq!(view.scrollbar.input.viewport_height_px, 300_000.0);
-        assert_eq!(view.scrollbar.input.total_display_rows, 300_100);
+        let (viewport, content, _) = view.scrollbar.pixel_input_for_test();
+        assert_eq!(viewport, 300.0);
+        assert_eq!(content, f64::from(content_height(300.1)));
 
-        view.apply_scrollbar_action(ScrollbarAction::DragTo(100.0));
+        view.apply_scrollbar_action(ScrollbarAction::DragTo(content - viewport));
 
         assert!((view.scroll_offset() - 0.1).abs() < 0.001);
     }
@@ -796,7 +771,7 @@ mod tests {
             Some(WidgetAction::Consumed),
         );
         assert!(!view.is_capturing());
-        assert_eq!(view.scrollbar.input.scroll_top_rows, 600_000.0);
+        assert_eq!(view.scrollbar.pixel_input_for_test().2, 600.0);
     }
 
     #[test]

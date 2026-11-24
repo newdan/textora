@@ -175,7 +175,7 @@ mod tests {
         prepare_typed_untitled, prepare_untitled,
     };
     use crate::app_init::build_product_workspace;
-    use crate::workspace_persistence::{restore_workspace, snapshot_workspace};
+    use crate::workspace_persistence::{restore_workspace_for_test, snapshot_workspace};
     use appkit_shell::tab_runtime::TabRuntimeStore;
 
     fn test_dimensions() -> ViewportDimensions {
@@ -401,30 +401,25 @@ mod tests {
         let snapshot =
             toml::from_str(&serialized).expect("typed workspace snapshot should deserialize");
 
-        let restored = restore_workspace(
-            build_product_workspace(),
-            snapshot,
-            test_dimensions(),
-            16.0,
-            snapshots_directory.path(),
-        )
-        .expect("typed workspace should restore");
-        let active_id = restored
-            .workspace
-            .tab_id_at(restored.workspace.active_index())
-            .expect("restored typed tab should be active");
-
-        assert_eq!(restored.workspace.tab_ids(), restored.runtimes.ids());
+        let restored =
+            restore_workspace_for_test(snapshot, test_dimensions(), snapshots_directory.path());
+        let active_id = restored.active_tab_id().expect("restored typed tab should be active");
+        assert_eq!(
+            restored.tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            restored.runtime_tab_ids(),
+        );
         let restored_document =
-            restored.workspace.active_entry().expect("restored mindmap should be active");
+            restored.tab_session(active_id).expect("restored mindmap should be active").document();
         assert_eq!(restored_document.full_text(), "#");
         assert_eq!(restored_document.cursor_offset().to_usize(), 1);
         assert!(!restored_document.dirty);
-        assert_eq!(restored.workspace.suggested_file_name(0), Some("未命名.mmap.md"));
+        assert_eq!(
+            restored.workspace_snapshot().tabs[0].suggested_file_name.as_deref(),
+            Some("未命名.mmap.md")
+        );
         assert_eq!(
             restored
-                .runtimes
-                .get(active_id)
+                .tab_runtime(active_id)
                 .expect("restored typed tab should retain its runtime")
                 .plugin
                 .name(),

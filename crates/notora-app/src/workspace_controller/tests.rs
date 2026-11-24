@@ -12,7 +12,7 @@ use super::{
     WorkspaceFileMonitorEvent, default_migration_backup_retention, run_indexer, scan_workspace,
 };
 use crate::action::{CardQuery, DocumentLoadRequest};
-use crate::index_worker::IndexWorkerCommand;
+use crate::index_worker::{IndexWorkerCommand, IndexWorkerEvent, IndexWorkerMonitorSender};
 use crate::product::{
     NotoraProduct, NotoraProductEvent, WorkspaceBootstrapCompletion, WorkspaceCompletion,
     WorkspaceEventScope, WorkspaceEventSender,
@@ -320,8 +320,8 @@ fn indexer_shutdown_does_not_wait_for_a_blocked_monitor() {
         .expect("workspace fixture should initialize");
     let descriptor = workspace.descriptor();
     let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
-    let (file_sender, monitor_events) = mpsc::channel();
-    let (command_sender, command_receiver) = mpsc::channel();
+    let (command_sender, indexer_receiver) = mpsc::channel();
+    let file_sender = IndexWorkerMonitorSender::new(command_sender.clone());
     let product = NotoraProduct::new();
     let event_sender = WorkspaceEventSender::new(
         product.event_sender(),
@@ -334,20 +334,16 @@ fn indexer_shutdown_does_not_wait_for_a_blocked_monitor() {
             catalog_path,
             None,
             default_migration_backup_retention(),
-            monitor_events,
-            command_receiver,
+            indexer_receiver,
             event_sender,
         );
         let _ = stopped_sender.send(());
     });
-    drop(command_sender);
+    command_sender.send(IndexWorkerEvent::Shutdown).expect("indexer should accept shutdown");
     let stopped = stopped_receiver.recv_timeout(Duration::from_secs(2));
     drop(file_sender);
     worker.join().expect("indexer should stop after fixture release");
-    assert!(
-        stopped.is_ok(),
-        "indexer shutdown must follow command ownership, not monitor completion"
-    );
+    assert!(stopped.is_ok(), "indexer should process shutdown while the monitor is still active");
 }
 
 #[test]
@@ -368,8 +364,8 @@ fn assert_monitor_failure_keeps_commands_available(failure: Option<WorkspaceFile
         Workspace::open_or_initialize(directory.path()).expect("workspace should initialize");
     let descriptor = workspace.descriptor();
     let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
-    let (file_sender, monitor_events) = mpsc::channel();
-    let (command_sender, command_receiver) = mpsc::channel();
+    let (command_sender, indexer_receiver) = mpsc::channel();
+    let mut file_sender = IndexWorkerMonitorSender::new(command_sender.clone());
     let mut product = NotoraProduct::new();
     product.set_active_workspace(descriptor.workspace_id, 1);
     let event_sender = WorkspaceEventSender::new(
@@ -382,8 +378,7 @@ fn assert_monitor_failure_keeps_commands_available(failure: Option<WorkspaceFile
             catalog_path,
             None,
             default_migration_backup_retention(),
-            monitor_events,
-            command_receiver,
+            indexer_receiver,
             event_sender,
         )
     });
@@ -396,13 +391,13 @@ fn assert_monitor_failure_keeps_commands_available(failure: Option<WorkspaceFile
             WorkspaceCompletion::WorkspaceIndexFailed { message } if message.contains("文件监视器"))
     });
     command_sender
-        .send(IndexWorkerCommand::QueryNavigationTree)
+        .send(IndexWorkerEvent::Command(IndexWorkerCommand::QueryNavigationTree))
         .expect("monitor failure must not terminate command handling");
     wait_for_workspace_completion(&mut product, |completion| {
         matches!(completion, WorkspaceCompletion::NavigationTreeLoaded { .. })
     });
-    drop(command_sender);
-    worker.join().expect("indexer should stop after command ownership ends");
+    command_sender.send(IndexWorkerEvent::Shutdown).expect("indexer should accept shutdown");
+    worker.join().expect("indexer should stop after explicit shutdown");
 }
 
 #[test]
@@ -413,8 +408,8 @@ fn monitor_ready_rescans_files_created_before_registration() {
     let descriptor = workspace.descriptor();
     let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
     let completed_catalog_path = catalog_path.clone();
-    let (event_sender, monitor_events) = mpsc::channel();
-    let (command_sender, command_receiver) = mpsc::channel();
+    let (command_sender, indexer_receiver) = mpsc::channel();
+    let mut event_sender = IndexWorkerMonitorSender::new(command_sender.clone());
     let mut product = NotoraProduct::new();
     product.set_active_workspace(descriptor.workspace_id, 1);
     let product_sender = WorkspaceEventSender::new(
@@ -427,8 +422,7 @@ fn monitor_ready_rescans_files_created_before_registration() {
             catalog_path,
             None,
             default_migration_backup_retention(),
-            monitor_events,
-            command_receiver,
+            indexer_receiver,
             product_sender,
         )
     });
@@ -447,9 +441,9 @@ fn monitor_ready_rescans_files_created_before_registration() {
     wait_for_workspace_completion(&mut product, |completion| {
         matches!(completion, WorkspaceCompletion::NavigationTreeLoaded { .. })
     });
-    drop(command_sender);
+    command_sender.send(IndexWorkerEvent::Shutdown).expect("indexer should accept shutdown");
     drop(event_sender);
-    worker.join().expect("indexer should stop after command ownership ends");
+    worker.join().expect("indexer should stop after explicit shutdown");
     let catalog = Catalog::open(&completed_catalog_path).expect("catalog should reopen");
     assert!(
         catalog
@@ -500,20 +494,19 @@ fn indexer_recovery_after_preflight_notifies_the_product_about_restored_metadata
     drop(catalog);
     fs::write(&catalog_path, "damaged after the startup preflight")
         .expect("fixture catalog should be damaged");
-    let (monitor_event_sender, monitor_events) = mpsc::channel();
-    let (command_sender, command_receiver) = mpsc::channel();
+    let (command_sender, indexer_receiver) = mpsc::channel();
+    let monitor_event_sender = IndexWorkerMonitorSender::new(command_sender.clone());
     let mut product = NotoraProduct::new();
     product.set_active_workspace(descriptor.workspace_id, 1);
     drop(monitor_event_sender);
-    drop(command_sender);
+    command_sender.send(IndexWorkerEvent::Shutdown).expect("indexer should accept shutdown");
 
     run_indexer(
         workspace,
         catalog_path,
         Some(workspace_backups),
         default_migration_backup_retention(),
-        monitor_events,
-        command_receiver,
+        indexer_receiver,
         WorkspaceEventSender::new(
             product.event_sender(),
             WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation: 1 },
@@ -545,8 +538,8 @@ fn watcher_batch_schedules_a_second_presence_check_for_a_deleted_note() {
         .expect("workspace metadata should be initialized");
     let descriptor = workspace.descriptor();
     let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
-    let (monitor_event_sender, monitor_events) = mpsc::channel();
-    let (command_sender, command_receiver) = mpsc::channel();
+    let (command_sender, indexer_receiver) = mpsc::channel();
+    let mut monitor_event_sender = IndexWorkerMonitorSender::new(command_sender.clone());
     let mut product = NotoraProduct::new();
     product.set_active_workspace(descriptor.workspace_id, 1);
     let event_sender = product.event_sender();
@@ -558,8 +551,7 @@ fn watcher_batch_schedules_a_second_presence_check_for_a_deleted_note() {
                 catalog_path,
                 None,
                 default_migration_backup_retention(),
-                monitor_events,
-                command_receiver,
+                indexer_receiver,
                 WorkspaceEventSender::new(
                     event_sender,
                     WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation: 1 },
@@ -610,8 +602,8 @@ fn watcher_batch_schedules_a_second_presence_check_for_a_deleted_note() {
         thread::sleep(Duration::from_millis(10));
     }
     drop(monitor_event_sender);
-    drop(command_sender);
-    worker.join().expect("indexer should stop after its command channel closes");
+    command_sender.send(IndexWorkerEvent::Shutdown).expect("indexer should accept shutdown");
+    worker.join().expect("indexer should stop after explicit shutdown");
     let catalog = Catalog::open(&catalog_path).expect("catalog should reopen after indexing");
     assert!(catalog.active_notes().expect("active notes should query").is_empty());
 }
@@ -623,8 +615,8 @@ fn watcher_batch_refreshes_navigation_after_an_external_directory_change() {
         .expect("workspace metadata should be initialized");
     let descriptor = workspace.descriptor();
     let catalog_path = workspace.metadata_directory().join(CATALOG_FILE_NAME);
-    let (monitor_event_sender, monitor_events) = mpsc::channel();
-    let (command_sender, command_receiver) = mpsc::channel();
+    let (command_sender, indexer_receiver) = mpsc::channel();
+    let mut monitor_event_sender = IndexWorkerMonitorSender::new(command_sender.clone());
     let mut product = NotoraProduct::new();
     product.set_active_workspace(descriptor.workspace_id, 1);
     let event_sender = product.event_sender();
@@ -634,8 +626,7 @@ fn watcher_batch_refreshes_navigation_after_an_external_directory_change() {
             catalog_path,
             None,
             default_migration_backup_retention(),
-            monitor_events,
-            command_receiver,
+            indexer_receiver,
             WorkspaceEventSender::new(
                 event_sender,
                 WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation: 1 },
@@ -695,8 +686,8 @@ fn watcher_batch_refreshes_navigation_after_an_external_directory_change() {
     }
 
     drop(monitor_event_sender);
-    drop(command_sender);
-    worker.join().expect("indexer should stop after its command channel closes");
+    command_sender.send(IndexWorkerEvent::Shutdown).expect("indexer should accept shutdown");
+    worker.join().expect("indexer should stop after explicit shutdown");
 }
 
 #[test]

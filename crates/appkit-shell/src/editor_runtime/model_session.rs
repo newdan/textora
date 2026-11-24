@@ -34,12 +34,6 @@ fn inspector_redraw() -> EditorOutcome {
 }
 
 impl ModelSession {
-    pub(crate) fn replace_parts(&mut self, workspace: EditorTabSet, runtimes: TabRuntimeStore) {
-        self.workspace = workspace;
-        self.runtimes = runtimes;
-        debug_assert_eq!(self.workspace.tab_ids(), self.runtimes.ids());
-    }
-
     pub(crate) fn new(
         plugin_registry: ui::plugin::PluginRegistry,
         view_routes: ViewRouteTable,
@@ -76,6 +70,45 @@ impl ModelSession {
         tab_id
     }
 
+    pub(crate) fn append_restored_tab(&mut self, restored: super::RestoredEditorTab<'_>) -> TabId {
+        let route = restored.route_path.and_then(|path| self.workspace.plugin_route_for_path(path));
+        let plugin_name = restored
+            .active_plugin
+            .or(route.map(|rule| rule.default_plugin))
+            .unwrap_or(ui::plugin::PLUGIN_EDITOR);
+        let plugin = self.workspace.create_plugin_by_name(plugin_name);
+        let cached_toggle_source = route
+            .and_then(|rule| rule.toggle_target)
+            .filter(|target| plugin_name != *target)
+            .map(|target| self.workspace.create_plugin_by_name(target));
+        let document = restored.document;
+        let mut scroll_anchor = restored.scroll_anchor;
+        if document.buffer_len() == 0 && document.file_path.is_some() {
+            scroll_anchor = ui::viewport::ScrollAnchor::new(
+                scroll_anchor.doc_line.min(document.line_count().saturating_sub(1)),
+                scroll_anchor.pixel_offset.max(0.0),
+            );
+        }
+        let prepared = PreparedTab::new(
+            document,
+            TabRuntime::with_presentation(plugin, restored.presentation),
+        );
+        let tab_id = self.append_prepared_tab(prepared, restored.suggested_file_name);
+        let mut tab = self
+            .tab_session_mut(tab_id)
+            .expect("the restored tab and its runtime were installed together");
+        tab.set_scroll_anchor_state(scroll_anchor);
+        if !tab.plugin().allows_editing()
+            && let Some((text, offset)) = restored.preview_anchor
+        {
+            tab.restore_plugin_scroll_anchor(text, offset);
+        }
+        if let Some(plugin) = cached_toggle_source {
+            tab.cache_toggle_source_plugin(plugin);
+        }
+        tab_id
+    }
+
     pub(crate) fn activate(&mut self, tab_id: TabId) -> Option<WorkspaceEffect> {
         let index = self.workspace.index_of(tab_id)?;
         let effect = self.workspace.switch_to(index);
@@ -102,12 +135,7 @@ impl ModelSession {
         confirmation: CloseConfirmation,
     ) -> Option<WorkspaceEffect> {
         let decision = self.close_decision(tab_id)?;
-        let should_close = match confirmation {
-            CloseConfirmation::Saved => decision == CloseTabDecision::CanClose,
-            CloseConfirmation::Discard => decision != CloseTabDecision::Pinned,
-            CloseConfirmation::Cancel => false,
-        };
-        should_close.then(|| self.close(tab_id)).flatten()
+        confirmation.accepts(decision).then(|| self.close(tab_id)).flatten()
     }
 
     pub(crate) fn active_tab_id(&self) -> Option<TabId> {

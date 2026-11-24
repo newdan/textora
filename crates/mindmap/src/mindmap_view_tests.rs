@@ -221,10 +221,7 @@ fn screen_rect(view: &MindmapView, content_rect: Rect) -> Rect {
 }
 
 fn node_by_title<'a>(tree: &'a Tree, title: &str) -> &'a mmf::Node {
-    collect_nodes_dfs(&tree.root)
-        .into_iter()
-        .find(|node| node.title == title)
-        .expect("test node title should exist")
+    tree.nodes().find(|node| node.title == title).expect("test node title should exist")
 }
 
 fn drag_request(
@@ -247,8 +244,9 @@ fn drag_request_at_screen(
     pointer_y: f32,
     source_generation: u32,
 ) -> CanvasDragRequest {
-    let source_index = collect_nodes_dfs(&view.ready_tree().root)
-        .iter()
+    let source_index = view
+        .ready_tree()
+        .nodes()
         .position(|node| node.subtree_source_range == source_range)
         .expect("source must have DFS index");
     let source_geometry = &view.ready_hit_map().nodes[source_index];
@@ -279,8 +277,9 @@ fn drag_request_after_node(
 ) -> CanvasDragRequest {
     let pointer_x = pointer_past_node_right_edge(view, &source_range, anchor_title);
     let anchor = node_by_title(view.ready_tree(), anchor_title);
-    let anchor_index = collect_nodes_dfs(&view.ready_tree().root)
-        .iter()
+    let anchor_index = view
+        .ready_tree()
+        .nodes()
         .position(|node| node.subtree_source_range == anchor.subtree_source_range)
         .expect("anchor must have DFS index");
     let geometry = &view.ready_hit_map().nodes[anchor_index];
@@ -299,7 +298,7 @@ fn pointer_past_node_right_edge(
     source_range: &Range<usize>,
     anchor_title: &str,
 ) -> f32 {
-    let nodes = collect_nodes_dfs(&view.ready_tree().root);
+    let nodes = view.ready_tree().nodes().collect::<Vec<_>>();
     let source_index = nodes
         .iter()
         .position(|node| node.subtree_source_range == *source_range)
@@ -320,8 +319,9 @@ fn drag_request_on_sibling_right_edge(
     source_generation: u32,
 ) -> CanvasDragRequest {
     let anchor = node_by_title(view.ready_tree(), anchor_title);
-    let anchor_index = collect_nodes_dfs(&view.ready_tree().root)
-        .iter()
+    let anchor_index = view
+        .ready_tree()
+        .nodes()
         .position(|node| node.subtree_source_range == anchor.subtree_source_range)
         .expect("anchor must have DFS index");
     let geometry = &view.ready_hit_map().nodes[anchor_index];
@@ -1447,7 +1447,7 @@ fn generation_zero_requests_initial_source_update_only_once() {
 fn exact_subtree_selection_derives_node_selected_focus() {
     let source = "# Root\n## Child\n";
     let (view, _doc) = view_with_source(source);
-    let child_range = view.ready_tree().root.children[0].subtree_source_range.clone();
+    let child_range = view.ready_tree().root().children[0].subtree_source_range.clone();
     let focus = view.derive_focus(child_range.end, Some(child_range.clone()));
     assert!(matches!(focus, MindmapFocus::NodeSelected { node_index: 1 }));
 }
@@ -1455,7 +1455,7 @@ fn exact_subtree_selection_derives_node_selected_focus() {
 #[test]
 fn card_padding_hit_returns_source_object() {
     let (view, _doc, point) = laid_out_child_card_padding();
-    let expected = view.ready_tree().root.children[0].subtree_source_range.clone();
+    let expected = view.ready_tree().root().children[0].subtree_source_range.clone();
     let response = view.semantic_hit_target(point.0, point.1);
     assert!(matches!(
         response,
@@ -1481,7 +1481,7 @@ fn blank_space_to_the_right_of_title_selects_node() {
     );
 
     let point = screen_point(&view, content_point.x, content_point.y);
-    let expected = view.ready_tree().root.children[0].subtree_source_range.clone();
+    let expected = view.ready_tree().root().children[0].subtree_source_range.clone();
     let response = view.semantic_hit_target(point.x, point.y);
     assert!(matches!(
         response,
@@ -1493,12 +1493,12 @@ fn blank_space_to_the_right_of_title_selects_node() {
 fn empty_title_projects_placeholder_without_changing_source_range() {
     let (mut view, doc) = view_with_source("# Root\n##\n");
     render_test_view(&mut view, &doc);
-    let empty_title_byte = view.ready_tree().root.children[0].title_byte_range.start;
+    let empty_title_byte = view.ready_tree().root().children[0].title_byte_range.start;
     view.set_cursor_byte(empty_title_byte);
 
     let projection = view.build_render_projection();
     assert_eq!(projection.projected_title(1), mmf::canvas::EMPTY_TITLE_PLACEHOLDER);
-    let title_range = &view.ready_tree().root.children[0].title_byte_range;
+    let title_range = &view.ready_tree().root().children[0].title_byte_range;
     assert_eq!(title_range.start, title_range.end);
 }
 
@@ -1506,7 +1506,7 @@ fn empty_title_projects_placeholder_without_changing_source_range() {
 fn empty_placeholder_navigation_stays_at_the_zero_length_source_range() {
     let (mut view, doc) = view_with_source("# Root\n##\n");
     render_test_view(&mut view, &doc);
-    let title_start = view.ready_tree().root.children[0].title_byte_range.start;
+    let title_start = view.ready_tree().root().children[0].title_byte_range.start;
     view.set_cursor_byte(title_start);
 
     assert!(matches!(
@@ -1518,7 +1518,7 @@ fn empty_placeholder_navigation_stays_at_the_zero_length_source_range() {
 #[test]
 fn node_selection_projects_card_highlight_without_text_caret() {
     let (mut view, _) = view_with_source("# Root\n## Child\n");
-    let range = view.ready_tree().root.children[0].subtree_source_range.clone();
+    let range = view.ready_tree().root().children[0].subtree_source_range.clone();
     view.selection_mut()
         .expect("test view exposes selection")
         .set_selection_anchor_byte(Some(range.start));
@@ -1535,7 +1535,7 @@ fn node_selection_projects_card_highlight_without_text_caret() {
 #[test]
 fn selected_node_preedit_replaces_visual_title() {
     let (mut view, _) = view_with_source("# Root\n## Original\n");
-    let range = view.ready_tree().root.children[0].subtree_source_range.clone();
+    let range = view.ready_tree().root().children[0].subtree_source_range.clone();
     view.selection_mut()
         .expect("test view exposes selection")
         .set_selection_anchor_byte(Some(range.start));
@@ -1550,7 +1550,7 @@ fn selected_node_preedit_replaces_visual_title() {
 #[test]
 fn selected_node_preedit_exposes_the_projected_composition_caret() {
     let (mut view, doc) = view_with_source("# Root\n## Child\n");
-    let child = &view.ready_tree().root.children[0];
+    let child = &view.ready_tree().root().children[0];
     let selection = child.subtree_source_range.clone();
     view.selection_mut()
         .expect("test view exposes selection")
@@ -1576,7 +1576,7 @@ fn selected_node_preedit_exposes_the_projected_composition_caret() {
 #[test]
 fn preedit_cursor_screen_position_uses_projected_grapheme_geometry() {
     let (mut view, doc) = view_with_source("# Root\n## Child\n");
-    let title_start = view.ready_tree().root.children[0].title_byte_range.start;
+    let title_start = view.ready_tree().root().children[0].title_byte_range.start;
     view.set_cursor_byte(title_start + 1);
     view.set_preedit("你".into(), Some((0, 3)));
     render_test_view(&mut view, &doc);
@@ -1596,7 +1596,7 @@ fn title_caret_geometry_uses_the_same_font_as_the_drawn_text() {
     let title = "iiiiiiii";
     let source = format!("# {title}\n");
     let (mut view, doc) = view_with_source(&source);
-    let title_end = view.ready_tree().root.title_byte_range.end;
+    let title_end = view.ready_tree().root().title_byte_range.end;
     view.set_cursor_byte(title_end);
     let mut shaper = Shaper::new().expect("test shaper should initialize");
     shaper.set_font_family(Some("monospace"));
@@ -1631,7 +1631,7 @@ fn title_caret_geometry_uses_the_same_font_as_the_drawn_text() {
 fn root_title_editing_caret_follows_the_blink_visibility_phase() {
     let source = "# Root\n## Child\n";
     let (mut view, doc) = view_with_source(source);
-    let root_title_end = view.ready_tree().root.title_byte_range.end;
+    let root_title_end = view.ready_tree().root().title_byte_range.end;
     view.set_cursor_byte(root_title_end);
     let visible_draw_list = render_test_draw_list(&mut view, &doc);
     let root_geometry = &view.ready_hit_map().nodes[0];
@@ -1674,7 +1674,7 @@ fn root_title_editing_caret_follows_the_blink_visibility_phase() {
 #[test]
 fn selected_title_preedit_projects_a_caret_and_local_candidate_position() {
     let (mut view, doc) = view_with_source("# Root\n## Child\n");
-    let title_start = view.ready_tree().root.children[0].title_byte_range.start;
+    let title_start = view.ready_tree().root().children[0].title_byte_range.start;
     let selection = title_start + 1..title_start + 4;
     view.selection_mut()
         .expect("test view exposes selection")
@@ -1712,7 +1712,7 @@ fn selected_title_preedit_projects_a_caret_and_local_candidate_position() {
 #[test]
 fn hidden_blink_keeps_selected_title_preedit_candidate_position_projected() {
     let (mut view, doc) = view_with_source("# Root\n## Child\n");
-    let title_start = view.ready_tree().root.children[0].title_byte_range.start;
+    let title_start = view.ready_tree().root().children[0].title_byte_range.start;
     let selection = title_start + 1..title_start + 2;
     view.selection_mut()
         .expect("test view exposes selection")
@@ -1738,7 +1738,7 @@ fn hidden_blink_keeps_selected_title_preedit_candidate_position_projected() {
 #[test]
 fn cursor_screen_position_is_relative_to_plugin_bounds() {
     let (mut view, doc) = view_with_source("# Root\n");
-    let title_start = view.ready_tree().root.title_byte_range.start;
+    let title_start = view.ready_tree().root().title_byte_range.start;
     view.cursor_byte = Some(title_start);
     let mut shaper = Shaper::new().expect("test shaper");
     let theme = Theme::from_definition(&ui::theme::ThemeDefinition::default_dark());
@@ -1766,7 +1766,7 @@ fn cursor_screen_position_is_relative_to_plugin_bounds() {
 #[test]
 fn preedit_title_hit_keeps_the_source_caret_in_range() {
     let (mut view, doc) = view_with_source("# Root\n## A\n");
-    let title_start = view.ready_tree().root.children[0].title_byte_range.start;
+    let title_start = view.ready_tree().root().children[0].title_byte_range.start;
     view.set_cursor_byte(title_start);
     view.set_preedit("你".into(), Some((0, 3)));
     render_test_view(&mut view, &doc);
@@ -1785,8 +1785,8 @@ fn preedit_title_hit_keeps_the_source_caret_in_range() {
 fn down_from_a_title_moves_to_the_next_visible_dfs_node() {
     let (mut view, _) = view_with_source("# Root\n## Parent\n### Child\n## Next\n");
     let tree = view.ready_tree();
-    let child_start = tree.root.children[0].children[0].title_byte_range.start;
-    let next_range = tree.root.children[1].subtree_source_range.clone();
+    let child_start = tree.root().children[0].children[0].title_byte_range.start;
+    let next_range = tree.root().children[1].subtree_source_range.clone();
     view.set_cursor_byte(child_start);
 
     assert_eq!(
@@ -1829,7 +1829,7 @@ fn invalid_mmap_reports_no_canvas_metrics_and_valid_recovery_restores_them() {
 #[test]
 fn clear_edit_focus_detaches_from_a_final_title_without_a_newline() {
     let (mut view, _) = view_with_source("# Root");
-    let title_end = view.ready_tree().root.title_byte_range.end;
+    let title_end = view.ready_tree().root().title_byte_range.end;
     view.set_cursor_byte(title_end);
     assert!(matches!(view.render_focus(), MindmapFocus::TitleEditing { .. }));
 
@@ -1864,8 +1864,8 @@ fn nested_control_does_not_mask_parent_or_child_card_edges() {
     let child = &view.ready_hit_map().nodes[2];
     let control =
         view.ready_hit_map().controls.first().expect("branch should expose a collapse control");
-    let branch_range = view.ready_tree().root.children[0].subtree_source_range.clone();
-    let child_range = view.ready_tree().root.children[0].children[0].subtree_source_range.clone();
+    let branch_range = view.ready_tree().root().children[0].subtree_source_range.clone();
+    let child_range = view.ready_tree().root().children[0].children[0].subtree_source_range.clone();
     let branch_edge = screen_point(
         &view,
         branch.card_rect.right() - CARD_EDGE_INSET_DP,
@@ -1902,7 +1902,7 @@ fn collapsed_projection_records_full_descendant_count_and_control_plan() {
     assert_eq!(projection.collapsed_descendant_counts[1], Some(3));
     assert!(view.ready_hit_map().controls.iter().all(|control| control.source_node_index != 0));
 
-    let child_range = view.ready_tree().root.children[0].subtree_source_range.clone();
+    let child_range = view.ready_tree().root().children[0].subtree_source_range.clone();
     assert!(matches!(view.plan_canvas_control(child_range, 1), EditPlan::Apply(_)));
 }
 
@@ -1927,7 +1927,7 @@ fn collapse_end_to_end() {
     );
     assert_eq!(view.hit_test_canvas_control(parent_control_point), Some(parent_range.clone()));
 
-    let root_range = view.ready_tree().root.subtree_source_range.clone();
+    let root_range = view.ready_tree().root().subtree_source_range.clone();
     assert!(view.ready_hit_map().controls.iter().all(|control| control.source_node_index != 0));
     assert!(matches!(view.plan_canvas_control(root_range, 1), EditPlan::Consume));
 
@@ -1963,7 +1963,13 @@ fn collapse_end_to_end() {
     let drag_request = drag_request(
         &view,
         CanvasDragPhase::Update,
-        view.ready_tree().root.children.first().expect("parent node").subtree_source_range.clone(),
+        view.ready_tree()
+            .root()
+            .children
+            .first()
+            .expect("parent node")
+            .subtree_source_range
+            .clone(),
         700.0,
         120.0,
         2,
@@ -1976,7 +1982,7 @@ fn collapse_end_to_end() {
 
     let child_range = view
         .ready_tree()
-        .root
+        .root()
         .children
         .first()
         .and_then(|parent| parent.children.first())
@@ -1985,7 +1991,7 @@ fn collapse_end_to_end() {
         .clone();
     let grandchild_range = view
         .ready_tree()
-        .root
+        .root()
         .children
         .first()
         .and_then(|parent| parent.children.first())
@@ -2020,7 +2026,7 @@ fn drag_preview_label_contains_full_descendant_count() {
     let source = "# Root\n## Child\n### A\n#### B\n### C\n";
     let (mut view, doc) = view_with_source(source);
     render_test_view(&mut view, &doc);
-    let child_range = view.ready_tree().root.children[0].subtree_source_range.clone();
+    let child_range = view.ready_tree().root().children[0].subtree_source_range.clone();
     let request = drag_request(&view, CanvasDragPhase::Update, child_range, 700.0, 120.0, 1);
     let CanvasDragResponse::Preview(preview) = view.handle_canvas_drag(request, &doc) else {
         panic!("drag should produce a preview");
@@ -2033,7 +2039,7 @@ fn drag_preview_label_omits_zero_descendant_count() {
     let source = "# Root\n## Leaf\n## Sibling\n";
     let (mut view, doc) = view_with_source(source);
     render_test_view(&mut view, &doc);
-    let leaf_range = view.ready_tree().root.children[0].subtree_source_range.clone();
+    let leaf_range = view.ready_tree().root().children[0].subtree_source_range.clone();
     let request = drag_request(&view, CanvasDragPhase::Update, leaf_range, 700.0, 120.0, 1);
     let CanvasDragResponse::Preview(preview) = view.handle_canvas_drag(request, &doc) else {
         panic!("dragging a leaf should produce a preview");
@@ -2054,7 +2060,7 @@ fn drag_preview_width_covers_unicode_label_suffix() {
         .find(|geometry| geometry.source_node_index == 1)
         .expect("child geometry");
     let source_width = child.card_rect.w;
-    let child_range = view.ready_tree().root.children[0].subtree_source_range.clone();
+    let child_range = view.ready_tree().root().children[0].subtree_source_range.clone();
     let request = drag_request(&view, CanvasDragPhase::Update, child_range, 700.0, 120.0, 1);
     let CanvasDragResponse::Preview(preview) = view.handle_canvas_drag(request, &doc) else {
         panic!("drag should produce a preview");
@@ -2073,7 +2079,7 @@ fn drag_preview_width_uses_the_canvas_font_for_the_subtree_label() {
     let mut shaper = Shaper::new().expect("test shaper").with_font_family("monospace");
     shaper.set_font_size(23.0);
     view.render(&doc, Rect::new(0.0, 0.0, 1200.0, 800.0), &theme, &mut shaper, 1.0);
-    let branch = &view.ready_tree().root.children[0];
+    let branch = &view.ready_tree().root().children[0];
     let label = format!("{title} · 1");
     let expected =
         mmf::layout::measured_card_width_for_depth(&label, &view.constants, &mut shaper, 1);

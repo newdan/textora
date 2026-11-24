@@ -2,7 +2,9 @@ use crate::app::App;
 use crate::app_effect::AppEffect;
 use crate::workspace_tab_factory::ProductPreparedTab;
 use appkit_core::tab_set::types::TabId;
-use appkit_shell::editor_runtime::OpenDisposition;
+use appkit_shell::editor_runtime::{
+    CloseConfirmation, EditorNotification, EditorOutcome, OpenDisposition,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 enum BatchCloseSaveTarget {
@@ -26,27 +28,32 @@ fn batch_close_save_target(
 }
 
 impl App {
-    pub(crate) fn apply_workspace_effect(
-        &mut self,
-        effect: appkit_shell::editor_tab_set::WorkspaceEffect,
-    ) -> AppEffect {
-        let effect = match effect {
-            appkit_shell::editor_tab_set::WorkspaceEffect::Closed { activated: None, .. }
-                if self.editor_is_empty() =>
-            {
-                let viewport = self.viewport_dimensions(self.screen_height());
-                let ProductPreparedTab { prepared, suggested_file_name } =
-                    self.prepare_editor_untitled(viewport);
-                self.install_editor_tab(
-                    prepared,
-                    suggested_file_name,
-                    appkit_shell::editor_runtime::OpenDisposition::Persistent,
-                )
-            }
-            other => other,
-        };
+    pub(crate) fn dispatch_tab_switch(&mut self, id: TabId) -> AppEffect {
+        let outcome = self.activate_editor_tab(id);
+        self.apply_editor_tab_outcome(outcome)
+    }
 
-        self.handle_nav_effect(effect.nav_effect())
+    pub(crate) fn apply_editor_tab_outcome(&mut self, outcome: EditorOutcome) -> AppEffect {
+        use appkit_core::navigator::NavEffect;
+
+        let tab_closed = outcome
+            .notifications
+            .iter()
+            .any(|notification| matches!(notification, EditorNotification::TabClosed { .. }));
+        if tab_closed && self.editor_is_empty() {
+            return outcome.shell_effect.merge(self.new_untitled_doc());
+        }
+        let active_changed = outcome.notifications.iter().any(|notification| {
+            matches!(notification, EditorNotification::ActiveDocumentChanged { .. })
+        });
+        let nav_effect = if active_changed {
+            NavEffect::ActiveChanged
+        } else if tab_closed {
+            NavEffect::ItemsChanged
+        } else {
+            NavEffect::None
+        };
+        outcome.shell_effect.merge(self.handle_nav_effect(nav_effect))
     }
 
     fn finish_active_workspace_change(&mut self) -> AppEffect {
@@ -91,20 +98,19 @@ impl App {
     }
 
     pub(crate) fn update_entry_layout(&mut self) -> AppEffect {
-        if self.tab_scroll.is_animating() { AppEffect::REDRAW } else { AppEffect::NONE }
+        if self.ui_shell.tab_scroll_is_animating() { AppEffect::REDRAW } else { AppEffect::NONE }
     }
 
     pub(crate) fn open_file(&mut self, path: &std::path::Path) -> Result<AppEffect, String> {
         let viewport = self.viewport_dimensions(self.screen_height());
         let effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
             self.activate_editor_tab(tab_id)
-                .unwrap_or(appkit_shell::editor_tab_set::WorkspaceEffect::None)
         } else {
             let ProductPreparedTab { prepared, suggested_file_name } =
                 self.prepare_editor_file(path, viewport)?;
             self.install_editor_tab(prepared, suggested_file_name, OpenDisposition::Persistent)
         };
-        let app_effect = self.apply_workspace_effect(effect);
+        let app_effect = self.apply_editor_tab_outcome(effect);
         if let Some(active_index) = self.active_editor_index() {
             self.record_entry_to_history(active_index);
         }
@@ -200,7 +206,7 @@ impl App {
             self.prepare_editor_untitled(viewport);
         let effect =
             self.install_editor_tab(prepared, suggested_file_name, OpenDisposition::Persistent);
-        self.apply_workspace_effect(effect)
+        self.apply_editor_tab_outcome(effect)
     }
 
     pub(crate) fn new_typed_untitled_doc(
@@ -215,90 +221,98 @@ impl App {
             self.prepare_typed_editor_untitled(kind, viewport);
         let effect =
             self.install_editor_tab(prepared, suggested_file_name, OpenDisposition::Persistent);
-        self.apply_workspace_effect(effect)
+        self.apply_editor_tab_outcome(effect)
     }
 
     pub(crate) fn try_close_entry_with_prompt(&mut self, id: TabId) -> AppEffect {
-        let Some(idx) = self.editor_tab_index(id) else {
+        use appkit_shell::editor_tab_set::CloseTabDecision;
+
+        let Some(index) = self.editor_tab_index(id) else {
             return AppEffect::NONE;
         };
-        use appkit_shell::editor_tab_set::CloseTabDecision;
-        let mut app_effect = AppEffect::NONE;
-        let decision = self
-            .editor_close_decision(id)
-            .expect("tab index lookup should make close decision available");
-        match decision {
-            CloseTabDecision::CanClose => {
-                self.record_entry_to_history(idx);
-                if let Some(effect) = self.close_editor_tab(id) {
-                    app_effect = app_effect.merge(self.apply_workspace_effect(effect));
+        // A successful request removes the tab before notifying the product.
+        if self.editor_close_decision(id) == Some(CloseTabDecision::CanClose) {
+            self.record_entry_to_history(index);
+        }
+        let outcome = self.editor_runtime.request_close(id);
+        for notification in &outcome.notifications {
+            match notification {
+                EditorNotification::CloseRequested {
+                    decision: CloseTabDecision::NeedsSavePrompt,
+                    ..
+                } => {
+                    return self.prompt_to_close_dirty_tab(id, index);
                 }
-                self.save_history();
-                self.rebuild_native_menu();
-                app_effect = app_effect.merge(AppEffect::REDRAW);
-            }
-            CloseTabDecision::Pinned => {}
-            CloseTabDecision::NeedsSavePrompt => {
-                let file_name = self
-                    .editor_save_context(id)
-                    .map(|context| context.title)
-                    .unwrap_or_else(|| "未命名".to_owned());
-                let msg = format!("是否保存对「{}」的更改？", file_name);
-                let mut dialog = rfd::MessageDialog::new()
-                    .set_title("未保存的更改")
-                    .set_description(&msg)
-                    .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
-                        "保存".to_string(),
-                        "放弃".to_string(),
-                        "取消".to_string(),
-                    ))
-                    .set_level(rfd::MessageLevel::Warning);
-                if let Some(w) = self.editor_runtime.window() {
-                    dialog = dialog.set_parent(w);
+                EditorNotification::CloseRequested {
+                    decision: CloseTabDecision::Pinned, ..
+                } => {
+                    return AppEffect::NONE;
                 }
-                let result = dialog.show();
-                match result {
-                    rfd::MessageDialogResult::Custom(ref label) if label == "保存" => {
-                        let need_save_as = self
-                            .editor_save_context(id)
-                            .is_some_and(|context| context.file_path.is_none());
-                        if need_save_as {
-                            let default_name = self
-                                .editor_save_context(id)
-                                .map(|context| context.title)
-                                .unwrap_or_else(|| "未命名".to_owned());
-                            if let Some(path) =
-                                rfd::FileDialog::new().set_file_name(&default_name).save_file()
-                            {
-                                if let Err(e) =
-                                    self.submit_editor_save_before_close(id, Some(&path))
-                                {
-                                    eprintln!("保存失败: {e}");
-                                    return app_effect;
-                                }
-                            } else {
-                                return app_effect;
-                            }
-                        } else if let Err(e) = self.submit_editor_save_before_close(id, None) {
-                            eprintln!("保存失败: {e}");
-                            return app_effect;
-                        }
-                        app_effect = app_effect.merge(AppEffect::REDRAW);
-                    }
-                    rfd::MessageDialogResult::Custom(ref label) if label == "放弃" => {
-                        self.record_entry_to_history(idx);
-                        if let Some(effect) = self.close_editor_tab(id) {
-                            app_effect = app_effect.merge(self.apply_workspace_effect(effect));
-                        }
-                        self.save_history();
-                        self.rebuild_native_menu();
-                        app_effect = app_effect.merge(AppEffect::REDRAW);
-                    }
-                    _ => {}
-                }
+                EditorNotification::TabClosed { .. } => return self.finish_closed_tab(outcome),
+                _ => {}
             }
         }
-        app_effect
+        self.apply_editor_tab_outcome(outcome)
+    }
+
+    fn finish_closed_tab(&mut self, outcome: EditorOutcome) -> AppEffect {
+        let effect = self.apply_editor_tab_outcome(outcome);
+        self.save_history();
+        self.rebuild_native_menu();
+        effect.merge(AppEffect::REDRAW)
+    }
+
+    fn prompt_to_close_dirty_tab(&mut self, id: TabId, index: usize) -> AppEffect {
+        let file_name = self
+            .editor_save_context(id)
+            .map(|context| context.title)
+            .unwrap_or_else(|| "未命名".to_owned());
+        let mut dialog = rfd::MessageDialog::new()
+            .set_title("未保存的更改")
+            .set_description(format!("是否保存对「{file_name}」的更改？"))
+            .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+                "保存".to_owned(),
+                "放弃".to_owned(),
+                "取消".to_owned(),
+            ))
+            .set_level(rfd::MessageLevel::Warning);
+        if let Some(window) = self.editor_runtime.window() {
+            dialog = dialog.set_parent(window);
+        }
+        match dialog.show() {
+            rfd::MessageDialogResult::Custom(label) if label == "保存" => {
+                self.save_dirty_tab_before_close(id)
+            }
+            rfd::MessageDialogResult::Custom(label) if label == "放弃" => {
+                self.record_entry_to_history(index);
+                let outcome = self.editor_runtime.confirm_close(id, CloseConfirmation::Discard);
+                self.finish_closed_tab(outcome)
+            }
+            _ => {
+                let outcome = self.editor_runtime.confirm_close(id, CloseConfirmation::Cancel);
+                self.apply_editor_tab_outcome(outcome)
+            }
+        }
+    }
+
+    fn save_dirty_tab_before_close(&mut self, id: TabId) -> AppEffect {
+        let Some(context) = self.editor_save_context(id) else {
+            return AppEffect::NONE;
+        };
+        let save_as = if context.file_path.is_none() {
+            let Some(path) = rfd::FileDialog::new().set_file_name(&context.title).save_file()
+            else {
+                return AppEffect::NONE;
+            };
+            Some(path)
+        } else {
+            None
+        };
+        if let Err(error) = self.submit_editor_save_before_close(id, save_as.as_deref()) {
+            eprintln!("保存失败: {error}");
+            return AppEffect::NONE;
+        }
+        AppEffect::REDRAW
     }
 
     pub(crate) fn try_close_multiple_with_prompt(
@@ -398,12 +412,12 @@ impl App {
             }
         }
 
-        if !self.pending_close_after_save.is_empty() {
+        if self.workspace_services.has_pending_tab_closes() {
             for tab_id in clean_tab_ids {
                 if let Some(index) = self.editor_tab_index(tab_id) {
                     self.record_entry_to_history(index);
-                    if let Some(effect) = self.close_editor_tab(tab_id) {
-                        app_effect = app_effect.merge(self.apply_workspace_effect(effect));
+                    if let Some(effect) = self.discard_editor_tab(tab_id) {
+                        app_effect = app_effect.merge(self.apply_editor_tab_outcome(effect));
                     }
                 }
             }
@@ -417,8 +431,8 @@ impl App {
             let Some(tab_id) = self.editor_tab_id_at(i) else {
                 continue;
             };
-            if let Some(effect) = self.close_editor_tab(tab_id) {
-                app_effect = app_effect.merge(self.apply_workspace_effect(effect));
+            if let Some(effect) = self.discard_editor_tab(tab_id) {
+                app_effect = app_effect.merge(self.apply_editor_tab_outcome(effect));
             }
         }
         self.save_history();
@@ -487,7 +501,7 @@ impl App {
     }
 
     pub(crate) fn load_file(&mut self) {
-        let Some(path) = self.file_path.clone() else {
+        let Some(path) = self.platform.startup_file().map(std::path::Path::to_owned) else {
             return;
         };
         let Some((_, screen_height)) = self.editor_runtime.surface_size() else {
@@ -517,8 +531,8 @@ impl App {
             let Some(tab_id) = self.editor_tab_id_at(index) else {
                 continue;
             };
-            if let Some(next) = self.close_editor_tab(tab_id) {
-                app_effect = app_effect.merge(self.apply_workspace_effect(next));
+            if let Some(next) = self.discard_editor_tab(tab_id) {
+                app_effect = app_effect.merge(self.apply_editor_tab_outcome(next));
             }
         }
         self.save_history();
@@ -551,10 +565,9 @@ mod tests {
         app.push_entry_for_test(stub, Box::new(EditorPlugin::new()));
         let active = DocumentFixture::new(vec!["active".to_owned()], 10, 160.0);
         app.push_entry_for_test(active, Box::new(EditorPlugin::new()));
-        let switch_effect = app
-            .activate_editor_tab(app.editor_tab_id_at(1).expect("active tab index"))
-            .expect("tab switch should produce an effect");
-        let _ = app.apply_workspace_effect(switch_effect);
+        let switch_effect =
+            app.activate_editor_tab(app.editor_tab_id_at(1).expect("active tab index"));
+        let _ = app.apply_editor_tab_outcome(switch_effect);
         app
     }
 
@@ -593,7 +606,7 @@ mod tests {
         let mut app = app_with_file_stub_and_active_document(&file_path);
 
         let workspace_effect = app
-            .close_editor_tab(app.editor_tab_id_at(1).expect("active tab index"))
+            .discard_editor_tab(app.editor_tab_id_at(1).expect("active tab index"))
             .expect("active document should close cleanly");
 
         assert_eq!(
@@ -601,7 +614,7 @@ mod tests {
             0
         );
 
-        let app_effect = app.apply_workspace_effect(workspace_effect);
+        let app_effect = app.apply_editor_tab_outcome(workspace_effect);
 
         assert_eq!(
             app.active_tab_session().expect("active stub should hydrate").document().full_text(),
@@ -723,7 +736,7 @@ mod tests {
         let active_before_append = app.active_tab_id();
         let had_back_history = app.editor_has_back_history();
         let had_forward_history = app.editor_has_forward_history();
-        app.needs_redraw = false;
+        app.platform.clear_redraw();
         let _ = app.editor_runtime.take_skip_next_reshape_submit();
 
         let appended_id = app
@@ -736,7 +749,7 @@ mod tests {
         assert_eq!(app.active_tab_id(), active_before_append);
         assert_eq!(app.editor_has_back_history(), had_back_history);
         assert_eq!(app.editor_has_forward_history(), had_forward_history);
-        assert!(!app.needs_redraw);
+        assert!(!app.platform.redraw_pending());
         assert!(app.editor_runtime.take_skip_next_reshape_submit());
         assert_eq!(appended_index, app.editor_tab_count() - 1);
         let appended =
@@ -762,13 +775,13 @@ mod tests {
         open_untitled_fixture(&mut app);
         open_untitled_fixture(&mut app);
         app.switch_workspace_for_test(0);
-        app.needs_redraw = false;
+        app.platform.clear_redraw();
 
         let effect = app.execute_batch_close(&[1]);
 
         assert!(effect.redraw);
         assert!(effect.persist_workspace);
-        assert!(!app.needs_redraw);
+        assert!(!app.platform.redraw_pending());
     }
 
     #[test]
@@ -804,8 +817,8 @@ mod tests {
         assert!(app.tab_runtime(closed_id).is_some());
 
         let workspace_effect =
-            app.close_editor_tab(closed_id).expect("the only unpinned tab should close");
-        let app_effect = app.apply_workspace_effect(workspace_effect);
+            app.discard_editor_tab(closed_id).expect("the only unpinned tab should close");
+        let app_effect = app.apply_editor_tab_outcome(workspace_effect);
 
         assert!(app_effect.redraw);
         assert_eq!(app.editor_tab_count(), 1);
@@ -924,13 +937,10 @@ mod tests {
         let other_id = app.editor_tab_id_at(2).expect("tab 2 must exist");
 
         // Reorder the workspace by closing tab 0: the targeted tab shifts to index 0.
-        let effect = app.close_editor_tab(closed_id).expect("close clean tab 0");
+        let effect = app.discard_editor_tab(closed_id).expect("close clean tab 0");
         assert_eq!(
-            effect,
-            appkit_shell::editor_tab_set::WorkspaceEffect::Closed {
-                closed: closed_id,
-                activated: None
-            }
+            effect.notifications.as_slice(),
+            &[EditorNotification::TabClosed { tab_id: closed_id }],
         );
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
@@ -963,13 +973,11 @@ mod tests {
             app.editor_tab_id_at(2).expect("tab 2 must exist"),
         ];
 
-        let effect = app.close_editor_tab(stale_id).expect("closing the target tab should succeed");
+        let effect =
+            app.discard_editor_tab(stale_id).expect("closing the target tab should succeed");
         assert_eq!(
-            effect,
-            appkit_shell::editor_tab_set::WorkspaceEffect::Closed {
-                closed: closed_id,
-                activated: None
-            }
+            effect.notifications.as_slice(),
+            &[EditorNotification::TabClosed { tab_id: closed_id }],
         );
         assert_eq!(
             app.editor_tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),

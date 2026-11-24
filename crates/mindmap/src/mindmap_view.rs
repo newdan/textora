@@ -1,11 +1,9 @@
 pub(in crate::mindmap_view) use crate::mmf::canvas::MindmapRenderProjection;
 pub(in crate::mindmap_view) use crate::mmf::layout::{
     EXPANDED_CONTROL_RIGHT_OFFSET_DP, HitMap, LayoutConstants, LayoutTree, ProjectedTitle,
-    descendant_count, measured_card_width_for_depth,
+    measured_card_width_for_depth,
 };
-pub(in crate::mindmap_view) use crate::mmf::utils::{
-    collect_nodes_dfs, find_parent, find_siblings,
-};
+pub(in crate::mindmap_view) use crate::mmf::model::MindmapFocus;
 pub(in crate::mindmap_view) use crate::mmf::{self, MmfDiagnostic, Tree};
 pub(in crate::mindmap_view) use shaping::Shaper;
 pub(in crate::mindmap_view) use std::borrow::Cow;
@@ -64,14 +62,6 @@ pub(in crate::mindmap_view) enum MindmapDocumentState {
         generation: u32,
         diagnostic: MmfDiagnostic,
     },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum MindmapFocus {
-    None,
-    NodeSelected { node_index: usize },
-    TitleEditing { node_index: usize, cursor_byte: usize },
-    TitleTextSelected { node_index: usize, range: Range<usize> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -317,15 +307,12 @@ impl MindmapView {
         let MindmapDocumentState::Ready { tree, .. } = &self.document_state else {
             return MindmapFocus::None;
         };
-        let nodes = collect_nodes_dfs(&tree.root);
 
         if let Some(selection) = selection {
-            if let Some(node_index) =
-                nodes.iter().position(|node| node.subtree_source_range == selection)
-            {
+            if let Some(node_index) = tree.subtree_index(&selection) {
                 return MindmapFocus::NodeSelected { node_index };
             }
-            if let Some(node_index) = nodes.iter().position(|node| {
+            if let Some(node_index) = tree.nodes().position(|node| {
                 selection.start >= node.title_byte_range.start
                     && selection.end <= node.title_byte_range.end
             }) {
@@ -334,8 +321,7 @@ impl MindmapView {
             return MindmapFocus::None;
         }
 
-        nodes
-            .iter()
+        tree.nodes()
             .position(|node| {
                 cursor_byte >= node.title_byte_range.start
                     && cursor_byte <= node.title_byte_range.end
@@ -378,21 +364,20 @@ impl MindmapView {
             };
         };
         let focus = self.render_focus();
-        let nodes = collect_nodes_dfs(&tree.root);
         let mut projected_titles: Vec<Cow<'_, str>> =
-            nodes.iter().map(|node| Cow::Borrowed(node.title.as_str())).collect();
+            tree.nodes().map(|node| Cow::Borrowed(node.title.as_str())).collect();
         let preedit = self.preedit.as_ref().filter(|(text, _)| !text.is_empty());
         let mut caret = self.caret_for_focus(&focus);
         let mut composition_caret = None;
         let mut preedit_range = None;
-        let collapsed_descendant_counts = nodes
-            .iter()
+        let collapsed_descendant_counts = tree
+            .nodes()
             .enumerate()
             .map(|(node_index, node)| {
                 (node_index != 0
                     && node.props.as_ref().is_some_and(|props| props.collapsed)
                     && !node.children.is_empty())
-                .then(|| descendant_count(node))
+                .then(|| tree.subtree_indices(node_index).map_or(0, |range| range.len() - 1))
             })
             .collect();
 
@@ -405,7 +390,7 @@ impl MindmapView {
             caret = composition_caret.filter(|_| self.cursor_visible);
         }
 
-        for (node_index, node) in nodes.iter().enumerate() {
+        for (node_index, node) in tree.nodes().enumerate() {
             if node.title.is_empty()
                 && preedit_range.as_ref().is_none_or(|(active, _)| *active != node_index)
             {
@@ -447,7 +432,7 @@ impl MindmapView {
         let MindmapDocumentState::Ready { tree, .. } = &self.document_state else {
             return None;
         };
-        let node = *collect_nodes_dfs(&tree.root).get(*node_index)?;
+        let node = tree.node(*node_index)?;
         let cursor = cursor_byte.checked_sub(node.title_byte_range.start)?;
         Some((*node_index, clamp_to_char_boundary(&node.title, cursor)))
     }
@@ -463,17 +448,17 @@ impl MindmapView {
         };
         let (node_index, replacement) = match focus {
             MindmapFocus::NodeSelected { node_index } => {
-                let node = *collect_nodes_dfs(&tree.root).get(*node_index)?;
+                let node = tree.node(*node_index)?;
                 (*node_index, 0..node.title.len())
             }
             MindmapFocus::TitleEditing { node_index, cursor_byte } => {
-                let node = *collect_nodes_dfs(&tree.root).get(*node_index)?;
+                let node = tree.node(*node_index)?;
                 let cursor = cursor_byte.checked_sub(node.title_byte_range.start)?;
                 let cursor = clamp_to_char_boundary(&node.title, cursor);
                 (*node_index, cursor..cursor)
             }
             MindmapFocus::TitleTextSelected { node_index, range } => {
-                let node = *collect_nodes_dfs(&tree.root).get(*node_index)?;
+                let node = tree.node(*node_index)?;
                 let start = clamp_to_char_boundary(
                     &node.title,
                     range.start.saturating_sub(node.title_byte_range.start),
@@ -486,7 +471,7 @@ impl MindmapView {
             }
             MindmapFocus::None => return None,
         };
-        let node = *collect_nodes_dfs(&tree.root).get(node_index)?;
+        let node = tree.node(node_index)?;
         let mut projected_title = String::with_capacity(node.title.len() + preedit.len());
         projected_title.push_str(&node.title[..replacement.start]);
         projected_title.push_str(preedit);
@@ -533,7 +518,7 @@ pub(in crate::mindmap_view) fn layout_node_for_source(
     layout: &LayoutTree,
     source_node_index: usize,
 ) -> Option<&mmf::layout::LayoutNode> {
-    layout.nodes.iter().find(|node| node.source_node_index == source_node_index)
+    layout.nodes.iter().find(|node| node.source_node_index.0 == source_node_index)
 }
 
 pub(in crate::mindmap_view) fn hit_geometry_for_source(
@@ -550,24 +535,17 @@ fn measure_drag_preview_cards(
     shaper: &mut Shaper,
     projected_title: Option<ProjectedTitle<'_>>,
 ) -> Vec<DragPreviewCard> {
-    fn visit<'a>(node: &'a mmf::Node, nodes: &mut Vec<(&'a mmf::Node, usize)>) {
-        let index = nodes.len();
-        nodes.push((node, 0));
-        for child in &node.children {
-            visit(child, nodes);
-        }
-        nodes[index].1 = nodes.len() - index - 1;
-    }
-
-    let mut nodes = Vec::new();
-    visit(&tree.root, &mut nodes);
     layout
         .nodes
         .iter()
         .map(|layout_node| {
-            let (node, descendant_count) = nodes[layout_node.source_node_index];
-            let title_is_projected = projected_title
-                .is_some_and(|title| title.node_index == layout_node.source_node_index);
+            let source_index = layout_node.source_node_index.0;
+            let node = tree.node(source_index).expect("layout points to a source node");
+            let descendants =
+                tree.subtree_indices(source_index).expect("layout points to an indexed subtree");
+            let descendant_count = descendants.len() - 1;
+            let title_is_projected =
+                projected_title.is_some_and(|title| title.node_index == source_index);
             let width = if descendant_count > 0 || title_is_projected {
                 let label = drag_preview_label(&node.title, descendant_count);
                 measured_card_width_for_depth(&label, constants, shaper, layout_node.depth)
@@ -587,23 +565,16 @@ fn drag_preview_label(title: &str, descendant_count: usize) -> String {
     }
 }
 
-pub(in crate::mindmap_view) fn visible_source_indices(root: &mmf::Node) -> Vec<usize> {
-    fn visit(node: &mmf::Node, source_node_index: usize, output: &mut Vec<usize>) -> usize {
-        output.push(source_node_index);
-        let subtree_size = 1 + descendant_count(node);
-        if source_node_index != 0 && node.props.as_ref().is_some_and(|props| props.collapsed) {
-            return subtree_size;
-        }
-        let mut child_index = source_node_index + 1;
-        for child in &node.children {
-            child_index += visit(child, child_index, output);
-        }
-        subtree_size
-    }
-
-    let mut indices = Vec::new();
-    visit(root, 0, &mut indices);
-    indices
+pub(in crate::mindmap_view) fn visible_source_indices(tree: &Tree) -> impl Iterator<Item = usize> {
+    std::iter::successors(Some(0), |&index| {
+        let node = tree.node(index)?;
+        let next = if index != 0 && node.props.as_ref().is_some_and(|props| props.collapsed) {
+            tree.subtree_indices(index)?.end
+        } else {
+            index + 1
+        };
+        tree.node(next).map(|_| next)
+    })
 }
 
 pub(in crate::mindmap_view) fn layout_rect(node: &mmf::layout::LayoutNode) -> Rect {
@@ -1021,7 +992,6 @@ impl CanvasView for MindmapView {
                 return draw_list;
             };
             let projection = self.build_render_projection();
-            let nodes = collect_nodes_dfs(&tree.root);
             draw_list.clip(viewport.viewport, |canvas_draw_list| {
                 mmf::canvas::render(
                     canvas_draw_list,
@@ -1030,7 +1000,7 @@ impl CanvasView for MindmapView {
                     &render_theme,
                     &self.constants,
                     shaper,
-                    &nodes,
+                    &|index| tree.node(index),
                     Some(hit_map),
                     &projection,
                     connector_mesh_cache.as_ref(),

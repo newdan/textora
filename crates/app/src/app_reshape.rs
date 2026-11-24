@@ -1,4 +1,4 @@
-//! Reshape pipeline: invalidation, zoom, drain, submit, post-shape update.
+//! Source layout invalidation, spacing, and zoom.
 //! Methods on `impl App`, extracted from app.rs.
 
 use crate::app::App;
@@ -42,8 +42,10 @@ impl App {
 
     pub(crate) fn apply_zoom(&mut self, logical_font_size: f32) -> crate::app_effect::AppEffect {
         let logical_font_size = logical_font_size.clamp(6.0, 72.0);
-        self.settings.set_font_size(logical_font_size);
-        self.editor_runtime.update_settings(self.settings.clone());
+        if !self.editor_runtime.edit_settings(|settings| settings.set_font_size(logical_font_size))
+        {
+            return crate::app_effect::AppEffect::NONE;
+        }
         let metrics = self.ui_metrics();
         self.editor_runtime.with_render_resources(|_, resources| {
             if let Some(text) = resources.text.as_mut() {
@@ -67,24 +69,6 @@ impl App {
             }
         }
         crate::app_effect::AppEffect::RESHAPE.merge(crate::app_effect::AppEffect::PERSIST_SETTINGS)
-    }
-
-    pub(crate) fn drain_reshape_results(&mut self) {
-        self.needs_redraw |= self.editor_runtime.apply_active_reshape_results();
-    }
-
-    pub(crate) fn submit_reshape_ahead(&mut self) {
-        if self.editor_runtime.has_reshape_worker() {
-            self.refresh_active_source_spacing_state();
-        }
-        let width = self
-            .active_tab_session()
-            .map_or(1.0, |tab| self.viewport_content_width(tab.document()));
-        self.editor_runtime.submit_active_reshape_ahead(width);
-    }
-
-    pub(crate) fn post_shape_update(&mut self) {
-        self.needs_redraw |= self.editor_runtime.reveal_active_caret_after_shape();
     }
 }
 
@@ -128,11 +112,11 @@ mod zoom_tests {
     // ── Zoom helpers ───────────────────────────────────────────────
 
     fn sim_zoom_in(app: &mut App) -> crate::app_effect::AppEffect {
-        app.apply_zoom(app.settings.font_size + 1.0)
+        app.apply_zoom(app.editor_runtime.settings().font_size + 1.0)
     }
 
     fn sim_zoom_out(app: &mut App) -> crate::app_effect::AppEffect {
-        app.apply_zoom((app.settings.font_size - 1.0).max(6.0))
+        app.apply_zoom((app.editor_runtime.settings().font_size - 1.0).max(6.0))
     }
 
     fn sim_zoom_reset(app: &mut App) -> crate::app_effect::AppEffect {
@@ -145,7 +129,7 @@ mod zoom_tests {
     fn apply_zoom_sets_font_size() {
         let mut app = App::new(None);
         let _ = app.apply_zoom(20.0);
-        assert_eq!(app.settings.font_size, 20.0);
+        assert_eq!(app.editor_runtime.settings().font_size, 20.0);
         assert_eq!(app.editor_runtime.settings_snapshot().font_size, 20.0);
     }
 
@@ -153,15 +137,15 @@ mod zoom_tests {
     fn apply_zoom_returns_reshape_without_applying_it() {
         let mut app = App::new(None);
         let generation = app.editor_runtime.reshape_generation();
-        app.needs_redraw = false;
+        app.platform.clear_redraw();
 
         let effect = app.apply_zoom(20.0);
 
         assert!(effect.reshape);
         assert!(effect.redraw);
-        assert_eq!(app.settings.font_size, 20.0);
+        assert_eq!(app.editor_runtime.settings().font_size, 20.0);
         assert_eq!(app.editor_runtime.reshape_generation(), generation);
-        assert!(!app.needs_redraw);
+        assert!(!app.platform.redraw_pending());
     }
 
     #[test]
@@ -196,7 +180,7 @@ mod zoom_tests {
     #[test]
     fn viewport_content_width_accounts_for_margins() {
         let mut app = App::new(None);
-        app.settings.word_wrap = true;
+        app.editor_runtime.edit_settings(|settings| settings.word_wrap = true);
         let dv = crate::document_fixture::DocumentFixture::new(vec!["line".to_string()], 40, 40.0);
         let vw = app.viewport_content_width(&dv);
         let left_margin = app.editor_left_margin(dv.line_count());
@@ -208,7 +192,7 @@ mod zoom_tests {
     #[test]
     fn viewport_content_width_matches_render_width_with_left_chrome() {
         let mut app = App::new(None);
-        app.settings.word_wrap = true;
+        app.editor_runtime.edit_settings(|settings| settings.word_wrap = true);
         app.ui_shell.mark_layout_initialized_for_test();
 
         let screen = Screen::new(2084.0, 900.0);
@@ -228,7 +212,7 @@ mod zoom_tests {
             sidebar_settings: Default::default(),
         };
         let mut measure = NoopMeasure;
-        app.ui_shell.update_frame(screen, &app.current_theme, &mut measure, &inputs);
+        app.ui_shell.update_frame(screen, app.editor_runtime.theme(), &mut measure, &inputs);
 
         let dv = crate::document_fixture::DocumentFixture::new(vec!["line".to_string()], 40, 40.0);
         let left_margin = app.editor_left_margin(dv.line_count());
@@ -236,7 +220,7 @@ mod zoom_tests {
             screen.w,
             left_margin,
             &app.ui_metrics(),
-            app.settings.word_wrap,
+            app.editor_runtime.settings().word_wrap,
         );
 
         assert_eq!(app.viewport_content_width(&dv), expected);
@@ -259,9 +243,9 @@ mod zoom_tests {
     #[test]
     fn zoom_in_increases_font_size() {
         let mut app = App::new(None);
-        let orig = app.settings.font_size;
+        let orig = app.editor_runtime.settings().font_size;
         let _ = sim_zoom_in(&mut app);
-        assert_eq!(app.settings.font_size, orig + 1.0);
+        assert_eq!(app.editor_runtime.settings().font_size, orig + 1.0);
     }
 
     #[test]
@@ -269,25 +253,28 @@ mod zoom_tests {
         let mut app = App::new(None);
         let _ = sim_zoom_in(&mut app);
         // Zoom in makes font size 15.0 -> line height 15 * 1.618 = 24.27
-        assert_eq!(app.settings.line_height, app.settings.font_size * 1.618);
+        assert_eq!(
+            app.editor_runtime.settings().line_height,
+            app.editor_runtime.settings().font_size * 1.618
+        );
     }
 
     #[test]
     fn zoom_out_decreases_font_size() {
         let mut app = App::new(None);
-        let orig = app.settings.font_size;
+        let orig = app.editor_runtime.settings().font_size;
         let _ = sim_zoom_out(&mut app);
-        assert_eq!(app.settings.font_size, (orig - 1.0).max(6.0));
+        assert_eq!(app.editor_runtime.settings().font_size, (orig - 1.0).max(6.0));
     }
 
     #[test]
     fn zoom_out_clamped_to_min_6() {
         let mut app = App::new(None);
-        app.settings.font_size = 6.5;
+        app.editor_runtime.edit_settings(|settings| settings.font_size = 6.5);
         let _ = sim_zoom_out(&mut app);
-        assert_eq!(app.settings.font_size, 6.0);
+        assert_eq!(app.editor_runtime.settings().font_size, 6.0);
         let _ = sim_zoom_out(&mut app);
-        assert_eq!(app.settings.font_size, 6.0);
+        assert_eq!(app.editor_runtime.settings().font_size, 6.0);
     }
 
     #[test]
@@ -295,20 +282,21 @@ mod zoom_tests {
         let mut app = App::new(None);
         let _ = sim_zoom_in(&mut app);
         let _ = sim_zoom_reset(&mut app);
-        assert_eq!(app.settings.font_size, 15.0);
-        assert_eq!(app.settings.line_height, 24.27);
+        assert_eq!(app.editor_runtime.settings().font_size, 15.0);
+        assert_eq!(app.editor_runtime.settings().line_height, 24.27);
     }
 
     #[test]
     fn zoom_returns_reshape_effect() {
         let mut app = App::new(None);
-        app.needs_redraw = false;
+        app.platform.clear_redraw();
         let effect = sim_zoom_in(&mut app);
         assert!(effect.reshape);
         assert!(effect.redraw);
-        assert!(!app.needs_redraw);
+        assert!(!app.platform.redraw_pending());
         let effect = sim_zoom_out(&mut app);
         assert!(effect.reshape);
+        let _ = sim_zoom_in(&mut app);
         let effect = sim_zoom_reset(&mut app);
         assert!(effect.reshape);
     }
@@ -348,15 +336,15 @@ mod zoom_tests {
     }
 
     #[test]
-    fn zoom_increments_settings_version() {
+    fn only_zoom_changes_increment_settings_version() {
         let mut app = App::new(None);
-        let v1 = app.settings.version;
+        let original_version = app.editor_runtime.settings().version;
         let _ = sim_zoom_in(&mut app);
-        assert_eq!(app.settings.version, v1 + 1);
+        assert_eq!(app.editor_runtime.settings().version, original_version + 1);
         let _ = sim_zoom_out(&mut app);
-        assert_eq!(app.settings.version, v1 + 2);
-        let _ = sim_zoom_reset(&mut app);
-        assert_eq!(app.settings.version, v1 + 3);
+        assert_eq!(app.editor_runtime.settings().version, original_version + 2);
+        assert_eq!(sim_zoom_reset(&mut app), crate::app_effect::AppEffect::NONE);
+        assert_eq!(app.editor_runtime.settings().version, original_version + 2);
     }
 
     // ── Retina zoom tests ────────────────────────────────────────────
@@ -367,11 +355,11 @@ mod zoom_tests {
         app.update_scale_factor(2.0);
 
         let _ = app.apply_zoom(16.0);
-        assert_eq!(app.settings.font_size, 16.0);
+        assert_eq!(app.editor_runtime.settings().font_size, 16.0);
         assert_eq!(app.ui_metrics().font_size, 32.0);
 
         let _ = app.apply_zoom(15.0);
-        assert_eq!(app.settings.font_size, 15.0);
+        assert_eq!(app.editor_runtime.settings().font_size, 15.0);
         assert_eq!(app.ui_metrics().font_size, 30.0);
     }
 
@@ -380,7 +368,7 @@ mod zoom_tests {
         let mut app = App::new(None);
         app.update_scale_factor(2.0);
         let _ = app.apply_zoom(6.0);
-        assert_eq!(app.settings.font_size, 6.0);
+        assert_eq!(app.editor_runtime.settings().font_size, 6.0);
         assert_eq!(app.ui_metrics().font_size, 12.0);
     }
 
@@ -415,7 +403,7 @@ mod zoom_tests {
     fn zoom_out_increases_visible_rows() {
         let mut app = App::new(None);
         // Start at a very large font so there's room to zoom out and definitely change the number of rows
-        app.settings.set_font_size(30.0);
+        app.editor_runtime.edit_settings(|settings| settings.set_font_size(30.0));
         let screen_h = 800.0;
         let before = app.visible_rows(screen_h);
         let _ = sim_zoom_out(&mut app);
@@ -431,14 +419,18 @@ mod zoom_tests {
         let mut app = App::new(None);
         let screen_h = 800.0;
         // Change font size significantly
-        app.settings.set_font_size(30.0);
+        app.editor_runtime.edit_settings(|settings| settings.set_font_size(30.0));
         let _ = sim_zoom_reset(&mut app);
         // After reset: font_size=15, line_height=15*1.618=24.27
         let after = app.visible_rows(screen_h);
         let expected = ((screen_h
-            - if app.settings.show_status_bar { app.settings.status_bar_height } else { 0.0 }
+            - if app.editor_runtime.settings().show_status_bar {
+                app.editor_runtime.settings().status_bar_height
+            } else {
+                0.0
+            }
             - app.content_top_offset())
-            / app.settings.line_height)
+            / app.editor_runtime.settings().line_height)
             .max(1.0) as f64;
         let expected_rows = expected.floor() as usize;
         assert_eq!(
@@ -464,8 +456,8 @@ mod zoom_tests {
         let old_visible = dv.presentation.display.viewport.visible_rows;
         let old_height = dv.presentation.display.viewport.viewport_height;
         // Simulate zoom in font size change and viewport update
-        let new_size = app.settings.font_size + 1.0;
-        app.settings.set_font_size(new_size);
+        let new_size = app.editor_runtime.settings().font_size + 1.0;
+        app.editor_runtime.edit_settings(|settings| settings.set_font_size(new_size));
         let new_visible = app.visible_rows(screen_h);
         let new_height = app.visible_height_lines(screen_h);
         dv.presentation.display.viewport.resize(new_visible, new_height);
@@ -489,7 +481,7 @@ mod zoom_tests {
         let screen_h = 800.0;
         let mut app = App::new(None);
         // Start large
-        app.settings.set_font_size(30.0);
+        app.editor_runtime.edit_settings(|settings| settings.set_font_size(30.0));
         let visible_rows = app.visible_rows(screen_h);
         let viewport_height = app.visible_height_lines(screen_h);
         let mut dv = crate::document_fixture::DocumentFixture::new(
@@ -500,8 +492,8 @@ mod zoom_tests {
         let old_visible = dv.presentation.display.viewport.visible_rows;
         let old_height = dv.presentation.display.viewport.viewport_height;
         // Simulate zoom out
-        let new_size = (app.settings.font_size - 2.0).max(6.0);
-        app.settings.set_font_size(new_size);
+        let new_size = (app.editor_runtime.settings().font_size - 2.0).max(6.0);
+        app.editor_runtime.edit_settings(|settings| settings.set_font_size(new_size));
         let new_visible = app.visible_rows(screen_h);
         let new_height = app.visible_height_lines(screen_h);
         dv.presentation.display.viewport.resize(new_visible, new_height);
@@ -526,14 +518,18 @@ mod zoom_tests {
         let screen_h = 800.0;
         let metrics = app.ui_metrics();
         // show_status_bar defaults to false, so status bar height is 0
-        let status_h = if app.settings.show_status_bar { metrics.status_bar_height } else { 0.0 };
+        let status_h = if app.editor_runtime.settings().show_status_bar {
+            metrics.status_bar_height
+        } else {
+            0.0
+        };
         let top_h = app.content_top_offset();
         let available_h = screen_h - status_h - top_h;
         let expected = (available_h / metrics.line_height).max(1.0) as f64;
         assert_eq!(app.visible_height_lines(screen_h), expected);
 
         // With status bar enabled, it should account for the height
-        app.settings.show_status_bar = true;
+        app.editor_runtime.edit_settings(|settings| settings.show_status_bar = true);
         let metrics = app.ui_metrics();
         let status_h = metrics.status_bar_height;
         let available_h2 = screen_h - status_h - top_h;

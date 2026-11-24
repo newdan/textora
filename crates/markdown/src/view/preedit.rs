@@ -4,7 +4,7 @@ use super::*;
 use std::ops::Range;
 
 pub(super) struct ReplacementPreedit<S: BlockSource> {
-    pub(super) engine: Box<BlockViewEngine<S>>,
+    pub(super) layout: BlockViewLayout<S>,
     selection: Range<usize>,
     inserted_len: usize,
 }
@@ -72,26 +72,48 @@ impl<S: BlockSource> BlockViewEngine<S> {
             .take_while(|byte| *byte <= requested_caret)
             .last()
             .unwrap_or_default();
-        let composition = self.replacement_preedit.get_or_insert_with(|| ReplacementPreedit {
-            engine: Box::new(BlockViewEngine::new()),
-            selection: selection.clone(),
-            inserted_len,
+        let original_spacing = self.document_layout.text_spacing_mode;
+        let original_generation = self.document_layout.source_generation;
+        let composition = self.replacement_preedit.get_or_insert_with(|| {
+            Box::new(ReplacementPreedit {
+                layout: BlockViewLayout::new(),
+                selection: selection.clone(),
+                inserted_len,
+            })
         });
         composition.selection = selection;
         composition.inserted_len = inserted_len;
-        let engine = &mut composition.engine;
-        if engine.text_spacing_mode != self.text_spacing_mode {
-            engine.text_spacing_mode = self.text_spacing_mode;
-            engine.mark_source_dirty();
+        let layout = &mut composition.layout;
+        if layout.text_spacing_mode != original_spacing {
+            layout.text_spacing_mode = original_spacing;
+            layout.mark_source_dirty();
         }
-        if engine.edit_source.as_deref().map(MarkdownSource::as_str)
+        if layout.edit_source.as_deref().map(MarkdownSource::as_str)
             != Some(preview_source.as_str())
         {
-            engine.set_edit_source(Some(preview_source));
-            engine.mark_source_dirty();
+            layout.set_edit_source(Some(preview_source));
+            layout.mark_source_dirty();
         }
-        engine.set_source_generation(self.source_generation);
-        engine.handle_set_cursor_byte(caret_byte);
+        layout.set_source_generation(original_generation);
+        layout.handle_set_cursor_byte(caret_byte);
+    }
+
+    pub(super) fn displayed_layout(&self) -> &BlockViewLayout<S> {
+        self.replacement_preedit
+            .as_deref()
+            .map_or(&self.document_layout, |replacement| &replacement.layout)
+    }
+
+    pub(super) fn preview_byte(&self, source_byte: usize) -> usize {
+        self.replacement_preedit
+            .as_deref()
+            .map_or(source_byte, |replacement| replacement.preview_byte(source_byte))
+    }
+
+    pub(super) fn source_anchor(&self, anchor: SourceAnchor) -> SourceAnchor {
+        self.replacement_preedit
+            .as_deref()
+            .map_or(anchor, |replacement| replacement.source_anchor(anchor))
     }
 
     fn clear_replacement_preedit(&mut self) {
@@ -108,9 +130,10 @@ pub(super) fn render_replacement(
     shaper: &mut shaping::Shaper,
     dpi_scale: f32,
 ) -> Option<DrawList> {
-    let original = &mut view.engine;
-    let composition = original.replacement_preedit.as_mut()?;
-    let preview = &mut composition.engine;
+    let engine = &mut view.engine;
+    let original = &mut engine.document_layout;
+    let composition = engine.replacement_preedit.as_mut()?;
+    let preview = &mut composition.layout;
     preview.base_font_family.clone_from(&original.base_font_family);
     preview.base_font_size = original.base_font_size;
     preview.base_line_height = original.base_line_height;
@@ -133,8 +156,8 @@ pub(super) fn render_replacement(
         dpi_scale,
     );
     draw_replacement_underline(&mut commands, composition, bounds, theme, dpi_scale);
-    original.content_height = composition.engine.content_height;
-    original.scroll_y = composition.engine.scroll_y;
+    original.content_height = composition.layout.content_height;
+    original.scroll_y = composition.layout.scroll_y;
     Some(commands)
 }
 
@@ -149,7 +172,7 @@ fn draw_replacement_underline(
     let composing_range =
         composition.selection.start..composition.selection.start + composition.inserted_len;
     let thickness = dpi_scale;
-    for line in composition.engine.flat_lines() {
+    for line in composition.layout.flat_lines() {
         let Some(projection) = &line.source_projection else { continue };
         let covered = projection
             .boundaries
@@ -167,14 +190,14 @@ fn draw_replacement_underline(
         underline.fill(
             ui::Rect::new(
                 bounds.x + line.rect.x + left,
-                bounds.y + line.rect.y + line.font_size - composition.engine.scroll_y,
+                bounds.y + line.rect.y + line.font_size - composition.layout.scroll_y,
                 right - left,
                 thickness,
             ),
             theme.editor.foreground,
         );
     }
-    commands.cmds.extend(composition.engine.clip_code_highlights(underline).cmds);
+    commands.cmds.extend(composition.layout.clip_code_highlights(underline).cmds);
 }
 
 fn cursor_in_code_block(blocks: &[crate::builder::BlockNode], cursor: usize) -> bool {
@@ -187,7 +210,7 @@ fn cursor_in_code_block(blocks: &[crate::builder::BlockNode], cursor: usize) -> 
 }
 
 pub(super) fn draw_standalone_preedit(
-    engine: &mut BlockViewEngine,
+    engine: &mut BlockViewLayout,
     dl: &mut DrawList,
     bounds: ui::Rect,
     theme: &Theme,
@@ -323,7 +346,7 @@ mod tests {
                 .replacement_preedit
                 .as_ref()
                 .expect("replacement preview exists")
-                .engine
+                .layout
                 .text_spacing_mode,
             ui::typography::TextSpacingMode::Verbatim
         );

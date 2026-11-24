@@ -84,7 +84,6 @@ fn all_settings_categories_keep_text_out_of_controls_at_each_width_and_scale() {
                         list: &mut drawing,
                         theme: &theme,
                         dpi,
-                        offset: (0.0, 0.0),
                         global_alpha: 1.0,
                         shaper: Some(&mut shaper),
                     },
@@ -346,7 +345,6 @@ fn persistence_message_is_clipped_before_the_retry_button() {
         list: &mut draw_list,
         theme: &theme,
         dpi: 1.0,
-        offset: (0.0, 0.0),
         global_alpha: 1.0,
         shaper: None,
     });
@@ -378,7 +376,6 @@ fn long_validation_message_wraps_without_hiding_the_allowed_range() {
         list: &mut draw_list,
         theme: &theme,
         dpi: 1.0,
-        offset: (0.0, 0.0),
         global_alpha: 1.0,
         shaper: Some(&mut shaper),
     });

@@ -167,8 +167,8 @@ mod tests {
             PopupMenu::context_px(0, (200.0, 150.0), (ctx.screen_w, ctx.screen_h), true, 1.0);
         let pm_unpinned =
             PopupMenu::context_px(0, (200.0, 150.0), (ctx.screen_w, ctx.screen_h), false, 1.0);
-        assert!(pm_pinned.items.iter().any(|i| i.label == "取消固定"));
-        assert!(pm_unpinned.items.iter().any(|i| i.label == "固定标签"));
+        assert!(pm_pinned.items.iter().any(|i| i.label() == "取消固定"));
+        assert!(pm_unpinned.items.iter().any(|i| i.label() == "固定标签"));
     }
 
     // ── Scroll tests ──

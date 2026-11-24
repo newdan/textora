@@ -126,7 +126,7 @@ impl Dock {
         }
 
         self.fill_rect = remaining;
-        self.fill.set_rect(remaining, ctx);
+        self.fill.set_rect(Rect::new(0.0, 0.0, remaining.w, remaining.h), ctx);
     }
 
     /// 按实际绘制层级收集语义节点：fill 在底层，chrome 子项依次覆盖其上。
@@ -135,7 +135,8 @@ impl Dock {
         ctx: &AccessibilityContext,
         output: &mut Vec<AccessibilityNode>,
     ) {
-        self.fill.collect_accessibility_nodes(ctx, output);
+        let fill_context = ctx.offset_by(self.fill_rect.x, self.fill_rect.y);
+        self.fill.collect_accessibility_nodes(&fill_context, output);
         for child in &self.children {
             if !child.visible || child.layout_rect.w <= 0.0 || child.layout_rect.h <= 0.0 {
                 continue;
@@ -162,15 +163,14 @@ impl Dock {
     }
 
     /// 绘制：先 fill，再按 children 顺序绘制 chrome（chrome 在 fill 之上）。
-    /// 阶段4：为每个子 widget 推入其 layout_rect 偏移，使 widget 内部使用局部坐标。
+    /// 填充区与吸边组件均在局部坐标内绘制。
     pub fn paint(&self, ctx: &mut PaintCtx) {
-        self.fill.paint(ctx);
+        ctx.with_offset(self.fill_rect.x, self.fill_rect.y, |ctx| self.fill.paint(ctx));
         for child in self.children.iter() {
             if child.visible {
-                let saved = ctx.list.offset;
-                ctx.list.offset = (saved.0 + child.layout_rect.x, saved.1 + child.layout_rect.y);
-                child.widget.paint(ctx);
-                ctx.list.offset = saved;
+                ctx.with_offset(child.layout_rect.x, child.layout_rect.y, |ctx| {
+                    child.widget.paint(ctx)
+                });
             }
         }
     }
@@ -246,10 +246,10 @@ impl Dock {
             if let Some(a) = non_hit_action {
                 // Still deliver the event to the fill widget so it can
                 // process the move (e.g. hit-testing) normally.
-                self.fill.on_event(ev, ctx);
+                self.dispatch_to_fill(ev, ctx);
                 return Some(a);
             }
-            return self.fill.on_event(ev, ctx);
+            return self.dispatch_to_fill(ev, ctx);
         }
         // 逆序遍历：后添加的在视觉上层（MouseDown / Wheel / MouseUp）
         for child in self.children.iter_mut().rev() {
@@ -278,7 +278,12 @@ impl Dock {
                 }
             }
         }
-        self.fill.on_event(ev, ctx)
+        self.dispatch_to_fill(ev, ctx)
+    }
+
+    fn dispatch_to_fill(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
+        let event = Self::to_local(event, self.fill_rect.x, self.fill_rect.y);
+        self.fill.on_event(&event, ctx)
     }
 
     fn broadcast_lifecycle_event(
@@ -298,7 +303,7 @@ impl Dock {
                 first_action = Some(action);
             }
         }
-        let fill_action = self.fill.on_event(event, ctx);
+        let fill_action = self.dispatch_to_fill(event, ctx);
         first_action.or(fill_action)
     }
 
@@ -588,9 +593,10 @@ mod tests {
         assert!(dock.children[0].widget.hit(0.0, 0.0), "top child");
         let bottom_widget = &dock.children[1].widget;
         assert!(bottom_widget.hit(0.0, 0.0), "bottom child uses local coordinates");
-        assert!(dock.fill.hit(0.0, 32.0), "fill starts at y=32");
-        assert!(!dock.fill.hit(0.0, 31.0), "fill should not start above y=32");
-        assert!(dock.fill.hit(0.0, 575.0), "fill ends before y=576");
+        assert_eq!(dock.fill_rect.y, 32.0);
+        assert!(dock.fill.hit(0.0, 0.0), "fill starts at the local origin");
+        assert!(!dock.fill.hit(0.0, -1.0));
+        assert!(dock.fill.hit(0.0, 543.0), "fill height is 544 pixels");
     }
 
     #[test]
@@ -632,11 +638,11 @@ mod tests {
         dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut ctx);
 
         // Fill: x=200, y=32, w=800-200-16=584, h=600-32-24=544
-        assert!(dock.fill.hit(200.0, 32.0), "fill top-left");
-        assert!(dock.fill.hit(783.0, 575.0), "fill bottom-right");
-        assert!(!dock.fill.hit(199.0, 32.0), "fill left of left sidebar");
-        assert!(!dock.fill.hit(200.0, 31.0), "fill above top bar");
-        assert!(!dock.fill.hit(784.0, 32.0), "fill right of scrollbar");
+        assert!(dock.fill.hit(0.0, 0.0), "fill top-left");
+        assert!(dock.fill.hit(583.0, 543.0), "fill bottom-right");
+        assert!(!dock.fill.hit(-1.0, 0.0), "fill left of left sidebar");
+        assert!(!dock.fill.hit(0.0, -1.0), "fill above top bar");
+        assert!(!dock.fill.hit(584.0, 0.0), "fill right of scrollbar");
     }
 
     #[test]
@@ -772,8 +778,34 @@ mod tests {
             LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 2.0 };
         dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut ctx);
 
-        assert!(dock.fill.hit(0.0, 64.0));
-        assert!(!dock.fill.hit(0.0, 63.0));
+        assert_eq!(dock.fill_rect.y, 64.0);
+        assert!(dock.fill.hit(0.0, 0.0));
+        assert!(!dock.fill.hit(0.0, -1.0));
+    }
+
+    #[test]
+    fn fill_receives_local_bounds_inside_an_offset_dock() {
+        let theme = dummy_theme();
+        let mut measure = NoopMeasure;
+        let mut context =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let mut dock = Dock::new(Box::new(StubWidget::new()));
+        dock.children.push(DockChild {
+            widget: Box::new(StubWidget::new()),
+            side: Side::Top,
+            thickness: Box::new(|_, _| 30.0),
+            visible: true,
+            layout_rect: Rect::ZERO,
+        });
+        dock.layout(Rect::new(10.0, 20.0, 200.0, 100.0), &mut context);
+
+        assert!(dock.fill.hit(0.0, 0.0));
+        let mut commands = DrawList::new();
+        dock.paint(&mut PaintCtx::new(&mut commands, &theme, 1.0));
+        assert!(matches!(
+            commands.cmds.first(),
+            Some(DrawCmd::FillRect { rect, .. }) if *rect == Rect::new(10.0, 50.0, 200.0, 70.0)
+        ));
     }
 
     #[test]
@@ -801,14 +833,8 @@ mod tests {
         dock.layout(Rect::new(0.0, 0.0, 800.0, 600.0), &mut lctx);
 
         let mut dl = DrawList::new();
-        let mut pctx = PaintCtx {
-            global_alpha: 1.0,
-            list: &mut dl,
-            theme: &theme,
-            dpi: 1.0,
-            offset: (0.0, 0.0),
-            shaper: None,
-        };
+        let mut pctx =
+            PaintCtx { global_alpha: 1.0, list: &mut dl, theme: &theme, dpi: 1.0, shaper: None };
         dock.paint(&mut pctx);
 
         let fill_count = dl.cmds.iter().filter(|c| matches!(c, DrawCmd::FillRect { .. })).count();

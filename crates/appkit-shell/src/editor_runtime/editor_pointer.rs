@@ -1,19 +1,102 @@
 //! 产品无关的编辑器指针命中与选择会话。
 
+use appkit_core::tab_set::types::TabId;
 use ui::canvas::CanvasPoint;
-use ui::core::widget::PointerClickKind;
-use ui::plugin::{CanvasDragPhase, CanvasDragRequest, CanvasDragResponse, EditHitTarget, EditPlan};
+use ui::core::widget::{PointerClickKind, PointerClickTiming, PointerClickTracker};
+use ui::plugin::{
+    CanvasDragPhase, CanvasDragRequest, CanvasDragResponse, CursorAffinity, EditHitTarget,
+    EditPlan, PluginMode, VisualCaretPosition,
+};
 
-use super::input_session::TextSelectionGranularity;
+use super::editor_navigation::validated_source_object_range;
+use super::input_session::{CapturedCanvasDrag, TextSelectionGranularity};
 use super::{EditorInputContext, EditorOutcome, EditorPointerOutcome, EditorRuntime, MouseCapture};
+use super::{
+    apply_edit_hit_target, set_wysiwyg_cursor_and_selection, set_wysiwyg_visual_caret_and_selection,
+};
 use crate::cursor_motion::{hit_test_row_byte, hit_test_visual_row};
 use crate::event::ShellEffect;
-use crate::pointer_capture::{CanvasDragEligibility, CanvasDragSession};
+use crate::pointer_capture::CanvasDragSession;
 use crate::tab_session::{TabSession, TabSessionMut};
 
 const CANVAS_DRAG_THRESHOLD_PX: f32 = 5.0;
+const PLUGIN_SELECTION_DRAG_THRESHOLD_LOGICAL_PX: f32 = 5.0;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum PointerClickFocusLoss {
+    #[default]
+    Reset,
+    Preserve,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum PluginPointerPolicy {
+    #[default]
+    GroupedSelection,
+    VisualCaret,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SelectionMotion {
+    Press { extend: bool },
+    Drag,
+}
+
+impl SelectionMotion {
+    fn extends(self) -> bool {
+        match self {
+            Self::Press { extend } => extend,
+            Self::Drag => true,
+        }
+    }
+}
+
+struct PluginPointerHit {
+    bounds: ui::Rect,
+    target: Option<Option<EditHitTarget>>,
+}
 
 impl EditorRuntime {
+    pub fn configure_pointer_clicks(
+        &mut self,
+        timing: PointerClickTiming,
+        focus_loss: PointerClickFocusLoss,
+    ) {
+        self.pointer_click_tracker = PointerClickTracker::with_timing(timing);
+        self.pointer_click_focus_loss = focus_loss;
+    }
+
+    pub fn configure_plugin_pointer(&mut self, policy: PluginPointerPolicy) {
+        self.plugin_pointer_policy = policy;
+    }
+
+    fn record_special_pointer_press(&mut self, position: (f32, f32)) {
+        match self.plugin_pointer_policy {
+            PluginPointerPolicy::GroupedSelection => self.pointer_click_tracker.reset(),
+            PluginPointerPolicy::VisualCaret => {
+                self.record_pointer_press(position);
+            }
+        }
+    }
+
+    fn record_pointer_press(&mut self, position: (f32, f32)) -> PointerClickKind {
+        self.pointer_click_tracker.record_press(position)
+    }
+
+    fn last_pointer_press(&self) -> Option<((f32, f32), PointerClickKind)> {
+        self.pointer_click_tracker.last_press()
+    }
+
+    fn plugin_selection_drag_started(&self, position: (f32, f32)) -> bool {
+        let Some((press, _)) = self.last_pointer_press() else {
+            return false;
+        };
+        let dx = position.0 - press.0;
+        let dy = position.1 - press.1;
+        let threshold = PLUGIN_SELECTION_DRAG_THRESHOLD_LOGICAL_PX * self.scale_factor() as f32;
+        dx * dx + dy * dy > threshold * threshold
+    }
+
     pub fn handle_pointer_event(
         &mut self,
         context: EditorInputContext,
@@ -24,106 +107,211 @@ impl EditorRuntime {
         };
         let Some(editor_bounds) = self.painted_editor_bounds() else {
             if phase == PointerPhase::Release {
-                self.end_pointer_capture();
+                return EditorPointerOutcome::from_editor(self.cancel_pointer_capture(), None);
             }
             let editor =
                 self.clear_active_canvas_pointer().then(redraw_outcome).unwrap_or_default();
             return EditorPointerOutcome::from_editor(editor, None);
         };
-        let canvas_pointer_outcome = match phase {
-            PointerPhase::Move
-                if self.update_active_canvas_pointer(context, editor_bounds, position) =>
-            {
-                redraw_outcome()
+        if let Some(tab_id) = self.active_tab_id()
+            && self
+                .tab_session(tab_id)
+                .is_some_and(|tab| tab.plugin().mode() == PluginMode::Reading)
+        {
+            let editor =
+                self.handle_reading_pointer(tab_id, context, editor_bounds, position, phase);
+            let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position, None);
+            return EditorPointerOutcome::from_editor(editor, cursor_icon);
+        }
+        let (editor, plugin_hit) = match phase {
+            PointerPhase::Press => {
+                self.handle_editor_pointer_press(context, editor_bounds, position)
             }
-            PointerPhase::Press | PointerPhase::Move | PointerPhase::Release => {
-                EditorOutcome::default()
+            PointerPhase::Move => self.handle_editor_pointer_move(context, editor_bounds, position),
+            PointerPhase::Release => {
+                (self.handle_editor_pointer_release(editor_bounds, position), None)
             }
         };
-        let editor = match phase {
-            PointerPhase::Press if self.pointer_input_allowed(context, position) => {
-                if let Some(outcome) = self.activate_canvas_control(position) {
-                    self.pointer_click_tracker.reset();
-                    let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
-                    return EditorPointerOutcome::from_editor(outcome, cursor_icon);
-                }
-                if self.begin_canvas_source_drag(context, editor_bounds, position) {
-                    self.pointer_click_tracker.reset();
-                    let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
-                    return EditorPointerOutcome::from_editor(redraw_outcome(), cursor_icon);
-                }
-                let click_kind = self.pointer_click_tracker.record_press(position);
-                let granularity = selection_granularity(click_kind);
-                let extend = self.input_modifiers().shift_key();
-                let selection_started =
-                    self.begin_text_selection_with_granularity(context, granularity);
-                let selection_placed = selection_started
-                    && self.place_pointer_selection(
-                        editor_bounds,
-                        position,
-                        extend,
-                        click_kind,
-                        None,
-                    );
-                if !selection_placed {
-                    self.pointer_click_tracker.reset();
-                    self.end_pointer_capture();
-                    let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
-                    return EditorPointerOutcome::from_editor(
-                        EditorOutcome::default(),
-                        cursor_icon,
-                    );
-                }
-                if let Some(initial_range) = self.current_text_selection_range() {
-                    self.set_initial_text_selection_range(initial_range);
-                }
-                redraw_outcome()
+        let cursor_icon =
+            self.pointer_cursor_icon(context, editor_bounds, position, plugin_hit.as_ref());
+        EditorPointerOutcome::from_editor(editor, cursor_icon)
+    }
+
+    fn handle_editor_pointer_press(
+        &mut self,
+        context: EditorInputContext,
+        editor_bounds: ui::Rect,
+        position: (f32, f32),
+    ) -> (EditorOutcome, Option<PluginPointerHit>) {
+        if !self.pointer_input_allowed(context, position)
+            || !editor_bounds.contains(position.0, position.1)
+        {
+            self.pointer_click_tracker.reset();
+            return (EditorOutcome::default(), None);
+        }
+        let cancel = self.cancel_pointer_capture();
+        if let Some(outcome) = self.activate_canvas_control(position) {
+            self.record_special_pointer_press(position);
+            return (cancel.merge(outcome), None);
+        }
+        let plugin_hit = self.hit_test_plugin_pointer(editor_bounds, position);
+        if let Some(hit) = &plugin_hit
+            && self.begin_canvas_source_drag(context, position, hit)
+        {
+            self.record_special_pointer_press(position);
+            return (cancel.merge(redraw_outcome()), plugin_hit);
+        }
+
+        let click_kind = self.record_pointer_press(position);
+        let granularity = selection_granularity(click_kind);
+        let extend = self.input_modifiers().shift_key();
+        let began_selection = self.begin_text_selection_with_granularity(context, granularity);
+        let placed_selection = began_selection
+            && self.place_pointer_selection(
+                editor_bounds,
+                position,
+                SelectionMotion::Press { extend },
+                plugin_hit.as_ref(),
+                click_kind,
+                None,
+            );
+        if !placed_selection {
+            if self.plugin_pointer_policy == PluginPointerPolicy::GroupedSelection {
+                self.pointer_click_tracker.reset();
             }
-            PointerPhase::Move
-                if self.pointer_capture() == MouseCapture::CanvasDrag
-                    && self.pointer_input_allowed(context, position) =>
-            {
-                canvas_pointer_outcome
-                    .merge(self.update_canvas_source_drag(editor_bounds, position))
+            self.end_pointer_capture();
+            return (cancel, plugin_hit);
+        }
+        if let Some(initial_range) = self.current_text_selection_range() {
+            self.set_initial_text_selection_range(initial_range);
+        }
+        (cancel.merge(redraw_outcome()), plugin_hit)
+    }
+
+    fn handle_editor_pointer_move(
+        &mut self,
+        context: EditorInputContext,
+        editor_bounds: ui::Rect,
+        position: (f32, f32),
+    ) -> (EditorOutcome, Option<PluginPointerHit>) {
+        let hover = if self.update_active_canvas_pointer(context, editor_bounds, position) {
+            redraw_outcome()
+        } else {
+            EditorOutcome::default()
+        };
+        if !self.pointer_input_allowed(context, position) {
+            return (hover, None);
+        }
+        match self.pointer_capture() {
+            MouseCapture::CanvasDrag => {
+                (hover.merge(self.update_canvas_source_drag(editor_bounds, position)), None)
             }
-            PointerPhase::Move
-                if self.pointer_capture() == MouseCapture::TextSelection
-                    && self.pointer_input_allowed(context, position) =>
-            {
+            MouseCapture::TextSelection => {
                 let click_kind = self
                     .text_selection_granularity()
                     .map(pointer_click_kind)
                     .unwrap_or(PointerClickKind::Single);
                 let initial_range = self.initial_text_selection_range();
-                let selection_outcome = self
+                let plugin_hit = self.hit_test_plugin_pointer(editor_bounds, position);
+                let selection = self
                     .place_pointer_selection(
                         editor_bounds,
                         position,
-                        true,
+                        SelectionMotion::Drag,
+                        plugin_hit.as_ref(),
                         click_kind,
                         initial_range.as_ref(),
                     )
                     .then(redraw_outcome)
                     .unwrap_or_default();
-                canvas_pointer_outcome.merge(selection_outcome)
+                (hover.merge(selection), plugin_hit)
             }
-            PointerPhase::Release if self.pointer_capture() == MouseCapture::CanvasDrag => {
-                self.finish_canvas_source_drag(editor_bounds, position)
-            }
-            PointerPhase::Release if self.pointer_capture() != MouseCapture::None => {
+            MouseCapture::None => (hover, None),
+        }
+    }
+
+    fn handle_editor_pointer_release(
+        &mut self,
+        editor_bounds: ui::Rect,
+        position: (f32, f32),
+    ) -> EditorOutcome {
+        match self.pointer_capture() {
+            MouseCapture::CanvasDrag => self.finish_canvas_source_drag(editor_bounds, position),
+            MouseCapture::TextSelection => {
                 self.end_pointer_capture();
                 self.clear_collapsed_selection();
                 redraw_outcome()
             }
-            PointerPhase::Move => canvas_pointer_outcome,
-            PointerPhase::Press => {
-                self.pointer_click_tracker.reset();
-                EditorOutcome::default()
+            MouseCapture::None => EditorOutcome::default(),
+        }
+    }
+
+    fn handle_reading_pointer(
+        &mut self,
+        tab_id: appkit_core::tab_set::types::TabId,
+        context: EditorInputContext,
+        editor_bounds: ui::Rect,
+        position: (f32, f32),
+        phase: PointerPhase,
+    ) -> EditorOutcome {
+        let bounds = self.plugin_input_bounds(editor_bounds, false);
+        match phase {
+            PointerPhase::Press if self.pointer_input_allowed(context, position) => {
+                let click_kind = self.record_pointer_press(position);
+                if !self.begin_text_selection_with_granularity(
+                    context,
+                    selection_granularity(click_kind),
+                ) {
+                    return EditorOutcome::default();
+                }
+                let extend = self.input_modifiers().shift_key();
+                let Some(mut tab) = self.tab_session_mut(tab_id) else {
+                    return EditorOutcome::default();
+                };
+                place_reading_selection(&mut tab, position, bounds, click_kind, extend);
             }
-            PointerPhase::Release => EditorOutcome::default(),
-        };
-        let cursor_icon = self.pointer_cursor_icon(context, editor_bounds, position);
-        EditorPointerOutcome::from_editor(editor, cursor_icon)
+            PointerPhase::Move
+                if self.pointer_capture() == MouseCapture::TextSelection
+                    && self.pointer_input_allowed(context, position) =>
+            {
+                if !self.plugin_selection_drag_started(position) {
+                    return EditorOutcome::default();
+                }
+                let Some((_, click_kind)) = self.last_pointer_press() else {
+                    return EditorOutcome::default();
+                };
+                let Some(mut tab) = self.tab_session_mut(tab_id) else {
+                    return EditorOutcome::default();
+                };
+                extend_reading_selection(&mut tab, position, bounds, click_kind);
+            }
+            PointerPhase::Release if self.pointer_capture() == MouseCapture::TextSelection => {
+                self.end_pointer_capture();
+                if let Some(mut tab) = self.tab_session_mut(tab_id)
+                    && !tab.plugin_has_selection()
+                {
+                    tab.clear_plugin_selection();
+                }
+            }
+            PointerPhase::Press | PointerPhase::Move | PointerPhase::Release => {
+                return EditorOutcome::default();
+            }
+        }
+        redraw_outcome()
+    }
+
+    fn hit_test_plugin_pointer(
+        &self,
+        editor_bounds: ui::Rect,
+        position: (f32, f32),
+    ) -> Option<PluginPointerHit> {
+        let tab = self.active_tab_id().and_then(|id| self.tab_session(id))?;
+        if !tab.handles_own_rendering() {
+            return None;
+        }
+        let bounds = self.plugin_input_bounds(editor_bounds, tab.is_canvas());
+        let target = tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y);
+        Some(PluginPointerHit { bounds, target })
     }
 
     fn pointer_cursor_icon(
@@ -131,6 +319,7 @@ impl EditorRuntime {
         context: EditorInputContext,
         editor_bounds: ui::Rect,
         position: (f32, f32),
+        plugin_hit: Option<&PluginPointerHit>,
     ) -> Option<winit::window::CursorIcon> {
         if context.modal_blocked
             || (self.pointer_capture() == MouseCapture::None
@@ -149,25 +338,40 @@ impl EditorRuntime {
             return Some(winit::window::CursorIcon::Default);
         };
         if !tab.handles_own_rendering() {
+            if self.source_pointer_policy == super::SourcePointerPolicy::VisualRows
+                && self.source_input_left().is_some_and(|text_left| position.0 < text_left)
+            {
+                return Some(winit::window::CursorIcon::Default);
+            }
             return Some(winit::window::CursorIcon::Text);
         }
         if !tab.allows_editing() {
+            if tab.plugin().mode() == PluginMode::Reading
+                && self.plugin_pointer_policy == PluginPointerPolicy::VisualCaret
+            {
+                return Some(winit::window::CursorIcon::Text);
+            }
             return Some(winit::window::CursorIcon::Default);
         }
 
         if tab.hit_test_canvas_control(CanvasPoint::new(position.0, position.1)).is_some() {
             return Some(winit::window::CursorIcon::Pointer);
         }
-        let dpi = self.scale_factor() as f32;
-        let bounds = super::editor_painter::plugin_bounds(editor_bounds, dpi, tab.is_canvas());
-        let target = tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y);
-        Some(match target {
-            Some(Some(EditHitTarget::TextCaret { .. })) => winit::window::CursorIcon::Text,
-            Some(Some(EditHitTarget::SourceObject { .. })) => winit::window::CursorIcon::Grab,
-            Some(Some(EditHitTarget::ClearFocus)) | Some(None) | None => {
-                winit::window::CursorIcon::Default
-            }
-        })
+        let resolved;
+        let hit = if let Some(hit) = plugin_hit {
+            hit
+        } else {
+            resolved = self.hit_test_plugin_pointer(editor_bounds, position)?;
+            &resolved
+        };
+        if self.plugin_pointer_policy == PluginPointerPolicy::VisualCaret
+            && !tab.is_canvas()
+            && hit.target.is_none()
+            && hit.bounds.contains(position.0, position.1)
+        {
+            return Some(winit::window::CursorIcon::Text);
+        }
+        Some(plugin_hit_cursor_icon(hit.target.as_ref().and_then(Option::as_ref)))
     }
 
     fn update_active_canvas_pointer(
@@ -226,43 +430,52 @@ impl EditorRuntime {
     fn begin_canvas_source_drag(
         &mut self,
         context: EditorInputContext,
-        editor_bounds: ui::Rect,
         position: (f32, f32),
+        hit: &PluginPointerHit,
     ) -> bool {
         let Some(tab_id) = self.active_tab_id() else {
             return false;
         };
-        let dpi = self.scale_factor() as f32;
-        let (source_range, source_generation) = {
-            let Some(tab) = self.tab_session_mut(tab_id) else {
-                return false;
-            };
-            if !tab.is_canvas() || !tab.handles_own_rendering() || !tab.allows_editing() {
-                return false;
-            }
-            let bounds = super::editor_painter::plugin_bounds(editor_bounds, dpi, true);
-            let Some(Some(EditHitTarget::SourceObject { source_range })) =
-                tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y)
-            else {
-                return false;
-            };
-            let source_generation = tab.document.generation();
-            // Pressing a source object moves the caret: split any ongoing
-            // undo coalescing run.
-            tab.document.break_edit_merge();
-            tab.document.cursor_mut().selection_anchor = Some(source_range.start);
-            tab.document.set_cursor_offset_synced(source_range.end);
-            (source_range, source_generation)
+        let Some(tab) = self.tab_session(tab_id) else {
+            return false;
         };
+        if !tab.handles_own_rendering()
+            || !tab.allows_editing()
+            || (!tab.is_canvas()
+                && self.plugin_pointer_policy == PluginPointerPolicy::GroupedSelection)
+        {
+            return false;
+        }
+        let Some(Some(EditHitTarget::SourceObject { source_range })) = &hit.target else {
+            return false;
+        };
+        let Some(source_range) = validated_source_object_range(tab.document, source_range.clone())
+        else {
+            return false;
+        };
+        let source_generation = tab.document.generation();
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return false;
+        };
+        tab.document.break_edit_merge();
+        tab.document.cursor_move_to_offset(source_range.end);
+        tab.document.cursor_mut().selection_anchor = Some(source_range.start);
+        tab.set_plugin_selection_anchor_byte(Some(source_range.start));
+        tab.set_plugin_selection_cursor_byte(Some(source_range.end));
+        tab.set_cursor_byte(source_range.end);
 
+        self.input_session.set_preferred_x(None);
         self.input_session.start_canvas_drag_session(
             context,
-            CanvasDragSession {
-                source_range,
-                pressed_at: position,
-                source_generation,
-                eligibility: CanvasDragEligibility::Enabled,
-                started: false,
+            CapturedCanvasDrag {
+                tab_id,
+                bounds: hit.bounds,
+                gesture: CanvasDragSession {
+                    source_range,
+                    pressed_at: position,
+                    source_generation,
+                    started: false,
+                },
             },
         )
     }
@@ -272,13 +485,21 @@ impl EditorRuntime {
         editor_rect: ui::Rect,
         position: (f32, f32),
     ) -> EditorOutcome {
-        let bounds =
-            super::editor_painter::plugin_bounds(editor_rect, self.scale_factor() as f32, true);
-        let request = self
-            .input_session
-            .canvas_drag_session_mut()
-            .and_then(|session| session.move_request(position, bounds));
-        request.map(|request| self.handle_canvas_drag_request(request)).unwrap_or_default()
+        let active_tab = self.active_tab_id();
+        let bounds = self.active_plugin_drag_bounds(editor_rect);
+        let Some(drag) = self.input_session.canvas_drag_session_mut() else {
+            return EditorOutcome::default();
+        };
+        if Some(drag.tab_id) != active_tab {
+            return self.cancel_pointer_capture();
+        }
+        let tab_id = drag.tab_id;
+        drag.bounds = bounds.unwrap_or(drag.bounds);
+        drag.gesture
+            .move_request(position, drag.bounds)
+            .map_or_else(EditorOutcome::default, |request| {
+                self.dispatch_canvas_drag_request(tab_id, request)
+            })
     }
 
     fn finish_canvas_source_drag(
@@ -286,30 +507,61 @@ impl EditorRuntime {
         editor_rect: ui::Rect,
         position: (f32, f32),
     ) -> EditorOutcome {
-        let session = self.input_session.take_canvas_drag_session();
+        let bounds = self.active_plugin_drag_bounds(editor_rect);
+        let drag = self.input_session.take_canvas_drag_session();
         self.end_pointer_capture();
-        let bounds =
-            super::editor_painter::plugin_bounds(editor_rect, self.scale_factor() as f32, true);
-        let Some(request) = session.and_then(|session| session.release_request(position, bounds))
-        else {
+        let Some(drag) = drag else {
             return redraw_outcome();
         };
-        self.handle_canvas_drag_request(request)
+        let request = if Some(drag.tab_id) == self.active_tab_id() {
+            drag.gesture.release_request(position, bounds.unwrap_or(drag.bounds))
+        } else {
+            drag.gesture.cancel_request(drag.bounds)
+        };
+        request.map_or_else(redraw_outcome, |request| {
+            self.dispatch_canvas_drag_request(drag.tab_id, request)
+        })
     }
 
-    /// Route a captured drag to the active plugin and apply edits on drop.
-    pub fn handle_canvas_drag_request(&mut self, request: CanvasDragRequest) -> EditorOutcome {
+    fn active_plugin_drag_bounds(&self, editor_rect: ui::Rect) -> Option<ui::Rect> {
+        let tab = self.active_tab_id().and_then(|id| self.tab_session(id))?;
+        Some(self.plugin_input_bounds(editor_rect, tab.is_canvas()))
+    }
+
+    /// 结束当前手势。已启动的画布拖拽会通知发起它的标签。
+    pub fn cancel_pointer_capture(&mut self) -> EditorOutcome {
+        let capture = self.pointer_capture();
+        let drag = self.input_session.take_canvas_drag_session();
+        self.end_pointer_capture();
+        if let Some(drag) = drag
+            && let Some(request) = drag.gesture.cancel_request(drag.bounds)
+        {
+            return self.dispatch_canvas_drag_request(drag.tab_id, request);
+        }
+        if capture == MouseCapture::TextSelection {
+            self.clear_collapsed_selection();
+        }
+        EditorOutcome::default()
+    }
+
+    fn dispatch_canvas_drag_request(
+        &mut self,
+        tab_id: TabId,
+        request: CanvasDragRequest,
+    ) -> EditorOutcome {
         let phase = request.phase;
         let response = self
-            .active_tab_id()
-            .and_then(|tab_id| self.tab_session_mut(tab_id))
+            .tab_session_mut(tab_id)
             .map(|mut tab| tab.handle_canvas_drag_plugin(request))
             .unwrap_or(CanvasDragResponse::Ignore);
         match (phase, response) {
-            (CanvasDragPhase::Drop, CanvasDragResponse::Apply(transaction)) => self
-                .model_session
-                .apply_active_edit_transaction(transaction, self.editor_line_height())
-                .merge(redraw_outcome()),
+            (CanvasDragPhase::Drop, CanvasDragResponse::Apply(transaction))
+                if self.active_tab_id() == Some(tab_id) =>
+            {
+                self.model_session
+                    .apply_active_edit_transaction(transaction, self.editor_line_height())
+                    .merge(redraw_outcome())
+            }
             (CanvasDragPhase::Drop | CanvasDragPhase::Cancel, _)
             | (_, CanvasDragResponse::Preview(_)) => redraw_outcome(),
             _ => EditorOutcome::default(),
@@ -320,60 +572,82 @@ impl EditorRuntime {
         &mut self,
         editor_rect: ui::Rect,
         position: (f32, f32),
-        extend: bool,
+        motion: SelectionMotion,
+        plugin_hit: Option<&PluginPointerHit>,
         click_kind: PointerClickKind,
         initial_range: Option<&std::ops::Range<usize>>,
     ) -> bool {
         let Some(tab_id) = self.active_tab_id() else {
             return false;
         };
-        // A pointer gesture is user-driven caret movement: split any ongoing
-        // undo coalescing run even if the caret lands back on the byte where
-        // the last edit ended.
-        if let Some(tab) = self.tab_session_mut(tab_id) {
+        // A press breaks the typing undo run even when the caret does not move.
+        if matches!(motion, SelectionMotion::Press { .. })
+            && let Some(tab) = self.tab_session_mut(tab_id)
+        {
             tab.document.break_edit_merge();
         }
-        let dpi = self.scale_factor() as f32;
-        let settings = self.settings.clone();
-        let metrics = ui::settings::UiMetrics::from_settings(&settings, dpi);
-        let handles_own_rendering =
-            self.tab_session(tab_id).is_some_and(|tab| tab.handles_own_rendering());
-        if handles_own_rendering {
+        if let Some(hit) = plugin_hit {
             return self.place_plugin_pointer_selection(
                 tab_id,
-                editor_rect,
+                hit,
                 position,
-                dpi,
-                extend,
+                motion,
                 click_kind,
                 initial_range,
             );
         }
+        if self.source_pointer_policy == super::SourcePointerPolicy::VisualRows {
+            return self.place_source_row_selection(
+                tab_id,
+                editor_rect,
+                position,
+                motion,
+                click_kind,
+            );
+        }
+        let dpi = self.scale_factor() as f32;
+        let settings = self.settings.clone();
+        let metrics = ui::settings::UiMetrics::from_settings(&settings, dpi);
+        let painted_text_left = self.source_input_left();
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return false;
         };
-        let byte_offset = hit_test_text_byte(&tab, editor_rect, position, &settings, &metrics)
+        let text_left = painted_text_left.unwrap_or_else(|| {
+            editor_rect.x
+                + metrics
+                    .content_left_margin
+                    .max(settings.gutter_width(tab.document.line_count()) * metrics.dpi)
+        });
+        let byte_offset = hit_test_text_byte(&tab, editor_rect.y, text_left, position, &metrics)
             .unwrap_or_else(|| tab.document.buffer_len());
-        place_text_pointer_selection(&mut tab, byte_offset, extend, click_kind, initial_range);
+        place_text_pointer_selection(
+            &mut tab,
+            byte_offset,
+            motion.extends(),
+            click_kind,
+            initial_range,
+        );
         true
     }
 
     fn place_plugin_pointer_selection(
         &mut self,
         tab_id: appkit_core::tab_set::types::TabId,
-        editor_rect: ui::Rect,
+        hit: &PluginPointerHit,
         position: (f32, f32),
-        dpi: f32,
-        extend: bool,
+        motion: SelectionMotion,
         click_kind: PointerClickKind,
         initial_range: Option<&std::ops::Range<usize>>,
     ) -> bool {
-        let bounds = {
-            let Some(tab) = self.tab_session(tab_id) else {
-                return false;
-            };
-            super::editor_painter::plugin_bounds(editor_rect, dpi, tab.is_canvas())
-        };
+        let bounds = hit.bounds;
+        let visual_caret = self.plugin_pointer_policy == PluginPointerPolicy::VisualCaret;
+        if visual_caret
+            && matches!(motion, SelectionMotion::Drag)
+            && !self.plugin_selection_drag_started(position)
+        {
+            return false;
+        }
+        let extend = motion.extends();
         let edit_target = {
             let Some(tab) = self.tab_session(tab_id) else {
                 return false;
@@ -381,16 +655,29 @@ impl EditorRuntime {
             if tab.hit_test_canvas_control(CanvasPoint::new(position.0, position.1)).is_some() {
                 return false;
             }
-            tab.hit_test_edit_target(position.0, position.1, bounds.x, bounds.y)
+            &hit.target
         };
         match edit_target {
+            Some(Some(EditHitTarget::TextCaret { byte_offset, selection_scope }))
+                if visual_caret =>
+            {
+                self.place_visual_plugin_caret(
+                    tab_id,
+                    bounds,
+                    position,
+                    *byte_offset,
+                    selection_scope.clone(),
+                    motion,
+                    click_kind,
+                )
+            }
             Some(Some(EditHitTarget::TextCaret { byte_offset, .. })) => {
                 let Some(mut tab) = self.tab_session_mut(tab_id) else {
                     return false;
                 };
                 place_text_pointer_selection(
                     &mut tab,
-                    byte_offset,
+                    *byte_offset,
                     extend,
                     click_kind,
                     initial_range,
@@ -407,12 +694,14 @@ impl EditorRuntime {
                 tab.document.set_cursor_offset_synced(source_range.end);
                 true
             }
-            Some(Some(EditHitTarget::ClearFocus)) if !extend => {
-                let Some(tab) = self.tab_session_mut(tab_id) else {
+            Some(Some(EditHitTarget::ClearFocus))
+                if matches!(motion, SelectionMotion::Press { .. }) =>
+            {
+                let Some(mut tab) = self.tab_session_mut(tab_id) else {
                     return false;
                 };
-                tab.document.cursor_mut().selection_anchor = None;
-                tab.document.set_cursor_offset_synced(tab.document.buffer_len());
+                apply_edit_hit_target(&mut tab, EditHitTarget::ClearFocus);
+                self.input_session.set_preferred_x(None);
                 true
             }
             Some(None) => false,
@@ -421,7 +710,7 @@ impl EditorRuntime {
                 tab_id,
                 bounds,
                 position,
-                extend,
+                motion,
                 click_kind,
                 initial_range,
             ),
@@ -433,24 +722,32 @@ impl EditorRuntime {
         tab_id: appkit_core::tab_set::types::TabId,
         bounds: ui::Rect,
         position: (f32, f32),
-        extend: bool,
+        motion: SelectionMotion,
         click_kind: PointerClickKind,
         initial_range: Option<&std::ops::Range<usize>>,
     ) -> bool {
-        let candidate = {
-            let Some(tab) = self.tab_session(tab_id) else {
-                return false;
-            };
-            tab.hit_test_plugin_byte_or_end(position, bounds)
+        let visual_caret = self.plugin_pointer_policy == PluginPointerPolicy::VisualCaret;
+        let extend = motion.extends();
+        let Some(tab) = self.tab_session(tab_id) else {
+            return false;
         };
+        let candidate = tab.hit_test_plugin_byte_or_end(position, bounds);
         let Some(candidate) = candidate else {
             return false;
         };
+        if visual_caret && matches!(motion, SelectionMotion::Drag) {
+            let Some(mut tab) = self.tab_session_mut(tab_id) else {
+                return false;
+            };
+            let anchor = tab.document.cursor().selection_anchor;
+            set_wysiwyg_cursor_and_selection(&mut tab, candidate, anchor);
+            return true;
+        }
         let snapped_candidate = {
             let Some(mut tab) = self.tab_session_mut(tab_id) else {
                 return false;
             };
-            if extend {
+            if !visual_caret && extend {
                 place_text_pointer_selection(&mut tab, candidate, true, click_kind, initial_range);
             } else {
                 place_text_caret(&mut tab, candidate, false);
@@ -459,7 +756,7 @@ impl EditorRuntime {
             tab.set_cursor_byte(snapped_candidate);
             snapped_candidate
         };
-        if extend {
+        if !visual_caret && extend {
             return true;
         }
 
@@ -473,10 +770,66 @@ impl EditorRuntime {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return false;
         };
-        place_text_pointer_selection(&mut tab, final_byte, extend, click_kind, initial_range);
-        let snapped_final = tab.document.cursor_offset().to_usize();
-        tab.set_cursor_byte(snapped_final);
+        if visual_caret {
+            tab.document.cursor_move_to_offset(final_byte);
+            let snapped_byte = tab.document.cursor_offset().to_usize();
+            place_visual_plugin_press(
+                &mut tab,
+                VisualCaretPosition {
+                    byte_offset: snapped_byte,
+                    affinity: CursorAffinity::Downstream,
+                },
+                click_kind,
+            );
+        } else {
+            place_text_pointer_selection(&mut tab, final_byte, extend, click_kind, initial_range);
+            let snapped_final = tab.document.cursor_offset().to_usize();
+            tab.set_cursor_byte(snapped_final);
+        }
         self.input_session.set_preferred_x(None);
+        true
+    }
+
+    fn place_visual_plugin_caret(
+        &mut self,
+        tab_id: TabId,
+        bounds: ui::Rect,
+        point: (f32, f32),
+        byte_offset: usize,
+        selection_scope: Option<std::ops::Range<usize>>,
+        motion: SelectionMotion,
+        click_kind: PointerClickKind,
+    ) -> bool {
+        let Some(tab) = self.tab_session(tab_id) else {
+            return false;
+        };
+        let position = tab
+            .hit_test_caret(point.0, point.1, bounds.x, bounds.y)
+            .filter(|position| position.byte_offset == byte_offset)
+            .unwrap_or(VisualCaretPosition { byte_offset, affinity: CursorAffinity::Downstream });
+        if matches!(motion, SelectionMotion::Drag)
+            && self
+                .input_session
+                .visual_caret_scope()
+                .is_some_and(|scope| Some(scope) != selection_scope.as_ref())
+        {
+            return false;
+        }
+
+        let Some(mut tab) = self.tab_session_mut(tab_id) else {
+            return false;
+        };
+        match motion {
+            SelectionMotion::Drag => {
+                let anchor = tab.document.cursor().selection_anchor;
+                set_wysiwyg_visual_caret_and_selection(&mut tab, position, anchor);
+            }
+            SelectionMotion::Press { .. } => {
+                place_visual_plugin_press(&mut tab, position, click_kind);
+                self.input_session.set_visual_caret_scope(selection_scope);
+                self.input_session.set_preferred_x(None);
+            }
+        }
         true
     }
 
@@ -496,7 +849,15 @@ impl EditorRuntime {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return;
         };
-        let _ = tab.render_plugin(bounds, &theme, &mut shaper, dpi);
+        if tab.is_canvas()
+            && let Some(snapshot) = tab
+                .prepare_canvas_plugin(&theme, &mut shaper, dpi)
+                .and_then(|metrics| tab.prepare_canvas_viewport(metrics, bounds, dpi))
+        {
+            let _ = tab.render_canvas_plugin(&snapshot, &theme, &mut shaper, dpi);
+        } else {
+            let _ = tab.render_plugin(bounds, &theme, &mut shaper, dpi);
+        }
     }
 
     fn clear_collapsed_selection(&mut self) {
@@ -506,7 +867,10 @@ impl EditorRuntime {
         let Some(mut tab) = self.tab_session_mut(tab_id) else {
             return;
         };
-        tab.clear_collapsed_pointer_selection();
+        if tab.clear_collapsed_pointer_selection() && tab.handles_own_rendering() {
+            tab.set_plugin_selection_anchor_byte(None);
+            tab.set_plugin_selection_cursor_byte(None);
+        }
     }
 
     fn current_text_selection_range(&self) -> Option<std::ops::Range<usize>> {
@@ -524,9 +888,6 @@ impl CanvasDragSession {
         position: (f32, f32),
         bounds: ui::Rect,
     ) -> Option<CanvasDragRequest> {
-        if self.eligibility == CanvasDragEligibility::Disabled {
-            return None;
-        }
         if self.started {
             return Some(self.request(CanvasDragPhase::Update, position, bounds));
         }
@@ -619,7 +980,7 @@ enum PointerPhase {
     Release,
 }
 
-fn selection_granularity(click_kind: PointerClickKind) -> TextSelectionGranularity {
+pub(super) fn selection_granularity(click_kind: PointerClickKind) -> TextSelectionGranularity {
     match click_kind {
         PointerClickKind::Single => TextSelectionGranularity::Grapheme,
         PointerClickKind::Double => TextSelectionGranularity::Word,
@@ -627,7 +988,7 @@ fn selection_granularity(click_kind: PointerClickKind) -> TextSelectionGranulari
     }
 }
 
-fn pointer_click_kind(granularity: TextSelectionGranularity) -> PointerClickKind {
+pub(super) fn pointer_click_kind(granularity: TextSelectionGranularity) -> PointerClickKind {
     match granularity {
         TextSelectionGranularity::Grapheme => PointerClickKind::Single,
         TextSelectionGranularity::Word => PointerClickKind::Double,
@@ -657,6 +1018,85 @@ fn expanded_plugin_hit_position(
         return pointer_position;
     };
     (bounds.x + cursor_x, bounds.y + cursor_y + cursor_height * 0.5)
+}
+
+fn plugin_hit_cursor_icon(target: Option<&EditHitTarget>) -> winit::window::CursorIcon {
+    match target {
+        Some(EditHitTarget::TextCaret { .. }) => winit::window::CursorIcon::Text,
+        Some(EditHitTarget::SourceObject { .. }) => winit::window::CursorIcon::Grab,
+        Some(EditHitTarget::ClearFocus) | None => winit::window::CursorIcon::Default,
+    }
+}
+
+fn place_reading_selection(
+    tab: &mut TabSessionMut<'_>,
+    point: (f32, f32),
+    bounds: ui::Rect,
+    click_kind: PointerClickKind,
+    extend: bool,
+) {
+    let Some(position) = tab.hit_test_position(point.0, point.1, bounds.x, bounds.y) else {
+        tab.clear_plugin_selection();
+        return;
+    };
+    if extend {
+        tab.set_plugin_selection_cursor(Some(position));
+        return;
+    }
+
+    if let Some(range) = reading_selection_range(tab, position, click_kind) {
+        tab.set_plugin_selection_anchor(Some(range.start));
+        tab.set_plugin_selection_cursor(Some(range.end));
+    }
+}
+
+fn extend_reading_selection(
+    tab: &mut TabSessionMut<'_>,
+    point: (f32, f32),
+    bounds: ui::Rect,
+    click_kind: PointerClickKind,
+) {
+    let Some(position) = tab.hit_test_position(point.0, point.1, bounds.x, bounds.y) else {
+        return;
+    };
+    let Some(range) = reading_selection_range(tab, position, click_kind) else {
+        return;
+    };
+    let previous = tab.selection_cursor().unwrap_or(position);
+    let endpoint = if position >= previous { range.end } else { range.start };
+    tab.set_plugin_selection_cursor(Some(endpoint));
+}
+
+fn reading_selection_range(
+    tab: &TabSessionMut<'_>,
+    position: (usize, usize),
+    click_kind: PointerClickKind,
+) -> Option<std::ops::Range<(usize, usize)>> {
+    let (start, end) = match click_kind {
+        PointerClickKind::Single => Some((position, position)),
+        PointerClickKind::Double => tab.word_range_at_pos(position.0, position.1),
+        PointerClickKind::Triple => tab.line_range_at_pos(position.0, position.1),
+    }?;
+    Some(start..end)
+}
+
+fn place_visual_plugin_press(
+    tab: &mut TabSessionMut<'_>,
+    position: VisualCaretPosition,
+    click_kind: PointerClickKind,
+) {
+    let (position, anchor) = if click_kind == PointerClickKind::Double {
+        let (start, end) = tab.document.word_select_at(position.byte_offset);
+        let affinity = if end == position.byte_offset {
+            position.affinity
+        } else {
+            CursorAffinity::Downstream
+        };
+        (VisualCaretPosition { byte_offset: end, affinity }, start)
+    } else {
+        (position, position.byte_offset)
+    };
+    set_wysiwyg_visual_caret_and_selection(tab, position, Some(anchor));
 }
 
 fn place_text_caret(tab: &mut TabSessionMut<'_>, byte_offset: usize, extend: bool) {
@@ -759,24 +1199,21 @@ fn place_grouped_drag_selection(
 
 fn hit_test_text_byte(
     tab: &TabSessionMut<'_>,
-    editor_rect: ui::Rect,
+    text_top: f32,
+    text_left: f32,
     position: (f32, f32),
-    settings: &ui::settings::Settings,
     metrics: &ui::settings::UiMetrics,
 ) -> Option<usize> {
     let display = tab.display();
     let sub_line_offset = display.viewport.sub_line_pixel_offset(metrics.line_height);
     let (_, entry) = hit_test_visual_row(
         position.1,
-        editor_rect.y,
+        text_top,
         sub_line_offset,
         metrics.line_height,
         &display.advance_cache,
     )?;
-    let gutter_width = metrics
-        .content_left_margin
-        .max(settings.gutter_width(tab.document.line_count()) * metrics.dpi);
-    let line_byte = hit_test_row_byte(position.0, editor_rect.x + gutter_width, entry);
+    let line_byte = hit_test_row_byte(position.0, text_left, entry);
     tab.document.line_byte_offset(entry.doc_line).map(|start| start + line_byte)
 }
 

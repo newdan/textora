@@ -2,27 +2,25 @@ use std::io;
 use std::path::Path;
 
 use appkit_core::document::DocumentModel;
-use appkit_core::tab_set::types::{PersistedTab, PersistedWorkspace, TabId};
-use appkit_shell::editor_runtime::{EditorTabSnapshot, EditorWorkspaceSnapshot};
-use appkit_shell::prepared_tab::PreparedTab;
-use ui::plugin::PLUGIN_EDITOR;
+use appkit_core::tab_set::types::{PersistedTab, PersistedWorkspace};
+use appkit_shell::editor_runtime::{
+    EditorRuntime, EditorTabSnapshot, EditorWorkspaceSnapshot, RestoredEditorTab,
+};
 
 use crate::workspace_tab_factory::ViewportDimensions;
 use appkit_shell::document_presentation::DocumentPresentation;
+#[cfg(test)]
 use appkit_shell::editor_tab_set::EditorTabSet;
-use appkit_shell::tab_runtime::{TabRuntime, TabRuntimeStore};
+#[cfg(test)]
+use appkit_shell::tab_runtime::TabRuntimeStore;
 #[cfg(test)]
 use appkit_shell::tab_session::TabSession;
-use appkit_shell::tab_session::TabSessionMut;
+#[cfg(test)]
+use ui::plugin::PLUGIN_EDITOR;
 
 const WORKSPACE_VERSION: u32 = 1;
 const RECOVERY_TITLE_PREFIX: &str = "恢复：";
 const UNNAMED_RECOVERY_TITLE: &str = "恢复：未命名";
-
-pub(crate) struct RestoredWorkspace {
-    pub(crate) workspace: EditorTabSet,
-    pub(crate) runtimes: TabRuntimeStore,
-}
 
 struct PersistedDirtyState {
     snapshot_filename: Option<String>,
@@ -399,119 +397,65 @@ fn recovery_name(tab: &PersistedTab, legacy_without_baseline: bool) -> Option<St
     )
 }
 
-fn restore_runtime_state(
-    session: &mut TabSessionMut<'_>,
-    anchor_text: Option<&str>,
-    anchor_offset: f32,
-    cached_toggle_source: Option<Box<dyn ui::plugin::ViewPluginCapabilities>>,
-) {
-    if !session.runtime.plugin.allows_editing()
-        && let Some(text) = anchor_text
-    {
-        session.restore_plugin_scroll_anchor(text, anchor_offset);
-    }
-    if let Some(plugin) = cached_toggle_source {
-        session.cache_toggle_source_plugin(plugin);
-    }
-}
-
-fn append_restored_tab(
-    workspace: &mut EditorTabSet,
-    runtimes: &mut TabRuntimeStore,
-    tab: &PersistedTab,
-    is_active: bool,
-    dimensions: ViewportDimensions,
-    snapshots_dir: &Path,
-) -> TabId {
-    let (document, legacy_without_baseline) = restore_document(tab, is_active, snapshots_dir);
-    let route = tab.file_path.as_deref().and_then(|path| workspace.plugin_route_for_path(path));
-    let plugin_name = tab
-        .active_plugin
-        .as_deref()
-        .or(route.map(|rule| rule.default_plugin))
-        .unwrap_or(PLUGIN_EDITOR);
-    let plugin = workspace.create_plugin_by_name(plugin_name);
-    let cached_toggle_source = route
-        .and_then(|rule| rule.toggle_target)
-        .filter(|target| plugin_name != *target)
-        .map(|target| workspace.create_plugin_by_name(target));
-    let scroll_anchor = ui::viewport::ScrollAnchor::new(
-        tab.scroll_anchor_line.unwrap_or(0),
-        tab.scroll_anchor_offset.unwrap_or(0.0),
-    );
-    let is_stub = document.buffer_len() == 0 && document.file_path.is_some();
-    let presentation =
-        DocumentPresentation::new(dimensions.visible_rows, dimensions.viewport_height);
-    let runtime = TabRuntime::with_presentation(plugin, presentation);
-    let suggested_name =
-        tab.suggested_file_name.clone().or_else(|| recovery_name(tab, legacy_without_baseline));
-    let tab_id = workspace.append_prepared_tab(
-        runtimes,
-        PreparedTab::new(document, runtime),
-        suggested_name,
-    );
-    let index = workspace
-        .index_of(tab_id)
-        .expect("a restored tab must remain installed while its runtime state is restored");
-    let document = workspace.entry_mut(index).expect("a restored tab ID must address its document");
-    let runtime = runtimes
-        .get_mut(tab_id)
-        .expect("append_prepared_tab must install a matching restored runtime");
-    let restored_anchor = if is_stub {
-        ui::viewport::ScrollAnchor::new(
-            scroll_anchor.doc_line.min(document.line_count().saturating_sub(1)),
-            scroll_anchor.pixel_offset.max(0.0),
-        )
-    } else {
-        scroll_anchor
-    };
-    let mut session = TabSessionMut::new(tab_id, document, runtime);
-    session.set_scroll_anchor_state(restored_anchor);
-    restore_runtime_state(
-        &mut session,
-        tab.preview_anchor_text.as_deref(),
-        tab.preview_anchor_offset.unwrap_or(0.0),
-        cached_toggle_source,
-    );
-    tab_id
-}
-
 pub(crate) fn restore_workspace(
-    mut workspace: EditorTabSet,
+    runtime: &mut EditorRuntime,
     snapshot: PersistedWorkspace,
     dimensions: ViewportDimensions,
-    line_height: f64,
+    line_height: f32,
     snapshots_dir: &Path,
-) -> io::Result<RestoredWorkspace> {
-    let mut runtimes = TabRuntimeStore::default();
-    let active_index = snapshot.active_index;
-    for (index, tab) in snapshot.entries.iter().enumerate() {
-        append_restored_tab(
-            &mut workspace,
-            &mut runtimes,
-            tab,
-            index == active_index,
-            dimensions,
-            snapshots_dir,
-        );
+) -> io::Result<()> {
+    if runtime.tab_count() != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workspace restoration requires an empty editor",
+        ));
     }
-
-    if !workspace.is_empty() {
-        let target_index = active_index.min(workspace.len() - 1);
-        let effect = workspace.switch_to(target_index);
-        effect.reconcile_runtime_store(&mut runtimes);
-        let active_id = workspace
-            .tab_id_at(workspace.active_index())
-            .expect("a non-empty restored workspace must have an active tab ID");
-        if let (Some(document), Some(runtime)) =
-            (workspace.active_entry_mut(), runtimes.get_mut(active_id))
-        {
-            let mut session = TabSessionMut::new(active_id, document, runtime);
-            session.ensure_cursor_visible(line_height as f32);
-        }
+    let active_index = snapshot.active_index.min(snapshot.entries.len().saturating_sub(1));
+    for (index, persisted_tab) in snapshot.entries.iter().enumerate() {
+        let (document, legacy_without_baseline) =
+            restore_document(persisted_tab, index == active_index, snapshots_dir);
+        let preview_anchor = persisted_tab
+            .preview_anchor_text
+            .as_deref()
+            .map(|text| (text, persisted_tab.preview_anchor_offset.unwrap_or(0.0)));
+        runtime.append_restored_tab(RestoredEditorTab {
+            document,
+            presentation: DocumentPresentation::new(
+                dimensions.visible_rows,
+                dimensions.viewport_height,
+            ),
+            route_path: persisted_tab.file_path.as_deref(),
+            active_plugin: persisted_tab.active_plugin.as_deref(),
+            suggested_file_name: persisted_tab
+                .suggested_file_name
+                .clone()
+                .or_else(|| recovery_name(persisted_tab, legacy_without_baseline)),
+            scroll_anchor: ui::viewport::ScrollAnchor::new(
+                persisted_tab.scroll_anchor_line.unwrap_or(0),
+                persisted_tab.scroll_anchor_offset.unwrap_or(0.0),
+            ),
+            preview_anchor,
+        });
     }
+    runtime.finish_workspace_restore(active_index, line_height);
+    Ok(())
+}
 
-    Ok(RestoredWorkspace { workspace, runtimes })
+#[cfg(test)]
+pub(crate) fn restore_workspace_for_test(
+    snapshot: PersistedWorkspace,
+    dimensions: ViewportDimensions,
+    snapshots_dir: &Path,
+) -> EditorRuntime {
+    let mut runtime = crate::app_init::build_product_editor_runtime(
+        ui::Settings::new(),
+        ui::theme::test_theme(),
+        snapshots_dir,
+    )
+    .expect("test editor runtime should initialize");
+    restore_workspace(&mut runtime, snapshot, dimensions, 16.0, snapshots_dir)
+        .expect("workspace should restore into the runtime");
+    runtime
 }
 
 #[cfg(test)]
@@ -520,13 +464,13 @@ mod tests {
     use ui::plugin::{PLUGIN_EDITOR, PLUGIN_NOVEL_VIEW};
     use ui::viewport::ScrollAnchor;
 
-    use super::{restore_workspace, snapshot_workspace};
+    use super::{restore_workspace_for_test, snapshot_workspace};
     use crate::app_init::build_product_workspace;
     use crate::document_fixture::DocumentFixture;
     use crate::plugins::editor::EditorPlugin;
     use crate::workspace_tab_factory::ViewportDimensions;
     use appkit_shell::tab_runtime::{TabRuntime, TabRuntimeStore};
-    use appkit_shell::tab_session::{TabSession, TabSessionMut};
+    use appkit_shell::tab_session::TabSessionMut;
 
     fn append_document(
         workspace: &mut appkit_shell::editor_tab_set::EditorTabSet,
@@ -605,21 +549,20 @@ dirty = false
         assert!(snapshot.entries[0].dirty);
         assert!(snapshot.entries[0].snapshot_filename.is_some());
         assert!(snapshot.entries[0].original_disk_revision.is_some());
-        let restored = restore_workspace(
-            build_product_workspace(),
-            snapshot,
-            dimensions,
-            16.0,
-            directory.path(),
-        )
-        .expect("dirty workspace should restore");
-        let restored_document =
-            restored.workspace.active_entry().expect("restored dirty document should exist");
+        let restored = restore_workspace_for_test(snapshot, dimensions, directory.path());
+        let restored_id = restored.active_tab_id().expect("restored dirty tab should be active");
+        let restored_document = restored
+            .tab_session(restored_id)
+            .expect("restored dirty document should exist")
+            .document();
         assert_eq!(restored_document.full_text(), "original changed");
         assert_eq!(restored_document.file_path.as_deref(), Some(file_path.as_path()));
         assert!(restored_document.disk_revision.is_some());
         assert!(restored_document.dirty);
-        assert_eq!(restored.workspace.tab_ids(), restored.runtimes.ids());
+        assert_eq!(
+            restored.tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            restored.runtime_tab_ids()
+        );
     }
 
     #[test]
@@ -635,21 +578,10 @@ dirty = false
         let snapshot = snapshot_workspace(&source, &source_runtimes, false, None, directory.path());
         let dimensions = ViewportDimensions { visible_rows: 9, viewport_height: 144.0 };
 
-        let restored = restore_workspace(
-            build_product_workspace(),
-            snapshot,
-            dimensions,
-            16.0,
-            directory.path(),
-        )
-        .expect("workspace should restore with supplied viewport dimensions");
-        let active_id = restored
-            .workspace
-            .tab_id_at(restored.workspace.active_index())
-            .expect("restored viewport tab should have an ID");
+        let restored = restore_workspace_for_test(snapshot, dimensions, directory.path());
+        let active_id = restored.active_tab_id().expect("restored viewport tab should have an ID");
         let viewport = &restored
-            .runtimes
-            .get(active_id)
+            .tab_runtime(active_id)
             .expect("restored viewport tab should have a runtime")
             .presentation
             .display
@@ -657,6 +589,33 @@ dirty = false
 
         assert_eq!(viewport.visible_rows, dimensions.visible_rows);
         assert_eq!(viewport.viewport_height, dimensions.viewport_height);
+    }
+
+    #[test]
+    fn stale_active_index_restores_the_fallback_tab_with_its_document_loaded() {
+        let directory = tempfile::tempdir().expect("测试目录应能创建");
+        let file_path = directory.path().join("fallback.txt");
+        std::fs::write(&file_path, "fallback body").expect("测试文件应能写入");
+        let dimensions = ViewportDimensions { visible_rows: 10, viewport_height: 10.0 };
+        let mut workspace = build_product_workspace();
+        let mut runtimes = TabRuntimeStore::default();
+        append_document(
+            &mut workspace,
+            &mut runtimes,
+            DocumentFixture::from_file(
+                &file_path,
+                dimensions.visible_rows,
+                dimensions.viewport_height,
+            )
+            .expect("测试文档应能读入"),
+        );
+        let mut snapshot = snapshot_workspace(&workspace, &runtimes, false, None, directory.path());
+        snapshot.active_index = usize::MAX;
+
+        let restored = restore_workspace_for_test(snapshot, dimensions, directory.path());
+        let tab_id = restored.active_tab_id().expect("回退标签应激活");
+        let tab = restored.tab_session(tab_id).expect("回退标签应有视图状态");
+        assert_eq!(tab.document().full_text(), "fallback body");
     }
 
     #[test]
@@ -804,31 +763,20 @@ dirty = false
             snapshot_workspace(&workspace, &runtimes, true, Some(240.0), directory.path());
         assert_eq!(snapshot.entries[1].scroll_anchor_line, Some(1));
         assert_eq!(snapshot.entries[1].scroll_anchor_offset, Some(3.5));
-        let restored = restore_workspace(
-            build_product_workspace(),
-            snapshot,
-            dimensions,
-            16.0,
-            directory.path(),
-        )
-        .expect("workspace should restore through the direct adapter");
+        let restored = restore_workspace_for_test(snapshot, dimensions, directory.path());
 
-        assert_eq!(restored.workspace.active_index(), 1);
-        let restored_active_id = restored
-            .workspace
-            .tab_id_at(restored.workspace.active_index())
-            .expect("restored active tab should have an ID");
-        assert_eq!(restored.workspace.tab_ids(), restored.runtimes.ids());
-        let restored_document =
-            restored.workspace.active_entry().expect("restored active document should exist");
+        let restored_active_id =
+            restored.active_tab_id().expect("restored active tab should have an ID");
+        assert_eq!(
+            restored.tab_ids_in_order().into_iter().collect::<std::collections::HashSet<_>>(),
+            restored.runtime_tab_ids()
+        );
+        assert_eq!(restored.tab_index(restored_active_id), Some(1));
+        let restored_session =
+            restored.tab_session(restored_active_id).expect("restored active runtime should exist");
+        let restored_document = restored_session.document();
         assert_eq!(restored_document.cursor_offset().to_usize(), expected_cursor_offset);
         assert_eq!(restored_document.cursor().selection_anchor, Some(2));
-        let restored_runtime = restored
-            .runtimes
-            .get(restored_active_id)
-            .expect("restored active runtime should exist");
-        let restored_session =
-            TabSession::new(restored_active_id, restored_document, restored_runtime);
         assert_eq!(restored_session.scroll_anchor_state().doc_line, 1);
         assert_eq!(restored_session.scroll_anchor_state().pixel_offset, 3.5);
     }
@@ -853,43 +801,30 @@ dirty = false
         );
 
         let snapshot = snapshot_workspace(&workspace, &runtimes, false, None, directory.path());
-        let mut restored = restore_workspace(
-            build_product_workspace(),
-            snapshot,
-            dimensions,
-            16.0,
-            directory.path(),
-        )
-        .expect("route workspace should restore");
+        let mut restored = restore_workspace_for_test(snapshot, dimensions, directory.path());
 
-        let active_id = restored
-            .workspace
-            .tab_id_at(restored.workspace.active_index())
-            .expect("restored route tab should have an ID");
+        let active_id = restored.active_tab_id().expect("restored route tab should have an ID");
         assert_eq!(
             restored
-                .runtimes
-                .get(active_id)
+                .tab_runtime(active_id)
                 .expect("restored route runtime should exist")
                 .plugin
                 .name(),
             PLUGIN_EDITOR
         );
-        restored.workspace.switch_plugin_with_runtime(&mut restored.runtimes);
+        restored.switch_active_plugin();
         assert_eq!(
             restored
-                .runtimes
-                .get(active_id)
+                .tab_runtime(active_id)
                 .expect("toggled route runtime should exist")
                 .plugin
                 .name(),
             PLUGIN_NOVEL_VIEW
         );
-        restored.workspace.switch_plugin_with_runtime(&mut restored.runtimes);
+        restored.switch_active_plugin();
         assert_eq!(
             restored
-                .runtimes
-                .get(active_id)
+                .tab_runtime(active_id)
                 .expect("restored default route runtime should exist")
                 .plugin
                 .name(),

@@ -804,44 +804,11 @@ pub(crate) fn classify_source(source: &MarkdownSource<'_>, current_byte: usize) 
                 }
             }
             MarkdownEvent::End(MarkdownTagEnd::Item) => {
-                if let Some(frame) = item_stack.pop() {
-                    // item range 含尾部换行 run（块间空行分隔也算在内）；
-                    // 命中测试用去尾换行的内容末尾，否则紧随其后的顶层块首字节
-                    // 会被误判为仍属于该 item。
-                    let end =
-                        content_end_without_trailing_newline(source, frame.marker_end..range.end);
-                    // 光标在 marker 内部(`-| item`)时按内容起点处理,而不是落到
-                    // Other 产生 `-\n item` 这样的懒延续残留。
-                    if frame.marker_end > frame.start
-                        && current_byte > frame.start
-                        && current_byte <= end
-                    {
-                        // 光标所在行为纯空白(如嵌套空 item 退出后的残留缩进行)时,
-                        // 即使 item 其他行有内容也按空 item 处理:回车应继续退出,
-                        // 而不是在空白行下意外创建同级 item。
-                        let blank_line_width = blank_source_line_width(source, current_byte);
-                        let empty = !frame.saw_content || blank_line_width.is_some();
-                        // 残留空白行可能同时落在多级 item 的 range 内;选择缩进严格
-                        // 窄于该行空白宽度的最深帧——帧缩进与行内容等宽时原地替换
-                        // 是不动点,无法真正"退一层"。
-                        let frame_is_exit_target = match blank_line_width {
-                            Some(width) => frame.indent.len() < width,
-                            None => true,
-                        };
-                        let at_end = current_byte == end;
-                        if frame_is_exit_target && matched_list_item.is_none() {
-                            matched_list_item = Some((
-                                frame.start,
-                                EnterContext::ListItem {
-                                    indent: frame.indent,
-                                    continuation_marker: frame.continuation_marker,
-                                    content_prefix: frame.content_prefix,
-                                    empty,
-                                    at_end,
-                                },
-                            ));
-                        }
-                    }
+                if let Some(frame) = item_stack.pop()
+                    && matched_list_item.is_none()
+                {
+                    matched_list_item =
+                        classify_list_item_end(source, current_byte, frame, range.end);
                 }
             }
             MarkdownEvent::Start(MarkdownTag::BlockQuote) => {
@@ -877,23 +844,13 @@ pub(crate) fn classify_source(source: &MarkdownSource<'_>, current_byte: usize) 
                 paragraph_start = Some((range.start, item_stack.len(), quote_stack.len()));
             }
             MarkdownEvent::End(MarkdownTagEnd::Paragraph) => {
-                if let Some((start, p_item_depth, p_bq_depth)) = paragraph_start.take()
-                    && current_byte >= start
-                    && current_byte <= range.end
-                    && p_item_depth == 0
-                    && p_bq_depth == 0
+                if let Some((start, item_depth, quote_depth)) = paragraph_start.take()
+                    && item_depth == 0
+                    && quote_depth == 0
+                    && let Some(context) =
+                        classify_top_level_paragraph(source, current_byte, start..range.end)
                 {
-                    let end = content_end_without_trailing_newline(source, start..range.end);
-                    if current_byte == end {
-                        return EnterContext::TopLevelParagraphEnd;
-                    }
-                    if is_visible_content_start(source, start, current_byte) {
-                        return EnterContext::ParagraphStart { insert_at: start };
-                    }
-                    if source_line_is_empty(source, current_byte) {
-                        return EnterContext::EmptyBlockSeparatorLine;
-                    }
-                    return EnterContext::ParagraphInterior;
+                    return context;
                 }
             }
             MarkdownEvent::Rule
@@ -906,48 +863,14 @@ pub(crate) fn classify_source(source: &MarkdownSource<'_>, current_byte: usize) 
             }
             MarkdownEvent::Start(MarkdownTag::CodeBlock { .. }) => {
                 mark_item_content_seen(&mut item_stack);
-                code_block = Some(CodeBlockFrame {
-                    range: range.clone(),
-                    is_indented: !source.parsed().is_fenced_code_start(range.start),
-                    container_path: {
-                        let base = item_stack
-                            .last()
-                            .map(|item| container_path(&item.content_prefix))
-                            .unwrap_or_default();
-                        let opening_line_start = locate_snapshot_line_bounds(source, range.start)
-                            .map_or(range.start, |bounds| bounds.0);
-                        source_container_path(source, opening_line_start, range.start, &base)
-                    },
-                });
+                code_block = Some(build_code_block_frame(source, range, item_stack.last()));
             }
             MarkdownEvent::End(MarkdownTagEnd::CodeBlock) => {
-                if let Some(frame) = code_block.take() {
-                    // pulldown-cmark 对缩进代码块的 range 包含结尾换行
-                    // （fenced 则不包含）；用去尾换行的 content_end 统一两种边界，
-                    // 否则紧邻的下一块首字节会被误判为 CodeBlock。
-                    let block_range = frame.range.start..range.end;
-                    let end = content_end_without_trailing_newline(source, block_range.clone());
-                    if current_byte >= frame.range.start && current_byte <= end {
-                        if frame.is_indented {
-                            let continuation_prefix = indented_code_continuation_prefix(
-                                source,
-                                current_byte,
-                                &block_range,
-                                &frame.container_path,
-                            );
-                            return EnterContext::IndentedCodeBlock { continuation_prefix };
-                        }
-                        if let Some(fence_context) = classify_fence_line_hit(
-                            source,
-                            current_byte,
-                            frame.range.start,
-                            end,
-                            &frame.container_path,
-                        ) {
-                            return fence_context;
-                        }
-                        return EnterContext::CodeBlock;
-                    }
+                if let Some(frame) = code_block.take()
+                    && let Some(context) =
+                        classify_code_block_hit(source, current_byte, frame, range.end)
+                {
+                    return context;
                 }
             }
             MarkdownEvent::Start(MarkdownTag::MetadataBlock(_))
@@ -1010,67 +933,9 @@ pub(crate) fn classify_source(source: &MarkdownSource<'_>, current_byte: usize) 
         }
     }
 
-    if let Some(t) = table {
-        for (row_idx, row) in t.cell_ranges.iter().enumerate() {
-            for (col_idx, cell) in row.iter().enumerate() {
-                if current_byte >= cell.start && current_byte <= cell.end {
-                    let next_cell_start = t
-                        .cell_ranges
-                        .get(row_idx + 1)
-                        .and_then(|next_row| next_row.get(col_idx))
-                        .map(|next_cell| table_cell_content_start(source, next_cell));
-                    let previous_tab_cell_start = if col_idx > 0 {
-                        row.get(col_idx - 1)
-                    } else {
-                        row_idx.checked_sub(1).and_then(|previous_row| {
-                            t.cell_ranges
-                                .get(previous_row)
-                                .and_then(|previous_cells| previous_cells.last())
-                        })
-                    }
-                    .map(|previous_cell| table_cell_content_start(source, previous_cell));
-                    let next_tab_cell_start = row
-                        .get(col_idx + 1)
-                        .or_else(|| {
-                            t.cell_ranges.get(row_idx + 1).and_then(|next_row| next_row.first())
-                        })
-                        .map(|next_cell| table_cell_content_start(source, next_cell));
-                    let column_count = row.len();
-                    let row_is_empty = row.iter().all(|row_cell| {
-                        source[row_cell.clone()]
-                            .bytes()
-                            .all(|byte| matches!(byte, b' ' | b'\t' | b'|' | b'\r' | b'\n'))
-                    });
-                    let is_header_row = row_idx == 0;
-                    let last_cell_end = row.last().map_or(cell.end, |last_cell| last_cell.end);
-                    let last_row_content_end = content_end_without_trailing_newline(
-                        source,
-                        0..t.table_end.max(last_cell_end),
-                    );
-                    let row_probe = if next_cell_start.is_none() {
-                        last_row_content_end.saturating_sub(1)
-                    } else {
-                        last_cell_end.saturating_sub(1)
-                    };
-                    let row_line_end = locate_snapshot_line_bounds(source, row_probe)
-                        .map(|(_, _, line_end)| source_line_content_end(source, line_end))
-                        .unwrap_or(last_cell_end);
-                    return EnterContext::TableCell {
-                        cell_range: cell.clone(),
-                        next_cell_start,
-                        previous_tab_cell_start,
-                        next_tab_cell_start,
-                        column_count,
-                        row_is_empty,
-                        is_header_row,
-                        is_last_cell: row_idx + 1 == t.cell_ranges.len()
-                            && col_idx + 1 == row.len(),
-                        row_line_end,
-                        container_prefix: t.container_prefix.clone(),
-                    };
-                }
-            }
-        }
+    if let Some(context) = table.and_then(|table| classify_table_hit(source, current_byte, &table))
+    {
+        return context;
     }
 
     if let Some(literal_block) = matched_literal_block {
@@ -1098,6 +963,167 @@ pub(crate) fn classify_source(source: &MarkdownSource<'_>, current_byte: usize) 
     }
 
     EnterContext::Other
+}
+
+fn classify_list_item_end(
+    source: &str,
+    current_byte: usize,
+    frame: ItemFrame,
+    range_end: usize,
+) -> Option<(usize, EnterContext)> {
+    let end = content_end_without_trailing_newline(source, frame.marker_end..range_end);
+    // Include the interior of the marker while excluding the next block's start.
+    if frame.marker_end <= frame.start || current_byte <= frame.start || current_byte > end {
+        return None;
+    }
+
+    // A whitespace-only continuation can belong to several nested items. Use the
+    // deepest item whose indentation is narrower so Enter can actually outdent.
+    let blank_line_width = blank_source_line_width(source, current_byte);
+    if blank_line_width.is_some_and(|width| frame.indent.len() >= width) {
+        return None;
+    }
+    Some((
+        frame.start,
+        EnterContext::ListItem {
+            indent: frame.indent,
+            continuation_marker: frame.continuation_marker,
+            content_prefix: frame.content_prefix,
+            empty: !frame.saw_content || blank_line_width.is_some(),
+            at_end: current_byte == end,
+        },
+    ))
+}
+
+fn classify_top_level_paragraph(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+    range: std::ops::Range<usize>,
+) -> Option<EnterContext> {
+    if current_byte < range.start || current_byte > range.end {
+        return None;
+    }
+    let start = range.start;
+    let end = content_end_without_trailing_newline(source, range);
+    if current_byte == end {
+        return Some(EnterContext::TopLevelParagraphEnd);
+    }
+    if is_visible_content_start(source, start, current_byte) {
+        return Some(EnterContext::ParagraphStart { insert_at: start });
+    }
+    if source_line_is_empty(source, current_byte) {
+        return Some(EnterContext::EmptyBlockSeparatorLine);
+    }
+    Some(EnterContext::ParagraphInterior)
+}
+
+fn build_code_block_frame(
+    source: &MarkdownSource<'_>,
+    range: std::ops::Range<usize>,
+    item: Option<&ItemFrame>,
+) -> CodeBlockFrame {
+    let base = item.map(|item| container_path(&item.content_prefix)).unwrap_or_default();
+    let opening_line_start =
+        locate_snapshot_line_bounds(source, range.start).map_or(range.start, |bounds| bounds.0);
+    CodeBlockFrame {
+        is_indented: !source.parsed().is_fenced_code_start(range.start),
+        container_path: source_container_path(source, opening_line_start, range.start, &base),
+        range,
+    }
+}
+
+fn classify_code_block_hit(
+    source: &str,
+    current_byte: usize,
+    frame: CodeBlockFrame,
+    range_end: usize,
+) -> Option<EnterContext> {
+    // Strip trailing newlines from both fence and indented ranges to exclude the next block.
+    let block_range = frame.range.start..range_end;
+    let end = content_end_without_trailing_newline(source, block_range.clone());
+    if current_byte < frame.range.start || current_byte > end {
+        return None;
+    }
+    if frame.is_indented {
+        let continuation_prefix = indented_code_continuation_prefix(
+            source,
+            current_byte,
+            &block_range,
+            &frame.container_path,
+        );
+        return Some(EnterContext::IndentedCodeBlock { continuation_prefix });
+    }
+    classify_fence_line_hit(source, current_byte, frame.range.start, end, &frame.container_path)
+        .or(Some(EnterContext::CodeBlock))
+}
+
+fn classify_table_hit(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+    table: &TableFrame,
+) -> Option<EnterContext> {
+    for (row_idx, row) in table.cell_ranges.iter().enumerate() {
+        for (col_idx, cell) in row.iter().enumerate() {
+            if current_byte >= cell.start && current_byte <= cell.end {
+                let next_cell_start = table
+                    .cell_ranges
+                    .get(row_idx + 1)
+                    .and_then(|next_row| next_row.get(col_idx))
+                    .map(|next_cell| table_cell_content_start(source, next_cell));
+                let previous_tab_cell_start = if col_idx > 0 {
+                    row.get(col_idx - 1)
+                } else {
+                    row_idx.checked_sub(1).and_then(|previous_row| {
+                        table
+                            .cell_ranges
+                            .get(previous_row)
+                            .and_then(|previous_cells| previous_cells.last())
+                    })
+                }
+                .map(|previous_cell| table_cell_content_start(source, previous_cell));
+                let next_tab_cell_start = row
+                    .get(col_idx + 1)
+                    .or_else(|| {
+                        table.cell_ranges.get(row_idx + 1).and_then(|next_row| next_row.first())
+                    })
+                    .map(|next_cell| table_cell_content_start(source, next_cell));
+                let column_count = row.len();
+                let row_is_empty = row.iter().all(|row_cell| {
+                    source[row_cell.clone()]
+                        .bytes()
+                        .all(|byte| matches!(byte, b' ' | b'\t' | b'|' | b'\r' | b'\n'))
+                });
+                let is_header_row = row_idx == 0;
+                let last_cell_end = row.last().map_or(cell.end, |last_cell| last_cell.end);
+                let last_row_content_end = content_end_without_trailing_newline(
+                    source,
+                    0..table.table_end.max(last_cell_end),
+                );
+                let row_probe = if next_cell_start.is_none() {
+                    last_row_content_end.saturating_sub(1)
+                } else {
+                    last_cell_end.saturating_sub(1)
+                };
+                let row_line_end = locate_snapshot_line_bounds(source, row_probe)
+                    .map(|(_, _, line_end)| source_line_content_end(source, line_end))
+                    .unwrap_or(last_cell_end);
+                return Some(EnterContext::TableCell {
+                    cell_range: cell.clone(),
+                    next_cell_start,
+                    previous_tab_cell_start,
+                    next_tab_cell_start,
+                    column_count,
+                    row_is_empty,
+                    is_header_row,
+                    is_last_cell: row_idx + 1 == table.cell_ranges.len()
+                        && col_idx + 1 == row.len(),
+                    row_line_end,
+                    container_prefix: table.container_prefix.clone(),
+                });
+            }
+        }
+    }
+    None
 }
 
 pub(in crate::augmenter) fn literal_line_continuation_prefix(

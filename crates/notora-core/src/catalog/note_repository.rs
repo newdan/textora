@@ -567,7 +567,7 @@ impl Catalog {
         stored_note.map(CatalogNote::try_from).transpose()
     }
 
-    /// 读取编辑区需要的创建时间与持久化加密状态；不改变扫描器的 `CatalogNote`。
+    /// 读取编辑区需要的星标、时间和持久化文档属性。
     pub fn note_editor_metadata(
         &self,
         note_id: NoteId,
@@ -577,7 +577,7 @@ impl Catalog {
                 "SELECT note_id, created_ns, modified_ns, encryption,
                         EXISTS(SELECT 1 FROM note_title_initializations initialization
                                WHERE initialization.note_id = notes.note_id),
-                        file_name_binding, file_name_disambiguator, title_revision
+                        file_name_binding, file_name_disambiguator, title_revision, starred
                  FROM notes WHERE note_id = ?1",
                 [note_id.to_string()],
                 editor_metadata_from_row,
@@ -1121,6 +1121,7 @@ struct StoredEditorMetadata {
     file_name_binding: i64,
     file_name_disambiguator: i64,
     title_revision: i64,
+    starred: bool,
 }
 
 impl TryFrom<StoredEditorMetadata> for NoteEditorMetadata {
@@ -1160,6 +1161,7 @@ impl TryFrom<StoredEditorMetadata> for NoteEditorMetadata {
         })?;
         Ok(Self {
             note_id,
+            starred: stored_metadata.starred,
             created_at,
             modified_at,
             encryption,
@@ -1180,6 +1182,7 @@ fn editor_metadata_from_row(row: &Row<'_>) -> rusqlite::Result<StoredEditorMetad
         file_name_binding: row.get(5)?,
         file_name_disambiguator: row.get(6)?,
         title_revision: row.get(7)?,
+        starred: row.get(8)?,
     })
 }
 
@@ -1543,7 +1546,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_metadata_round_trips_creation_time_and_encryption_without_changing_scan_model() {
+    fn editor_metadata_round_trips_creation_time_encryption_and_starred_state() {
         let directory = tempfile::tempdir().expect("catalog test directory should be created");
         let catalog = Catalog::open(&directory.path().join("catalog.sqlite3"))
             .expect("catalog should initialize");
@@ -1551,6 +1554,7 @@ mod tests {
         catalog
             .upsert_active_note(&catalog_note(note_id, "metadata.md", "Metadata"))
             .expect("note should insert");
+        assert!(catalog.toggle_note_starred(note_id).expect("note should become starred"));
 
         let metadata = catalog
             .note_editor_metadata(note_id)
@@ -1560,6 +1564,7 @@ mod tests {
             metadata,
             NoteEditorMetadata {
                 note_id,
+                starred: true,
                 created_at: UNIX_EPOCH + Duration::from_secs(1),
                 modified_at: UNIX_EPOCH + Duration::from_secs(1),
                 encryption: NoteEncryption::Unencrypted,

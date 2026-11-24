@@ -246,367 +246,26 @@ impl GlyphAtlas {
     }
 
     /// Number of subpixel phases supported.
-    pub const SUBPIXEL_PHASES: u8 = 8;
+    pub const SUBPIXEL_PHASES: SubpixelPhase = 4;
 
-    /// Quantize a subpixel x-offset to a phase (0-7).
+    /// Quantize an x-coordinate on the atlas rasterization grid.
     pub fn quantize_subpixel(x_subpixel: f32) -> SubpixelPhase {
-        let phase = (x_subpixel * 8.0).round() as i32 % 8;
-        (phase & 7) as SubpixelPhase
+        split_subpixel(x_subpixel).1
     }
 }
 
-/// Split a coordinate into integer pixel position and subpixel phase (0-3).
-///
-/// Quantizes to 1/4-pixel grid: `(coord * 4.0).round() / 4.0`, then returns the
-/// integer-truncated position and the fractional phase (0..4).
-pub fn split_subpixel(coord: f32) -> (f32, u8) {
-    let sub = (coord * 4.0).round() / 4.0;
-    let int_part = sub.floor();
-    let phase = ((sub - int_part) * 4.0) as u8;
-    (int_part, phase)
+/// Round to the rasterization grid, then return the pixel origin and x phase.
+pub fn split_subpixel(coord: f32) -> (f32, SubpixelPhase) {
+    let phases = f32::from(GlyphAtlas::SUBPIXEL_PHASES);
+    let quantized = (coord * phases).round() / phases;
+    let pixel = quantized.floor();
+    let phase = ((quantized - pixel) * phases) as SubpixelPhase;
+    (pixel, phase)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── AtlasPage tests ────────────────────────────────────────────────────
-
-    #[test]
-    fn page_allocate_basic() {
-        let mut page = AtlasPage::new(0, 256, 256);
-        assert_eq!(page.allocate(10, 10), Some((0, 0)));
-        assert_eq!(page.allocate(10, 10), Some((11, 0))); // +1 padding
-    }
-
-    #[test]
-    fn page_allocate_next_row() {
-        let mut page = AtlasPage::new(0, 32, 32);
-        // First glyph: row 0
-        assert_eq!(page.allocate(20, 10), Some((0, 0)));
-        // Second glyph: does not fit on row 0 (21+21=42 > 32), goes to row 1
-        assert!(page.allocate(20, 10).is_some());
-    }
-
-    #[test]
-    fn page_allocate_overflow() {
-        let mut page = AtlasPage::new(0, 16, 16);
-        // First glyph fits
-        assert!(page.allocate(10, 10).is_some());
-        // Second glyph: row 0 full (11+11=22 > 16), row 1 too (11+11=22 > 16)
-        assert!(page.allocate(10, 10).is_none());
-    }
-
-    // ── GlyphAtlas tests ───────────────────────────────────────────────────
-
-    #[test]
-    fn glyph_atlas_lru_eviction() {
-        let mut atlas = GlyphAtlas::new(256, 256, 3, 4);
-
-        let key1 = GlyphKey { glyph_id: 1, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
-        let key2 = GlyphKey { glyph_id: 2, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
-        let key3 = GlyphKey { glyph_id: 3, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
-        let key4 = GlyphKey { glyph_id: 4, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
-
-        assert!(atlas.insert(key1, 10, 10, 0.0, 0.0).is_some());
-        assert!(atlas.insert(key2, 10, 10, 0.0, 0.0).is_some());
-        assert!(atlas.insert(key3, 10, 10, 0.0, 0.0).is_some());
-
-        // All 3 are in the atlas
-        assert_eq!(atlas.glyph_count(), 3);
-        assert!(atlas.get(&key1).is_some());
-
-        // Insert key4 — should evict key2 (LRU, since key1 was accessed recently)
-        assert!(atlas.insert(key4, 10, 10, 0.0, 0.0).is_some());
-        assert_eq!(atlas.glyph_count(), 3);
-        assert!(atlas.get(&key2).is_none(), "key2 should have been evicted");
-        assert!(atlas.get(&key3).is_some());
-        assert!(atlas.get(&key4).is_some());
-    }
-
-    #[test]
-    fn atlas_overflow_creates_new_page() {
-        // Tiny pages: 32x32. Each glyph 20x10 (+1 padding = 21x11).
-        // One page can fit 1 glyph per row, 2 rows = 2 glyphs.
-        // Third glyph needs a new page.
-        let mut atlas = GlyphAtlas::new(32, 32, 100, 4);
-
-        let key1 = GlyphKey { glyph_id: 1, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
-        let key2 = GlyphKey { glyph_id: 2, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
-        let key3 = GlyphKey { glyph_id: 3, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
-
-        assert!(atlas.insert(key1, 20, 10, 0.0, 0.0).is_some());
-        assert_eq!(atlas.page_count(), 1);
-
-        assert!(atlas.insert(key2, 20, 10, 0.0, 0.0).is_some());
-        assert_eq!(atlas.page_count(), 1); // fits on same page (second row)
-
-        // Third glyph: page 0 has row 0 (y=0, h=11) and row 1 (y=11, h=11).
-        // next_y = 11+11 = 22. 22+11 = 33 > 32. Page 0 full.
-        assert!(atlas.insert(key3, 20, 10, 0.0, 0.0).is_some());
-        assert_eq!(atlas.page_count(), 2, "should have created a second page");
-    }
-
-    #[test]
-    fn atlas_subpixel_phases() {
-        let mut atlas = GlyphAtlas::new(256, 256, 100, 4);
-
-        // Insert the same glyph with all 8 subpixel phases
-        for phase in 0..8u8 {
-            let key = GlyphKey {
-                glyph_id: 42,
-                font_id: 0usize,
-                font_size: 14 * 64,
-                subpixel_phase: phase,
-            };
-            assert!(atlas.insert(key, 10, 10, 0.0, 0.0).is_some(), "phase {phase} failed");
-        }
-
-        assert_eq!(atlas.glyph_count(), 8, "should have 8 entries (one per phase)");
-
-        // Verify all phases are present
-        for phase in 0..8u8 {
-            let key = GlyphKey {
-                glyph_id: 42,
-                font_id: 0usize,
-                font_size: 14 * 64,
-                subpixel_phase: phase,
-            };
-            assert!(atlas.get(&key).is_some(), "phase {phase} missing");
-        }
-    }
-
-    #[test]
-    fn subpixel_quantize() {
-        assert_eq!(GlyphAtlas::quantize_subpixel(0.0), 0);
-        assert_eq!(GlyphAtlas::quantize_subpixel(0.5), 4);
-        assert_eq!(GlyphAtlas::quantize_subpixel(0.125), 1);
-        assert_eq!(GlyphAtlas::quantize_subpixel(0.875), 7);
-    }
-
-    #[test]
-    fn atlas_insert_and_lookup() {
-        let mut atlas = GlyphAtlas::new(256, 256, 100, 4);
-        let key = GlyphKey { glyph_id: 1, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
-
-        let slot = atlas.insert(key, 10, 12, 1.5, -2.0).unwrap();
-        assert_eq!(slot.width, 10);
-        assert_eq!(slot.height, 12);
-        assert_eq!(slot.bearing_x, 1.5);
-        assert_eq!(slot.bearing_y, -2.0);
-        assert_eq!(slot.page, 0);
-
-        let looked_up = atlas.get(&key).unwrap();
-        assert_eq!(*looked_up, slot);
-    }
-
-    #[test]
-    fn oversized_glyph_cached_as_negative() {
-        // Tiny page: 32x32. Glyph 40x40 is too large for any page.
-        let mut atlas = GlyphAtlas::new(32, 32, 100, 4);
-        let key = GlyphKey { glyph_id: 99, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
-
-        // First attempt: creates a page, glyph doesn't fit, returns None.
-        assert!(atlas.insert(key, 40, 40, 0.0, 0.0).is_none());
-        let pages_after_first = atlas.page_count();
-
-        // Second attempt: should NOT create another page (negative cached).
-        assert!(atlas.insert(key, 40, 40, 0.0, 0.0).is_none());
-        assert_eq!(
-            atlas.page_count(),
-            pages_after_first,
-            "oversized glyph should not create new pages on retry"
-        );
-    }
-
-    #[test]
-    fn glyph_key_different_font_ids_are_different() {
-        // Bug fix: GlyphKey must include font_id to prevent atlas collision
-        // between different fonts that happen to have the same glyph_id.
-        // e.g., Menlo '6' (glyph_id=22) and a CJK fallback with glyph_id=22.
-        let key_a =
-            GlyphKey { glyph_id: 22, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
-        let key_b =
-            GlyphKey { glyph_id: 22, font_id: 1usize, font_size: 14 * 64, subpixel_phase: 0 };
-        assert_ne!(key_a, key_b, "same glyph_id but different font_id must be distinct keys");
-
-        // Both should be insertable and retrievable independently
-        let mut atlas = GlyphAtlas::new(256, 256, 100, 4);
-        assert!(atlas.insert(key_a, 10, 10, 0.0, 0.0).is_some());
-        assert!(atlas.insert(key_b, 12, 14, 1.0, -1.0).is_some());
-        assert_eq!(atlas.glyph_count(), 2);
-
-        let width_a = atlas.get(&key_a).unwrap().width;
-        let width_b = atlas.get(&key_b).unwrap().width;
-        assert_eq!(width_a, 10);
-        assert_eq!(width_b, 12, "different fonts should store different glyph bitmaps");
-    }
-
-    #[test]
-    fn max_pages_prevents_unbounded_growth() {
-        // Tiny page (32x32) and max_pages=2. Glyphs are 10x10.
-        // Each page can hold ~6 glyphs (32/11 ≈ 2 per row, ~3 rows).
-        // After 2 pages fill, new insertions should return None.
-        let mut atlas = GlyphAtlas::new(32, 32, 20, 2);
-        let mut count = 0;
-        for i in 0..20u32 {
-            let key = GlyphKey { glyph_id: i, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
-            if atlas.insert(key, 10, 10, 0.0, 0.0).is_some() {
-                count += 1;
-            }
-        }
-        // Should have created at most 2 pages
-        assert!(
-            atlas.page_count() <= 2,
-            "max_pages limit violated: got {} pages",
-            atlas.page_count()
-        );
-        // Some glyphs should have been inserted successfully
-        assert!(count > 0, "at least some glyphs should fit");
-    }
-
-    #[test]
-    fn max_pages_one_limits_to_single_page() {
-        let mut atlas = GlyphAtlas::new(256, 256, 100, 1);
-        assert_eq!(atlas.page_count(), 1);
-        let key = GlyphKey { glyph_id: 99, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
-        assert!(atlas.insert(key, 200, 200, 0.0, 0.0).is_some());
-        assert_eq!(atlas.page_count(), 1, "should stay at 1 page");
-    }
-
-    #[test]
-    fn split_subpixel_exact_integer() {
-        assert_eq!(split_subpixel(10.0), (10.0, 0));
-        assert_eq!(split_subpixel(0.0), (0.0, 0));
-    }
-
-    #[test]
-    fn split_subpixel_quarter() {
-        assert_eq!(split_subpixel(10.25), (10.0, 1));
-        assert_eq!(split_subpixel(10.5), (10.0, 2));
-        assert_eq!(split_subpixel(10.75), (10.0, 3));
-    }
-
-    #[test]
-    fn split_subpixel_rounding() {
-        // 10.3 → 10.25 (quantized) → int=10, phase=1
-        let (int_part, phase) = split_subpixel(10.3);
-        assert_eq!(int_part, 10.0);
-        assert_eq!(phase, 1);
-        // 10.1 → 10.0
-        let (int_part, phase) = split_subpixel(10.1);
-        assert_eq!(int_part, 10.0);
-        assert_eq!(phase, 0);
-    }
-
-    #[test]
-    fn split_subpixel_negative() {
-        // -0.3 → -0.25 (quantized) → floor = -1.0, phase = 3
-        let (int_part, phase) = split_subpixel(-0.3);
-        assert_eq!(int_part, -1.0);
-        assert_eq!(phase, 3);
-        // -0.5 → -0.5 → floor = -1.0, phase = 2
-        let (int_part, phase) = split_subpixel(-0.5);
-        assert_eq!(int_part, -1.0);
-        assert_eq!(phase, 2);
-    }
-
-    #[test]
-    fn split_subpixel_boundary_075() {
-        assert_eq!(split_subpixel(10.75), (10.0, 3));
-        // 10.875 → quantized to 10.75 → phase 3
-        let (int_part, phase) = split_subpixel(10.875);
-        assert_eq!(int_part, 11.0);
-        assert_eq!(phase, 0);
-    }
-
-    #[test]
-    fn split_subpixel_large_value() {
-        let (int_part, phase) = split_subpixel(12345.5);
-        assert_eq!(int_part, 12345.0);
-        assert_eq!(phase, 2);
-    }
-
-    #[test]
-    fn gamma_uniform_size() {
-        // GammaUniform has two f32 fields: contrast + gamma = 8 bytes
-        assert_eq!(std::mem::size_of::<GammaUniform>(), 8);
-        assert_eq!(std::mem::align_of::<GammaUniform>(), 4);
-    }
-    #[test]
-    fn allocation_failed_set_when_max_pages_exhausted() {
-        // Tiny page (32x32), max_pages=1. Each glyph 10x10.
-        let mut atlas = GlyphAtlas::new(32, 32, 20, 1);
-        for i in 0..20u32 {
-            let key = GlyphKey { glyph_id: i, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
-            atlas.insert(key, 10, 10, 0.0, 0.0);
-        }
-        assert!(atlas.allocation_failed, "allocation_failed should be true after atlas fills");
-    }
-
-    #[test]
-    fn clear_resets_atlas_state() {
-        let mut atlas = GlyphAtlas::new(256, 256, 10, 1);
-        let key = GlyphKey { glyph_id: 1, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
-        atlas.insert(key, 10, 10, 0.0, 0.0);
-        assert_eq!(atlas.glyph_count(), 1);
-        assert_eq!(atlas.page_count(), 1);
-
-        atlas.clear();
-
-        assert_eq!(atlas.glyph_count(), 0);
-        assert_eq!(atlas.page_count(), 1);
-        assert!(!atlas.allocation_failed);
-        // Previously inserted glyph should be gone
-        assert!(atlas.get(&key).is_none());
-    }
-
-    #[test]
-    fn clear_resets_allocation_failed_flag() {
-        // Exhaust a tiny atlas
-        let mut atlas = GlyphAtlas::new(32, 32, 20, 1);
-        for i in 0..20u32 {
-            let key = GlyphKey { glyph_id: i, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
-            atlas.insert(key, 10, 10, 0.0, 0.0);
-        }
-        assert!(atlas.allocation_failed);
-
-        atlas.clear();
-        assert!(!atlas.allocation_failed);
-
-        // Should be able to insert again after clear
-        let key = GlyphKey { glyph_id: 99, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
-        assert!(atlas.insert(key, 10, 10, 0.0, 0.0).is_some());
-    }
-
-    #[test]
-    fn insert_with_eviction_propagates_allocation_failed() {
-        // Tiny atlas: 1 page, 3 capacity. insert_with_eviction calls insert() internally.
-        let mut atlas = GlyphAtlas::new(32, 32, 10, 1);
-        for i in 0..20u32 {
-            let key = GlyphKey { glyph_id: i, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
-            atlas.insert_with_eviction(key, 10, 10, 0.0, 0.0);
-        }
-        assert!(atlas.allocation_failed, "insert_with_eviction should propagate the flag");
-    }
-
-    #[test]
-    fn clear_resets_multi_page_atlas() {
-        // max_pages=3, fill enough to expand to multiple pages, then clear.
-        let mut atlas = GlyphAtlas::new(64, 64, 100, 3);
-        for i in 0..50u32 {
-            let key = GlyphKey { glyph_id: i, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
-            atlas.insert(key, 10, 10, 0.0, 0.0);
-        }
-        let pages_before = atlas.page_count();
-        assert!(pages_before > 1, "should have expanded to multiple pages, got {pages_before}");
-
-        atlas.clear();
-
-        assert_eq!(atlas.page_count(), 1);
-        assert_eq!(atlas.glyph_count(), 0);
-        assert!(!atlas.allocation_failed);
-    }
+/// Fractional pixel offset used to rasterize a glyph with this atlas phase.
+pub fn subpixel_offset(phase: SubpixelPhase) -> f32 {
+    f32::from(phase) / f32::from(GlyphAtlas::SUBPIXEL_PHASES)
 }
 
 // ── GPU Renderer ───────────────────────────────────────────────────────────
@@ -616,6 +275,9 @@ mod tests {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GlyphVertex {
     pub position: [f32; 2],
+    /// Nonnegative U samples glyph coverage. For an image, encode normal UV as
+    /// `[-1 - u, v]` on every vertex. The shader decodes U and samples the
+    /// premultiplied RGBA image texture through the image sampler.
     pub tex_coords: [f32; 2],
     pub color: [f32; 4],
 }
@@ -1063,5 +725,361 @@ mod renderer_tests {
         let (s2, e2) = atlas.insert_with_eviction(k1, 20, 20, 1.0, 1.0);
         assert!(s2.is_some());
         assert!(e2.is_none());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── AtlasPage tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn page_allocate_basic() {
+        let mut page = AtlasPage::new(0, 256, 256);
+        assert_eq!(page.allocate(10, 10), Some((0, 0)));
+        assert_eq!(page.allocate(10, 10), Some((11, 0))); // +1 padding
+    }
+
+    #[test]
+    fn page_allocate_next_row() {
+        let mut page = AtlasPage::new(0, 32, 32);
+        // First glyph: row 0
+        assert_eq!(page.allocate(20, 10), Some((0, 0)));
+        // Second glyph: does not fit on row 0 (21+21=42 > 32), goes to row 1
+        assert!(page.allocate(20, 10).is_some());
+    }
+
+    #[test]
+    fn page_allocate_overflow() {
+        let mut page = AtlasPage::new(0, 16, 16);
+        // First glyph fits
+        assert!(page.allocate(10, 10).is_some());
+        // Second glyph: row 0 full (11+11=22 > 16), row 1 too (11+11=22 > 16)
+        assert!(page.allocate(10, 10).is_none());
+    }
+
+    // ── GlyphAtlas tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn glyph_atlas_lru_eviction() {
+        let mut atlas = GlyphAtlas::new(256, 256, 3, 4);
+
+        let key1 = GlyphKey { glyph_id: 1, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
+        let key2 = GlyphKey { glyph_id: 2, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
+        let key3 = GlyphKey { glyph_id: 3, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
+        let key4 = GlyphKey { glyph_id: 4, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
+
+        assert!(atlas.insert(key1, 10, 10, 0.0, 0.0).is_some());
+        assert!(atlas.insert(key2, 10, 10, 0.0, 0.0).is_some());
+        assert!(atlas.insert(key3, 10, 10, 0.0, 0.0).is_some());
+
+        // All 3 are in the atlas
+        assert_eq!(atlas.glyph_count(), 3);
+        assert!(atlas.get(&key1).is_some());
+
+        // Insert key4 — should evict key2 (LRU, since key1 was accessed recently)
+        assert!(atlas.insert(key4, 10, 10, 0.0, 0.0).is_some());
+        assert_eq!(atlas.glyph_count(), 3);
+        assert!(atlas.get(&key2).is_none(), "key2 should have been evicted");
+        assert!(atlas.get(&key3).is_some());
+        assert!(atlas.get(&key4).is_some());
+    }
+
+    #[test]
+    fn atlas_overflow_creates_new_page() {
+        // Tiny pages: 32x32. Each glyph 20x10 (+1 padding = 21x11).
+        // One page can fit 1 glyph per row, 2 rows = 2 glyphs.
+        // Third glyph needs a new page.
+        let mut atlas = GlyphAtlas::new(32, 32, 100, 4);
+
+        let key1 = GlyphKey { glyph_id: 1, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
+        let key2 = GlyphKey { glyph_id: 2, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
+        let key3 = GlyphKey { glyph_id: 3, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
+
+        assert!(atlas.insert(key1, 20, 10, 0.0, 0.0).is_some());
+        assert_eq!(atlas.page_count(), 1);
+
+        assert!(atlas.insert(key2, 20, 10, 0.0, 0.0).is_some());
+        assert_eq!(atlas.page_count(), 1); // fits on same page (second row)
+
+        // Third glyph: page 0 has row 0 (y=0, h=11) and row 1 (y=11, h=11).
+        // next_y = 11+11 = 22. 22+11 = 33 > 32. Page 0 full.
+        assert!(atlas.insert(key3, 20, 10, 0.0, 0.0).is_some());
+        assert_eq!(atlas.page_count(), 2, "should have created a second page");
+    }
+
+    #[test]
+    fn atlas_subpixel_phases() {
+        let mut atlas = GlyphAtlas::new(256, 256, 100, 4);
+
+        // Insert the same glyph with every subpixel phase
+        for phase in 0..GlyphAtlas::SUBPIXEL_PHASES {
+            let key = GlyphKey {
+                glyph_id: 42,
+                font_id: 0usize,
+                font_size: 14 * 64,
+                subpixel_phase: phase,
+            };
+            assert!(atlas.insert(key, 10, 10, 0.0, 0.0).is_some(), "phase {phase} failed");
+        }
+
+        assert_eq!(
+            atlas.glyph_count(),
+            usize::from(GlyphAtlas::SUBPIXEL_PHASES),
+            "should have one entry per phase"
+        );
+
+        // Verify all phases are present
+        for phase in 0..GlyphAtlas::SUBPIXEL_PHASES {
+            let key = GlyphKey {
+                glyph_id: 42,
+                font_id: 0usize,
+                font_size: 14 * 64,
+                subpixel_phase: phase,
+            };
+            assert!(atlas.get(&key).is_some(), "phase {phase} missing");
+        }
+    }
+
+    #[test]
+    fn subpixel_quantize() {
+        assert_eq!(GlyphAtlas::quantize_subpixel(0.0), 0);
+        assert_eq!(GlyphAtlas::quantize_subpixel(0.5), 2);
+        assert_eq!(GlyphAtlas::quantize_subpixel(0.125), 1);
+        assert_eq!(GlyphAtlas::quantize_subpixel(0.875), 0);
+    }
+
+    #[test]
+    fn atlas_and_positioning_share_the_same_subpixel_grid() {
+        for coordinate in [-1.875, -0.75, -0.125, 0.125, 0.25, 0.5, 0.875, 1.75] {
+            let (_, phase) = split_subpixel(coordinate);
+            assert_eq!(GlyphAtlas::quantize_subpixel(coordinate), phase, "x = {coordinate}");
+            assert!(phase < GlyphAtlas::SUBPIXEL_PHASES);
+        }
+    }
+
+    #[test]
+    fn atlas_insert_and_lookup() {
+        let mut atlas = GlyphAtlas::new(256, 256, 100, 4);
+        let key = GlyphKey { glyph_id: 1, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
+
+        let slot = atlas.insert(key, 10, 12, 1.5, -2.0).unwrap();
+        assert_eq!(slot.width, 10);
+        assert_eq!(slot.height, 12);
+        assert_eq!(slot.bearing_x, 1.5);
+        assert_eq!(slot.bearing_y, -2.0);
+        assert_eq!(slot.page, 0);
+
+        let looked_up = atlas.get(&key).unwrap();
+        assert_eq!(*looked_up, slot);
+    }
+
+    #[test]
+    fn oversized_glyph_cached_as_negative() {
+        // Tiny page: 32x32. Glyph 40x40 is too large for any page.
+        let mut atlas = GlyphAtlas::new(32, 32, 100, 4);
+        let key = GlyphKey { glyph_id: 99, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
+
+        // First attempt: creates a page, glyph doesn't fit, returns None.
+        assert!(atlas.insert(key, 40, 40, 0.0, 0.0).is_none());
+        let pages_after_first = atlas.page_count();
+
+        // Second attempt: should NOT create another page (negative cached).
+        assert!(atlas.insert(key, 40, 40, 0.0, 0.0).is_none());
+        assert_eq!(
+            atlas.page_count(),
+            pages_after_first,
+            "oversized glyph should not create new pages on retry"
+        );
+    }
+
+    #[test]
+    fn glyph_key_different_font_ids_are_different() {
+        // Bug fix: GlyphKey must include font_id to prevent atlas collision
+        // between different fonts that happen to have the same glyph_id.
+        // e.g., Menlo '6' (glyph_id=22) and a CJK fallback with glyph_id=22.
+        let key_a =
+            GlyphKey { glyph_id: 22, font_id: 0usize, font_size: 14 * 64, subpixel_phase: 0 };
+        let key_b =
+            GlyphKey { glyph_id: 22, font_id: 1usize, font_size: 14 * 64, subpixel_phase: 0 };
+        assert_ne!(key_a, key_b, "same glyph_id but different font_id must be distinct keys");
+
+        // Both should be insertable and retrievable independently
+        let mut atlas = GlyphAtlas::new(256, 256, 100, 4);
+        assert!(atlas.insert(key_a, 10, 10, 0.0, 0.0).is_some());
+        assert!(atlas.insert(key_b, 12, 14, 1.0, -1.0).is_some());
+        assert_eq!(atlas.glyph_count(), 2);
+
+        let width_a = atlas.get(&key_a).unwrap().width;
+        let width_b = atlas.get(&key_b).unwrap().width;
+        assert_eq!(width_a, 10);
+        assert_eq!(width_b, 12, "different fonts should store different glyph bitmaps");
+    }
+
+    #[test]
+    fn max_pages_prevents_unbounded_growth() {
+        // Tiny page (32x32) and max_pages=2. Glyphs are 10x10.
+        // Each page can hold ~6 glyphs (32/11 ≈ 2 per row, ~3 rows).
+        // After 2 pages fill, new insertions should return None.
+        let mut atlas = GlyphAtlas::new(32, 32, 20, 2);
+        let mut count = 0;
+        for i in 0..20u32 {
+            let key = GlyphKey { glyph_id: i, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
+            if atlas.insert(key, 10, 10, 0.0, 0.0).is_some() {
+                count += 1;
+            }
+        }
+        // Should have created at most 2 pages
+        assert!(
+            atlas.page_count() <= 2,
+            "max_pages limit violated: got {} pages",
+            atlas.page_count()
+        );
+        // Some glyphs should have been inserted successfully
+        assert!(count > 0, "at least some glyphs should fit");
+    }
+
+    #[test]
+    fn max_pages_one_limits_to_single_page() {
+        let mut atlas = GlyphAtlas::new(256, 256, 100, 1);
+        assert_eq!(atlas.page_count(), 1);
+        let key = GlyphKey { glyph_id: 99, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
+        assert!(atlas.insert(key, 200, 200, 0.0, 0.0).is_some());
+        assert_eq!(atlas.page_count(), 1, "should stay at 1 page");
+    }
+
+    #[test]
+    fn split_subpixel_exact_integer() {
+        assert_eq!(split_subpixel(10.0), (10.0, 0));
+        assert_eq!(split_subpixel(0.0), (0.0, 0));
+    }
+
+    #[test]
+    fn split_subpixel_quarter() {
+        assert_eq!(split_subpixel(10.25), (10.0, 1));
+        assert_eq!(split_subpixel(10.5), (10.0, 2));
+        assert_eq!(split_subpixel(10.75), (10.0, 3));
+    }
+
+    #[test]
+    fn split_subpixel_rounding() {
+        // 10.3 → 10.25 (quantized) → int=10, phase=1
+        let (int_part, phase) = split_subpixel(10.3);
+        assert_eq!(int_part, 10.0);
+        assert_eq!(phase, 1);
+        // 10.1 → 10.0
+        let (int_part, phase) = split_subpixel(10.1);
+        assert_eq!(int_part, 10.0);
+        assert_eq!(phase, 0);
+    }
+
+    #[test]
+    fn split_subpixel_negative() {
+        // -0.3 → -0.25 (quantized) → floor = -1.0, phase = 3
+        let (int_part, phase) = split_subpixel(-0.3);
+        assert_eq!(int_part, -1.0);
+        assert_eq!(phase, 3);
+        // -0.5 → -0.5 → floor = -1.0, phase = 2
+        let (int_part, phase) = split_subpixel(-0.5);
+        assert_eq!(int_part, -1.0);
+        assert_eq!(phase, 2);
+    }
+
+    #[test]
+    fn split_subpixel_boundary_075() {
+        assert_eq!(split_subpixel(10.75), (10.0, 3));
+        // 10.875 → quantized to 10.75 → phase 3
+        let (int_part, phase) = split_subpixel(10.875);
+        assert_eq!(int_part, 11.0);
+        assert_eq!(phase, 0);
+    }
+
+    #[test]
+    fn split_subpixel_large_value() {
+        let (int_part, phase) = split_subpixel(12345.5);
+        assert_eq!(int_part, 12345.0);
+        assert_eq!(phase, 2);
+    }
+
+    #[test]
+    fn gamma_uniform_size() {
+        // GammaUniform has two f32 fields: contrast + gamma = 8 bytes
+        assert_eq!(std::mem::size_of::<GammaUniform>(), 8);
+        assert_eq!(std::mem::align_of::<GammaUniform>(), 4);
+    }
+    #[test]
+    fn allocation_failed_set_when_max_pages_exhausted() {
+        // Tiny page (32x32), max_pages=1. Each glyph 10x10.
+        let mut atlas = GlyphAtlas::new(32, 32, 20, 1);
+        for i in 0..20u32 {
+            let key = GlyphKey { glyph_id: i, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
+            atlas.insert(key, 10, 10, 0.0, 0.0);
+        }
+        assert!(atlas.allocation_failed, "allocation_failed should be true after atlas fills");
+    }
+
+    #[test]
+    fn clear_resets_atlas_state() {
+        let mut atlas = GlyphAtlas::new(256, 256, 10, 1);
+        let key = GlyphKey { glyph_id: 1, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
+        atlas.insert(key, 10, 10, 0.0, 0.0);
+        assert_eq!(atlas.glyph_count(), 1);
+        assert_eq!(atlas.page_count(), 1);
+
+        atlas.clear();
+
+        assert_eq!(atlas.glyph_count(), 0);
+        assert_eq!(atlas.page_count(), 1);
+        assert!(!atlas.allocation_failed);
+        // Previously inserted glyph should be gone
+        assert!(atlas.get(&key).is_none());
+    }
+
+    #[test]
+    fn clear_resets_allocation_failed_flag() {
+        // Exhaust a tiny atlas
+        let mut atlas = GlyphAtlas::new(32, 32, 20, 1);
+        for i in 0..20u32 {
+            let key = GlyphKey { glyph_id: i, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
+            atlas.insert(key, 10, 10, 0.0, 0.0);
+        }
+        assert!(atlas.allocation_failed);
+
+        atlas.clear();
+        assert!(!atlas.allocation_failed);
+
+        // Should be able to insert again after clear
+        let key = GlyphKey { glyph_id: 99, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
+        assert!(atlas.insert(key, 10, 10, 0.0, 0.0).is_some());
+    }
+
+    #[test]
+    fn insert_with_eviction_propagates_allocation_failed() {
+        // Tiny atlas: 1 page, 3 capacity. insert_with_eviction calls insert() internally.
+        let mut atlas = GlyphAtlas::new(32, 32, 10, 1);
+        for i in 0..20u32 {
+            let key = GlyphKey { glyph_id: i, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
+            atlas.insert_with_eviction(key, 10, 10, 0.0, 0.0);
+        }
+        assert!(atlas.allocation_failed, "insert_with_eviction should propagate the flag");
+    }
+
+    #[test]
+    fn clear_resets_multi_page_atlas() {
+        // max_pages=3, fill enough to expand to multiple pages, then clear.
+        let mut atlas = GlyphAtlas::new(64, 64, 100, 3);
+        for i in 0..50u32 {
+            let key = GlyphKey { glyph_id: i, font_id: 0, font_size: 14 * 64, subpixel_phase: 0 };
+            atlas.insert(key, 10, 10, 0.0, 0.0);
+        }
+        let pages_before = atlas.page_count();
+        assert!(pages_before > 1, "should have expanded to multiple pages, got {pages_before}");
+
+        atlas.clear();
+
+        assert_eq!(atlas.page_count(), 1);
+        assert_eq!(atlas.glyph_count(), 0);
+        assert!(!atlas.allocation_failed);
     }
 }

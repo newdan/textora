@@ -42,7 +42,7 @@ impl PopupMenuWidget {
         let highlighted = menu
             .items
             .iter()
-            .position(|item| item.is_active && item.is_selectable())
+            .position(|item| item.is_active() && item.is_selectable())
             .or_else(|| menu.items.iter().position(PopupMenuItem::is_selectable));
         let rect = menu.menu_rect;
         let dx = -rect.x;
@@ -102,11 +102,10 @@ impl PopupMenuWidget {
         let Some(index) = self.highlighted else {
             return WidgetAction::Consumed;
         };
-        let item = &self.menu.items[index];
-        if !item.is_selectable() {
+        let Some(action) = self.menu.items[index].selected_action() else {
             return WidgetAction::Consumed;
-        }
-        WidgetAction::Popup(PopupOutcome::Selected(item.action.clone()))
+        };
+        WidgetAction::Popup(PopupOutcome::Selected(action.clone()))
     }
 }
 
@@ -136,7 +135,7 @@ impl Widget for PopupMenuWidget {
         for (index, (item, item_rect)) in
             self.menu.items.iter().zip(&self.menu.item_rects).enumerate()
         {
-            let role = if item.is_separator {
+            let role = if item.is_separator() {
                 AccessibilityRole::Separator
             } else {
                 AccessibilityRole::MenuItem
@@ -146,11 +145,11 @@ impl Widget for PopupMenuWidget {
                 role,
                 ctx.screen_bounds(*item_rect),
             )
-            .with_disabled(!item.enabled)
-            .with_selected(item.is_active)
+            .with_disabled(!item.is_selectable())
+            .with_selected(item.is_active())
             .with_focused(self.highlighted == Some(index));
-            if !item.label.is_empty() {
-                child = child.with_name(item.label.clone());
+            if !item.label().is_empty() {
+                child = child.with_name(item.label());
             }
             if item.is_selectable() {
                 child = child.with_action(AccessibilityAction::Activate);
@@ -169,9 +168,8 @@ impl Widget for PopupMenuWidget {
         }
         let index = (0..self.menu.items.len())
             .find(|index| POPUP_MENU_ACCESSIBILITY_ID.child(*index as u64 + 1) == request.target)?;
-        let item = self.menu.items.get(index)?;
-        item.is_selectable()
-            .then(|| WidgetAction::Popup(PopupOutcome::Selected(item.action.clone())))
+        let action = self.menu.items.get(index)?.selected_action()?;
+        Some(WidgetAction::Popup(PopupOutcome::Selected(action.clone())))
     }
 
     fn on_event(&mut self, ev: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -376,31 +374,31 @@ mod tests {
             PopupMenu::context_px(5, (600.0, 400.0), (ctx.screen_w, ctx.screen_h), false, 1.0);
         assert_eq!(menu.items.len(), 7);
 
-        let actions: Vec<_> = menu.items.iter().map(|i| &i.action).collect();
+        let actions: Vec<_> = menu.items.iter().map(PopupMenuItem::command).collect();
         assert!(matches!(
             actions[0],
-            PopupMenuAction::Context { action: ContextMenuAction::Close, tab_index: 5 }
+            Some(PopupMenuAction::Context { action: ContextMenuAction::Close, tab_index: 5 })
         ));
         assert!(matches!(
             actions[1],
-            PopupMenuAction::Context { action: ContextMenuAction::CloseOthers, .. }
+            Some(PopupMenuAction::Context { action: ContextMenuAction::CloseOthers, .. })
         ));
         assert!(matches!(
             actions[2],
-            PopupMenuAction::Context { action: ContextMenuAction::CloseRight, .. }
+            Some(PopupMenuAction::Context { action: ContextMenuAction::CloseRight, .. })
         ));
         assert!(matches!(
             actions[3],
-            PopupMenuAction::Context { action: ContextMenuAction::CloseAll, .. }
+            Some(PopupMenuAction::Context { action: ContextMenuAction::CloseAll, .. })
         ));
-        assert!(menu.items[4].is_separator, "item 4 should be a separator");
+        assert!(menu.items[4].is_separator(), "item 4 should be a separator");
         assert!(matches!(
             actions[5],
-            PopupMenuAction::Context { action: ContextMenuAction::CopyPath, .. }
+            Some(PopupMenuAction::Context { action: ContextMenuAction::CopyPath, .. })
         ));
         assert!(matches!(
             actions[6],
-            PopupMenuAction::Context { action: ContextMenuAction::TogglePin, .. }
+            Some(PopupMenuAction::Context { action: ContextMenuAction::TogglePin, .. })
         ));
     }
 
@@ -476,7 +474,7 @@ mod tests {
     #[test]
     fn keyboard_highlight_prefers_an_active_selectable_item() {
         let menu = menu_from_items(vec![
-            PopupMenuItem::separator(PopupMenuAction::ToggleLineNumbers),
+            PopupMenuItem::Separator,
             PopupMenuItem::action("禁用", PopupMenuAction::ToggleWordWrap).with_enabled(false),
             PopupMenuItem::action("当前", PopupMenuAction::ToggleStatusBar).with_active(true),
             PopupMenuItem::action("其他", PopupMenuAction::OpenSettingsFile),
@@ -490,10 +488,10 @@ mod tests {
     #[test]
     fn keyboard_navigation_skips_disabled_items_and_separators_and_wraps() {
         let menu = menu_from_items(vec![
-            PopupMenuItem::separator(PopupMenuAction::ToggleLineNumbers),
+            PopupMenuItem::Separator,
             PopupMenuItem::action("禁用", PopupMenuAction::ToggleWordWrap).with_enabled(false),
             PopupMenuItem::action("第一个", PopupMenuAction::ToggleStatusBar),
-            PopupMenuItem::separator(PopupMenuAction::OpenSettingsFile),
+            PopupMenuItem::Separator,
             PopupMenuItem::action("禁用二", PopupMenuAction::ToggleLineNumbers).with_enabled(false),
             PopupMenuItem::action("最后一个", PopupMenuAction::ToggleWordWrap),
         ]);
@@ -520,7 +518,7 @@ mod tests {
     fn all_disabled_menu_consumes_keys_without_selecting() {
         let menu = menu_from_items(vec![
             PopupMenuItem::action("禁用", PopupMenuAction::ToggleLineNumbers).with_enabled(false),
-            PopupMenuItem::separator(PopupMenuAction::ToggleWordWrap),
+            PopupMenuItem::Separator,
         ]);
         let mut widget = PopupMenuWidget::new(menu);
 
@@ -636,7 +634,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         widget.paint(&mut pc);
@@ -679,7 +676,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
 
@@ -706,7 +702,7 @@ mod tests {
         let _ = Box::leak(Box::new(Settings::new()));
         let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
         let mut menu = menu;
-        menu.items[0].is_active = true;
+        menu.items[0].set_active(true);
         let theme = crate::theme::test_theme();
         let mut dl = DrawList::new();
         let mut shaper = shaping::Shaper::new().unwrap();
@@ -715,7 +711,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         menu.paint(&mut pc, None);
@@ -736,7 +731,7 @@ mod tests {
         let _ = Box::leak(Box::new(Settings::new()));
         let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
         let mut menu = menu;
-        menu.items[0].is_active = true;
+        menu.items[0].set_active(true);
         let theme = crate::theme::test_theme();
         let mut dl = DrawList::new();
         let mut shaper = shaping::Shaper::new().unwrap();
@@ -745,7 +740,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         menu.paint(&mut pc, None);
@@ -782,7 +776,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         widget.paint(&mut pc);
@@ -822,7 +815,7 @@ mod tests {
         let menu = PopupMenu::context_px(0, (400.0, 200.0), (1200.0, 800.0), false, 1.0);
         let mut menu = menu;
         menu.show_checkmarks = true;
-        menu.items[0].is_active = true;
+        menu.items[0].set_active(true);
         let theme = crate::theme::test_theme();
         let mut dl = DrawList::new();
         let mut shaper = shaping::Shaper::new().unwrap();
@@ -831,7 +824,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         menu.paint(&mut pc, None);
@@ -862,7 +854,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         menu.paint(&mut pc, None);
@@ -897,7 +888,6 @@ mod tests {
             list: &mut dl1,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         menu_no_check.paint(&mut pc1, None);
@@ -910,7 +900,6 @@ mod tests {
             list: &mut dl2,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         menu_with_check.paint(&mut pc2, None);

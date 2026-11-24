@@ -16,7 +16,10 @@ use notora_core::{
 };
 
 use crate::action::{CardQuery, DocumentLoadRequest, MetadataMutation, TrashOperation};
-use crate::index_worker::{IndexWorker, IndexWorkerCommand, WorkspaceDocumentSource};
+use crate::index_worker::{
+    IndexWorker, IndexWorkerCommand, IndexWorkerEvent, IndexWorkerMonitorSender,
+    WorkspaceDocumentSource,
+};
 use crate::product::{
     NotoraProduct, NotoraProductEvent, NotoraProductEventSender, WorkspaceBootstrapCompletion,
     WorkspaceCompletion, WorkspaceEventScope, WorkspaceEventSender, WorkspaceNoteRelocation,
@@ -24,7 +27,6 @@ use crate::product::{
 
 const CATALOG_FILE_NAME: &str = "catalog.sqlite3";
 const DEFAULT_MIGRATION_BACKUP_RETAINED_COUNT: usize = 8;
-const WORKSPACE_WORKER_IDLE_WAIT: Duration = Duration::from_millis(25);
 const WATCHER_PRESENCE_CONFIRMATION_DELAY: Duration = Duration::from_millis(300);
 
 /// 用户或恢复流程发起的工作区操作。
@@ -512,18 +514,21 @@ impl WorkspaceSession {
             event_sender,
             WorkspaceEventScope { workspace_id: descriptor.workspace_id, generation },
         );
-        let (mut file_monitor, monitor_events) =
-            WorkspaceFileMonitor::start(workspace.root().to_path_buf())
-                .map_err(WorkspaceControllerError::FileMonitor)?;
+        let (indexer_sender, indexer_receiver) = mpsc::channel();
+        let mut monitor_sender = IndexWorkerMonitorSender::new(indexer_sender.clone());
+        let mut file_monitor = WorkspaceFileMonitor::start_with_event_sink(
+            workspace.root().to_path_buf(),
+            move |event| monitor_sender.send(event).is_ok(),
+        )
+        .map_err(WorkspaceControllerError::FileMonitor)?;
         let (startup_sender, startup_receiver) = mpsc::channel();
-        let mut indexer = IndexWorker::start(move |command_receiver| {
+        let mut indexer = IndexWorker::start(indexer_sender, move || {
             run_indexer_with_startup(
                 workspace,
                 catalog_path,
                 catalog_backups_directory,
                 migration_backup_retention,
-                monitor_events,
-                command_receiver,
+                indexer_receiver,
                 event_sender,
                 Some(startup_sender),
             )
@@ -556,20 +561,18 @@ impl WorkspaceSession {
     }
 
     fn shutdown(&mut self) {
-        self.file_monitor.shutdown();
         self.indexer.shutdown();
+        self.file_monitor.shutdown();
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 fn run_indexer(
     workspace: Workspace,
     catalog_path: PathBuf,
     catalog_backups_directory: Option<PathBuf>,
     migration_backup_retention: notora_core::BackupRetention,
-    monitor_events: mpsc::Receiver<WorkspaceFileMonitorEvent>,
-    command_receiver: mpsc::Receiver<IndexWorkerCommand>,
+    indexer_receiver: mpsc::Receiver<IndexWorkerEvent>,
     event_sender: WorkspaceEventSender,
 ) {
     run_indexer_with_startup(
@@ -577,21 +580,18 @@ fn run_indexer(
         catalog_path,
         catalog_backups_directory,
         migration_backup_retention,
-        monitor_events,
-        command_receiver,
+        indexer_receiver,
         event_sender,
         None,
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_indexer_with_startup(
     workspace: Workspace,
     catalog_path: PathBuf,
     catalog_backups_directory: Option<PathBuf>,
     migration_backup_retention: notora_core::BackupRetention,
-    monitor_events: mpsc::Receiver<WorkspaceFileMonitorEvent>,
-    command_receiver: mpsc::Receiver<IndexWorkerCommand>,
+    indexer_receiver: mpsc::Receiver<IndexWorkerEvent>,
     event_sender: WorkspaceEventSender,
     mut startup_sender: Option<mpsc::Sender<Result<(), String>>>,
 ) {
@@ -664,42 +664,52 @@ fn run_indexer_with_startup(
         let _ = sender.send(Ok(()));
     }
     index_workspace(&workspace, &catalog, &event_sender);
-    run_indexer_event_loop(&workspace, &catalog, monitor_events, command_receiver, &event_sender);
+    run_indexer_event_loop(&workspace, &catalog, indexer_receiver, &event_sender);
 }
 
 fn run_indexer_event_loop(
     workspace: &Workspace,
     catalog: &Catalog,
-    monitor_events: mpsc::Receiver<WorkspaceFileMonitorEvent>,
-    command_receiver: mpsc::Receiver<IndexWorkerCommand>,
+    indexer_receiver: mpsc::Receiver<IndexWorkerEvent>,
     event_sender: &WorkspaceEventSender,
 ) {
-    let mut monitor_events = Some(monitor_events);
     let mut pending_presence_confirmation_paths = BTreeSet::new();
-    let mut presence_confirmation_due_at = None;
+    let mut presence_confirmation_due_at: Option<Instant> = None;
     loop {
-        if !drain_indexer_commands(workspace, catalog, &command_receiver, event_sender) {
-            return;
-        }
-        let event = match &monitor_events {
-            Some(receiver) => receiver.recv_timeout(WORKSPACE_WORKER_IDLE_WAIT),
-            None => {
-                thread::sleep(WORKSPACE_WORKER_IDLE_WAIT);
-                Err(mpsc::RecvTimeoutError::Timeout)
+        let event = if let Some(due_at) = presence_confirmation_due_at {
+            let now = Instant::now();
+            if now >= due_at {
+                let relative_paths = std::mem::take(&mut pending_presence_confirmation_paths)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                presence_confirmation_due_at = None;
+                index_workspace_paths(workspace, catalog, &relative_paths, event_sender);
+                continue;
             }
+            match indexer_receiver.recv_timeout(due_at - now) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        } else {
+            let Ok(event) = indexer_receiver.recv() else { return };
+            event
         };
         match event {
-            Ok(WorkspaceFileMonitorEvent::Ready) => {
+            IndexWorkerEvent::Shutdown => return,
+            IndexWorkerEvent::Command(command) => {
+                execute_workspace_command(workspace, catalog, command, event_sender);
+            }
+            IndexWorkerEvent::Monitor(WorkspaceFileMonitorEvent::Ready) => {
                 index_workspace(workspace, catalog, event_sender);
                 send_navigation_tree(workspace, catalog, event_sender);
             }
-            Ok(WorkspaceFileMonitorEvent::Failed(error)) => {
+            IndexWorkerEvent::Monitor(WorkspaceFileMonitorEvent::Failed(error)) => {
                 let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
                     message: format!("工作区文件监视器启动或运行失败，自动同步已停止：{error}"),
                 });
-                monitor_events = None;
             }
-            Ok(WorkspaceFileMonitorEvent::Changes(batch)) => {
+            IndexWorkerEvent::Monitor(WorkspaceFileMonitorEvent::Changes(batch)) => {
                 pending_presence_confirmation_paths.extend(batch.relative_paths.iter().cloned());
                 presence_confirmation_due_at =
                     Some(Instant::now() + WATCHER_PRESENCE_CONFIRMATION_DELAY);
@@ -711,35 +721,11 @@ fn run_indexer_event_loop(
                     note_relocations,
                 });
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
+            IndexWorkerEvent::MonitorDisconnected => {
                 let _ = event_sender.send(WorkspaceCompletion::WorkspaceIndexFailed {
                     message: "工作区文件监视器已断开，自动同步已停止".to_owned(),
                 });
-                monitor_events = None;
             }
-        }
-        if presence_confirmation_due_at.is_some_and(|due_at| due_at <= Instant::now()) {
-            let relative_paths = std::mem::take(&mut pending_presence_confirmation_paths)
-                .into_iter()
-                .collect::<Vec<_>>();
-            presence_confirmation_due_at = None;
-            index_workspace_paths(workspace, catalog, &relative_paths, event_sender);
-        }
-    }
-}
-
-fn drain_indexer_commands(
-    workspace: &Workspace,
-    catalog: &Catalog,
-    receiver: &mpsc::Receiver<IndexWorkerCommand>,
-    event_sender: &WorkspaceEventSender,
-) -> bool {
-    loop {
-        match receiver.try_recv() {
-            Ok(command) => execute_workspace_command(workspace, catalog, command, event_sender),
-            Err(mpsc::TryRecvError::Empty) => return true,
-            Err(mpsc::TryRecvError::Disconnected) => return false,
         }
     }
 }

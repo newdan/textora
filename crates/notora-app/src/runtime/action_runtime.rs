@@ -3,7 +3,7 @@ use std::time::Instant;
 use appkit_shell::{DrainStart, EventPump};
 use notora_core::WorkspaceId;
 
-use crate::action::{NotoraAction, NotoraEffect};
+use crate::action::{DocumentLoadRequest, NotoraAction, NotoraEffect};
 use crate::external_files::{CanonicalExternalPath, ExternalFileSession, SaveExternalFileAs};
 use crate::search_controller::{SearchController, SearchGeneration, SearchRequest};
 use crate::{NotoraState, WorkspaceRootState};
@@ -187,6 +187,13 @@ impl ActionRuntime {
         canonical_path: CanonicalExternalPath,
     ) -> notora_core::DocumentIdentity {
         self.state.external_files.open_existing(canonical_path).identity()
+    }
+
+    pub(super) fn select_opened_external_file(
+        &mut self,
+        identity: notora_core::DocumentIdentity,
+    ) -> DocumentLoadRequest {
+        self.state.select_opened_external_file(identity)
     }
 }
 

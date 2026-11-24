@@ -1,6 +1,6 @@
 use super::*;
 
-impl<S: BlockSource> BlockViewEngine<S> {
+impl<S: BlockSource> BlockViewLayout<S> {
     /// 扩展被 Markdown 布局剥离的行尾空格，令其光标仍归属原文本行。
     pub(in crate::view) fn hit_test_line_right(&self, flat_line: &crate::layout::FlatLine) -> f32 {
         let text_right = flat_line.rect.x
@@ -82,13 +82,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
         )
     }
 
-    /// 屏幕坐标 → 源码字节偏移。用于鼠标点击。
-    /// 输入 y/offset_y 为插件渲染空间坐标；内部加回 scroll_y 以匹配
-    /// flat_line 的文档绝对 y（与 render_line_with_offset 的投影互逆）。
-    pub fn hit_test_byte(&self, x: f32, y: f32, offset_x: f32, offset_y: f32) -> Option<usize> {
-        self.hit_test_anchor(x, y, offset_x, offset_y).map(|anchor| anchor.byte.get())
-    }
-
     pub(in crate::view) fn hit_test_anchor(
         &self,
         x: f32,
@@ -96,12 +89,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
         offset_x: f32,
         offset_y: f32,
     ) -> Option<SourceAnchor> {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition
-                .engine
-                .hit_test_anchor(x, y, offset_x, offset_y)
-                .map(|anchor| composition.source_anchor(anchor));
-        }
         let lazy = self.lazy.as_ref()?;
         let doc_x = x - offset_x;
         let doc_y = y - offset_y + self.scroll_y;
@@ -196,12 +183,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
         flat_line_idx: FlatLineIdx,
         visual_grapheme: GraphemeIdx,
     ) -> Option<SourceAnchor> {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition
-                .engine
-                .anchor_from_flat_line_and_visual_grapheme(flat_line_idx, visual_grapheme)
-                .map(|anchor| composition.source_anchor(anchor));
-        }
         let lazy = self.lazy.as_ref()?;
         let index = lazy.source_projection_index.as_ref()?;
         let projection_line_idx = lazy.projection_line_for_flat_line(flat_line_idx)?;
@@ -214,11 +195,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
     }
 
     pub(in crate::view) fn find_flat_and_grapheme_for_byte(&self, byte: usize) -> Option<ViewPos> {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition
-                .engine
-                .find_flat_and_grapheme_for_byte(composition.preview_byte(byte));
-        }
         let position =
             self.cursor_visual_position_for_byte(byte, self.cursor_affinity_for_byte(byte))?;
         let flat_line_idx =
@@ -280,15 +256,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
 
     /// 视觉方向导航。Uses canonical source projections when translating between visual rows and
     /// source bytes.
-    pub fn visual_move(
-        &self,
-        current_byte: usize,
-        direction: ui::plugin::MoveDirection,
-        target_x: Option<f32>,
-    ) -> Option<usize> {
-        self.visual_move_anchor(current_byte, direction, target_x).map(|anchor| anchor.byte.get())
-    }
-
     pub(in crate::view) fn visual_move_anchor(
         &self,
         current_byte: usize,
@@ -296,12 +263,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
         target_x: Option<f32>,
     ) -> Option<SourceAnchor> {
         use ui::plugin::MoveDirection;
-        if let Some(composition) = &self.replacement_preedit {
-            return composition
-                .engine
-                .visual_move_anchor(composition.preview_byte(current_byte), direction, target_x)
-                .map(|anchor| composition.source_anchor(anchor));
-        }
         let lazy = self.lazy.as_ref()?;
         let current_source_line = self
             .edit_source
@@ -644,4 +605,62 @@ fn belongs_to_table(owner: crate::projection::ProjectionOwnerId, table_start: us
         owner,
         crate::projection::ProjectionOwnerId::TableCell { table_start: t, .. } if t == table_start
     )
+}
+
+impl<S: BlockSource> BlockViewEngine<S> {
+    /// 屏幕坐标 → 源码字节偏移。用于鼠标点击。
+    /// 输入 y/offset_y 为插件渲染空间坐标；内部加回 scroll_y 以匹配
+    /// flat_line 的文档绝对 y（与 render_line_with_embedded 的投影互逆）。
+    pub fn hit_test_byte(&self, x: f32, y: f32, offset_x: f32, offset_y: f32) -> Option<usize> {
+        self.hit_test_anchor(x, y, offset_x, offset_y).map(|anchor| anchor.byte.get())
+    }
+
+    pub(in crate::view) fn hit_test_anchor(
+        &self,
+        x: f32,
+        y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Option<SourceAnchor> {
+        self.displayed_layout()
+            .hit_test_anchor(x, y, offset_x, offset_y)
+            .map(|anchor| self.source_anchor(anchor))
+    }
+
+    pub(in crate::view) fn anchor_from_flat_line_and_visual_grapheme(
+        &self,
+        flat_line_idx: FlatLineIdx,
+        visual_grapheme: GraphemeIdx,
+    ) -> Option<SourceAnchor> {
+        self.displayed_layout()
+            .anchor_from_flat_line_and_visual_grapheme(flat_line_idx, visual_grapheme)
+            .map(|anchor| self.source_anchor(anchor))
+    }
+
+    pub(in crate::view) fn find_flat_and_grapheme_for_byte(
+        &self,
+        source_byte: usize,
+    ) -> Option<ViewPos> {
+        self.displayed_layout().find_flat_and_grapheme_for_byte(self.preview_byte(source_byte))
+    }
+
+    pub fn visual_move(
+        &self,
+        current_byte: usize,
+        direction: ui::plugin::MoveDirection,
+        target_x: Option<f32>,
+    ) -> Option<usize> {
+        self.visual_move_anchor(current_byte, direction, target_x).map(|anchor| anchor.byte.get())
+    }
+
+    pub(in crate::view) fn visual_move_anchor(
+        &self,
+        current_byte: usize,
+        direction: ui::plugin::MoveDirection,
+        target_x: Option<f32>,
+    ) -> Option<SourceAnchor> {
+        self.displayed_layout()
+            .visual_move_anchor(self.preview_byte(current_byte), direction, target_x)
+            .map(|anchor| self.source_anchor(anchor))
+    }
 }

@@ -1,6 +1,5 @@
 //! 编辑器通用菜单栏；文档类型命令集合由产品层注入。
 
-use crate::core::widget::{ControlAction, TextPayload, WidgetId};
 use crate::core::{
     AccessibilityAction, AccessibilityActionRequest, AccessibilityContext, AccessibilityId,
     AccessibilityNode, AccessibilityRole, Event, EventCtx, LayoutCtx, PaintCtx, Rect, Widget,
@@ -18,10 +17,6 @@ const TOOLBAR_ICON_SIZE_LOGICAL: f32 = 16.0;
 const TOOLBAR_FONT_SIZE_LOGICAL: f32 = 12.0;
 const TOOLBAR_CORNER_RADIUS_LOGICAL: f32 = 5.0;
 const EDITOR_TOOLBAR_ACCESSIBILITY_ID: AccessibilityId = AccessibilityId(0x6564_6974_746f_6f6c);
-
-pub const EDITOR_TOOLBAR_COMMAND_ID: WidgetId = WidgetId(10_301);
-pub const EDITOR_TOOLBAR_OVERFLOW_ID: WidgetId = WidgetId(10_302);
-pub const EDITOR_TOOLBAR_DISMISS_ID: WidgetId = WidgetId(10_303);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditorToolbarCommandInput {
@@ -410,9 +405,7 @@ impl Widget for EditorToolbarWidget {
         if layout.overflow_rect.is_some()
             && request.target == EDITOR_TOOLBAR_ACCESSIBILITY_ID.named_child("overflow")
         {
-            return Some(WidgetAction::Control(ControlAction::Activated {
-                id: EDITOR_TOOLBAR_OVERFLOW_ID,
-            }));
+            return Some(WidgetAction::EditorToolbar(EditorToolbarAction::OverflowOpened));
         }
         let command = self.commands().into_iter().find(|command| {
             command.enabled
@@ -420,10 +413,7 @@ impl Widget for EditorToolbarWidget {
                 && request.target
                     == EDITOR_TOOLBAR_ACCESSIBILITY_ID.named_child(&command.command_key)
         })?;
-        Some(WidgetAction::Control(ControlAction::TextCommitted {
-            id: EDITOR_TOOLBAR_COMMAND_ID,
-            value: TextPayload::Plain(command.command_key),
-        }))
+        Some(WidgetAction::EditorToolbar(EditorToolbarAction::CommandInvoked(command.command_key)))
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut EventCtx) -> Option<WidgetAction> {
@@ -434,9 +424,7 @@ impl Widget for EditorToolbarWidget {
                 hover_changed.then_some(WidgetAction::Consumed)
             }
             Event::KeyDown(crate::core::KeyCode::Escape, _) if self.input.overflow_open => {
-                Some(WidgetAction::Control(ControlAction::Activated {
-                    id: EDITOR_TOOLBAR_DISMISS_ID,
-                }))
+                Some(WidgetAction::EditorToolbar(EditorToolbarAction::Dismissed))
             }
             Event::MouseMove { px, py } => {
                 let hovered_command_key = self.command_key_at(*px, *py, ctx.dpi);
@@ -452,9 +440,7 @@ impl Widget for EditorToolbarWidget {
             }
             Event::MouseDown { px, py, button: crate::core::MouseButton::Left } => {
                 if !self.rect.contains(*px, *py) {
-                    return Some(WidgetAction::Control(ControlAction::Activated {
-                        id: EDITOR_TOOLBAR_DISMISS_ID,
-                    }));
+                    return Some(WidgetAction::EditorToolbar(EditorToolbarAction::Dismissed));
                 }
                 if let Some(key) = self.command_key_at(*px, *py, ctx.dpi) {
                     let command =
@@ -462,14 +448,13 @@ impl Widget for EditorToolbarWidget {
                     if !command.enabled {
                         return None;
                     }
-                    return Some(WidgetAction::Control(ControlAction::TextCommitted {
-                        id: EDITOR_TOOLBAR_COMMAND_ID,
-                        value: TextPayload::Plain(key),
-                    }));
+                    return Some(WidgetAction::EditorToolbar(EditorToolbarAction::CommandInvoked(
+                        key,
+                    )));
                 }
-                self.overflow_rect(ctx.dpi).contains(*px, *py).then_some(WidgetAction::Control(
-                    ControlAction::Activated { id: EDITOR_TOOLBAR_OVERFLOW_ID },
-                ))
+                self.overflow_rect(ctx.dpi)
+                    .contains(*px, *py)
+                    .then_some(WidgetAction::EditorToolbar(EditorToolbarAction::OverflowOpened))
             }
             _ => None,
         }
@@ -614,9 +599,7 @@ mod tests {
                 node.children[1].id,
                 crate::core::AccessibilityAction::Activate,
             )),
-            Some(WidgetAction::Control(ControlAction::Activated {
-                id: EDITOR_TOOLBAR_OVERFLOW_ID,
-            }))
+            Some(WidgetAction::EditorToolbar(EditorToolbarAction::OverflowOpened))
         );
     }
 

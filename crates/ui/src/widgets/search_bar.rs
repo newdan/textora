@@ -1237,14 +1237,8 @@ mod tests {
         let mut ctx = LayoutCtx { ui_measure: None, measure: &mut m, theme: &theme, dpi: 1.0 };
         w.set_rect(crate::core::geom::Rect::new(0.0, 0.0, 800.0, 28.0), &mut ctx);
         let mut dl = DrawList::new();
-        let mut pctx = PaintCtx {
-            list: &mut dl,
-            theme: &theme,
-            dpi: 1.0,
-            offset: (0.0, 0.0),
-            global_alpha: 1.0,
-            shaper: None,
-        };
+        let mut pctx =
+            PaintCtx { list: &mut dl, theme: &theme, dpi: 1.0, global_alpha: 1.0, shaper: None };
         w.paint(&mut pctx);
         w
     }
@@ -1527,7 +1521,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             global_alpha: 1.0,
             shaper: Some(&mut shaper),
         };
@@ -1608,7 +1601,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             global_alpha: 1.0,
             shaper: Some(&mut shaper),
         };

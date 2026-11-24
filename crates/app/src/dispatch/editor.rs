@@ -550,7 +550,7 @@ impl App {
             self.ui_shell.focus_editor();
             return AppEffect::REDRAW;
         }
-        if matches!(self.settings.view_mode, ui::view_mode::ViewMode::Sidebar)
+        if matches!(self.editor_runtime.settings().view_mode, ui::view_mode::ViewMode::Sidebar)
             && let Some(action) = self.ui_shell.sidebar_on_key(ui::sidebar::SidebarKey::Escape)
         {
             return self.handle_sidebar_key_action(action);
@@ -560,7 +560,7 @@ impl App {
     }
 
     fn toggle_sidebar_pin_from_shortcut(&mut self) -> AppEffect {
-        if !matches!(self.settings.view_mode, ui::view_mode::ViewMode::Sidebar) {
+        if !matches!(self.editor_runtime.settings().view_mode, ui::view_mode::ViewMode::Sidebar) {
             return AppEffect::NONE;
         }
         let action = self.ui_shell.sidebar_on_key(ui::sidebar::SidebarKey::TogglePin);
@@ -708,13 +708,16 @@ impl App {
 }
 
 #[cfg(test)]
+pub(super) mod command_tests;
+
+#[cfg(test)]
 mod edit_tests {
 
     use super::*;
-    use crate::app_dispatch::canvas_drag_test_support::{
+    use crate::clipboard::TestDocumentClipboard;
+    use crate::dispatch::canvas_drag_test_support::{
         app_with_canvas_drag_tabs, cancel_request_count, document_texts, start_canvas_drag,
     };
-    use crate::clipboard::TestDocumentClipboard;
     use crate::document_fixture::DocumentFixture;
     use appkit_core::edit_command::EditCommand;
     use appkit_shell::edit_transaction::EditOutcome;
@@ -761,8 +764,8 @@ mod edit_tests {
             let inputs = app.build_shell_inputs();
             let screen = ui::core::Screen::new(app.screen_width(), app.screen_height());
             let mut measure = ui::core::NoopMeasure;
-            app.ui_shell.update_frame(screen, &app.current_theme, &mut measure, &inputs);
-            app.ui_shell.update_frame(screen, &app.current_theme, &mut measure, &inputs);
+            app.ui_shell.update_frame(screen, app.editor_runtime.theme(), &mut measure, &inputs);
+            app.ui_shell.update_frame(screen, app.editor_runtime.theme(), &mut measure, &inputs);
             assert!(!app.ui_shell.dock_is_dirty(), "测试前必须具有可复用的缓存编辑区边界");
             let closed_bounds = app.plugin_render_bounds();
             let toc_right = app.ui_shell.editor_rect().x + app.ui_metrics().toc_width;
@@ -781,6 +784,35 @@ mod edit_tests {
             assert!(app.toggle_active_toc());
             assert_eq!(app.plugin_render_bounds(), closed_bounds, "关闭 TOC 后应恢复原正文边界");
         }
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn switching_to_source_hides_toc_and_restores_it_in_markdown() {
+        let test_directory = tempfile::tempdir().expect("temporary Textora profile");
+        let mut app = App::new_with_test_home(test_directory.path());
+        let markdown_path = test_directory.path().join("headings.md");
+        app.push_entry_for_test(
+            DocumentFixture::from_external_content(&markdown_path, "# Heading\n\nBody", 40, 40.0),
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
+        );
+        app.switch_workspace_for_test(0);
+        assert!(app.toggle_active_toc());
+        let markdown_inputs = app.build_shell_inputs();
+        assert!(markdown_inputs.toc_visible);
+        assert!(markdown_inputs.toc_thickness > 0.0);
+
+        let _ = app.toggle_editor_view();
+        assert!(!app.active_handles_own_rendering());
+        let source_inputs = app.build_shell_inputs();
+        assert!(!source_inputs.toc_visible, "源码视图不能保留占据正文左侧的目录");
+        assert_eq!(source_inputs.toc_thickness, 0.0);
+        assert_eq!(app.toc_left_offset(), 0.0);
+
+        let _ = app.toggle_editor_view();
+        let restored_inputs = app.build_shell_inputs();
+        assert!(restored_inputs.toc_visible);
+        assert_eq!(restored_inputs.toc_thickness, markdown_inputs.toc_thickness);
     }
 
     fn set_active_selection(app: &mut App, anchor: usize, cursor: usize) {

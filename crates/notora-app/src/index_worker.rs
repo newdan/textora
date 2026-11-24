@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
+use notora_core::WorkspaceFileMonitorEvent;
 use notora_core::note_command::NoteCommand;
 
 use crate::action::{CardQuery, DocumentLoadRequest, MetadataMutation, TrashOperation};
@@ -44,39 +45,69 @@ pub(crate) enum IndexWorkerCommand {
     },
 }
 
-/// 通过断开 command sender 自然退出的后台 worker。
+pub(crate) enum IndexWorkerEvent {
+    Command(IndexWorkerCommand),
+    Monitor(WorkspaceFileMonitorEvent),
+    MonitorDisconnected,
+    Shutdown,
+}
+
+pub(crate) struct IndexWorkerMonitorSender {
+    events: mpsc::Sender<IndexWorkerEvent>,
+    reported_failure: bool,
+}
+
+impl IndexWorkerMonitorSender {
+    pub(crate) fn new(events: mpsc::Sender<IndexWorkerEvent>) -> Self {
+        Self { events, reported_failure: false }
+    }
+
+    pub(crate) fn send(
+        &mut self,
+        event: WorkspaceFileMonitorEvent,
+    ) -> Result<(), mpsc::SendError<IndexWorkerEvent>> {
+        self.reported_failure |= matches!(event, WorkspaceFileMonitorEvent::Failed(_));
+        self.events.send(IndexWorkerEvent::Monitor(event))
+    }
+}
+
+impl Drop for IndexWorkerMonitorSender {
+    fn drop(&mut self) {
+        if !self.reported_failure {
+            let _ = self.events.send(IndexWorkerEvent::MonitorDisconnected);
+        }
+    }
+}
+
+/// 索引线程接收工作区命令、监视事件和独立的关停指令。
 ///
 /// 具体线程闭包拥有 `Catalog` connection；主线程只保留类型化 sender，因而不能在
 /// render 或 reducer 路径意外执行 SQLite 查询。
 pub(crate) struct IndexWorker {
-    command_sender: Option<mpsc::Sender<IndexWorkerCommand>>,
+    event_sender: mpsc::Sender<IndexWorkerEvent>,
     join_handle: Option<JoinHandle<()>>,
 }
 
 impl IndexWorker {
     pub(crate) fn start(
-        run: impl FnOnce(mpsc::Receiver<IndexWorkerCommand>) + Send + 'static,
+        event_sender: mpsc::Sender<IndexWorkerEvent>,
+        run: impl FnOnce() + Send + 'static,
     ) -> Result<Self, std::io::Error> {
-        let (command_sender, command_receiver) = mpsc::channel();
-        let join_handle = thread::Builder::new()
-            .name(INDEX_WORKER_THREAD_NAME.to_owned())
-            .spawn(move || run(command_receiver))?;
-        Ok(Self { command_sender: Some(command_sender), join_handle: Some(join_handle) })
+        let join_handle =
+            thread::Builder::new().name(INDEX_WORKER_THREAD_NAME.to_owned()).spawn(run)?;
+        Ok(Self { event_sender, join_handle: Some(join_handle) })
     }
 
     pub(crate) fn send(
         &self,
         command: IndexWorkerCommand,
-    ) -> Result<(), mpsc::SendError<IndexWorkerCommand>> {
-        let Some(command_sender) = &self.command_sender else {
-            return Err(mpsc::SendError(command));
-        };
-        command_sender.send(command)
+    ) -> Result<(), mpsc::SendError<IndexWorkerEvent>> {
+        self.event_sender.send(IndexWorkerEvent::Command(command))
     }
 
     pub(crate) fn shutdown(&mut self) {
-        let _ = self.command_sender.take();
         if let Some(join_handle) = self.join_handle.take() {
+            let _ = self.event_sender.send(IndexWorkerEvent::Shutdown);
             let _ = join_handle.join();
         }
     }
@@ -92,19 +123,22 @@ impl Drop for IndexWorker {
 mod tests {
     use std::sync::mpsc;
 
-    use super::IndexWorker;
+    use super::{IndexWorker, IndexWorkerEvent, IndexWorkerMonitorSender};
 
     #[test]
-    fn shutdown_disconnects_the_command_channel_and_joins_the_worker() {
+    fn shutdown_joins_the_worker_while_the_monitor_can_still_send() {
         let (stopped_sender, stopped_receiver) = mpsc::channel();
-        let mut worker = IndexWorker::start(move |command_receiver| {
-            while command_receiver.recv().is_ok() {}
+        let (event_sender, event_receiver) = mpsc::channel();
+        let mut monitor = IndexWorkerMonitorSender::new(event_sender.clone());
+        let mut worker = IndexWorker::start(event_sender, move || {
+            assert!(matches!(event_receiver.recv(), Ok(IndexWorkerEvent::Shutdown)));
             let _ = stopped_sender.send(());
         })
         .expect("index worker should start");
 
         worker.shutdown();
 
-        stopped_receiver.recv().expect("worker should observe sender disconnection before joining");
+        stopped_receiver.recv().expect("worker should process shutdown before joining");
+        assert!(monitor.send(notora_core::WorkspaceFileMonitorEvent::Ready).is_err());
     }
 }

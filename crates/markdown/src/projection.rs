@@ -904,11 +904,9 @@ fn shift_visual_byte(visual_byte: usize, delta: isize) -> usize {
 fn grapheme_boundary_anchors(text: &str, char_anchors: &[SourceAnchor]) -> Vec<SourceAnchor> {
     let char_count = text.chars().count();
     assert_eq!(char_anchors.len(), char_count + 1, "char anchors must include one sentinel");
-    let char_ordinals = (0..=char_count).collect::<Vec<_>>();
-    crate::grapheme_map::build_visual_grapheme_map(text, &char_ordinals)
-        .as_slice()
-        .iter()
-        .map(|&ordinal| char_anchors[ordinal])
+    textora_core::unicode::grapheme_start_indices(text)
+        .map(|(ordinal, _)| char_anchors[ordinal])
+        .chain(std::iter::once(char_anchors[char_count]))
         .collect()
 }
 

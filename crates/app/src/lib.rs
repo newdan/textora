@@ -49,30 +49,17 @@
 
 mod actions;
 mod app;
-mod app_dispatch;
 pub(crate) mod app_effect;
 mod app_event;
-pub(crate) mod dispatch {
-    pub(crate) mod chrome;
-    pub(crate) mod commands;
-    pub(crate) mod editor;
-    pub(crate) mod mouse;
-    pub(crate) mod search;
-    pub(crate) mod tabs;
-    pub(crate) mod viewport;
-    pub(crate) mod wysiwyg;
-}
 mod app_init;
 mod app_lifecycle;
 mod app_renderer;
 mod app_reshape;
 mod app_scroll;
-mod app_search;
 mod app_tab;
 mod app_window;
 mod cli;
-#[cfg(test)]
-mod commands;
+pub(crate) mod dispatch;
 #[cfg(test)]
 mod document_fixture;
 mod editor_host;
@@ -104,7 +91,6 @@ mod native_menu;
 pub(crate) mod plugins;
 mod search_escape;
 mod settings_overlay;
-mod source_pointer;
 mod ui_shell;
 mod workspace_persistence;
 mod workspace_product;

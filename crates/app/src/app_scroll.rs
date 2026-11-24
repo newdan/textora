@@ -118,13 +118,13 @@ impl App {
         let metrics = self.ui_metrics();
         let dpi = metrics.dpi;
         let line_height = metrics.line_height;
-        let view_mode = self.settings.view_mode;
+        let view_mode = self.editor_runtime.settings().view_mode;
         let toc_width = metrics.toc_width;
 
         // If the mouse is over the tab bar, scroll tabs horizontally via navigator
         let tbh = self.current_tab_bar_height();
         let tab_bar_top = ui::title_bar::title_bar_height(dpi);
-        let pointer_y = self.mouse.pos.1 as f32;
+        let pointer_y = self.platform.mouse().pos.1 as f32;
         if tbh > 0.0 && pointer_y >= tab_bar_top && pointer_y < tab_bar_top + tbh {
             let dx: f32 = match delta {
                 MouseScrollDelta::LineDelta(x, y) => {
@@ -146,8 +146,8 @@ impl App {
         if matches!(view_mode, ui::view_mode::ViewMode::Sidebar)
             && self.editor_runtime.surface_size().is_some()
         {
-            let sidebar_w = self.ui_shell.sidebar_current_width();
-            if sidebar_w > 0.0 && (self.mouse.pos.0 as f32) < sidebar_w {
+            let sidebar_w = self.ui_shell.sidebar_current_width(self.ui_metrics().dpi);
+            if sidebar_w > 0.0 && (self.platform.mouse().pos.0 as f32) < sidebar_w {
                 let dy: f32 = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y * -40.0,
                     MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32),
@@ -163,12 +163,12 @@ impl App {
             let toc_vis = self.active_toc_visible();
             if toc_vis {
                 let sidebar_w = if matches!(view_mode, ui::view_mode::ViewMode::Sidebar) {
-                    self.ui_shell.sidebar_current_width()
+                    self.ui_shell.sidebar_current_width(self.ui_metrics().dpi)
                 } else {
                     0.0
                 };
                 let toc_w = toc_width; // toc_width is already physical pixels
-                let mx = self.mouse.pos.0 as f32;
+                let mx = self.platform.mouse().pos.0 as f32;
                 if mx >= sidebar_w && mx < sidebar_w + toc_w {
                     let dy: f32 = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y * -40.0,
@@ -187,8 +187,10 @@ impl App {
         if self.active_is_canvas() {
             let input_modifiers = self.editor_runtime.input_modifiers();
             if input_modifiers.super_key() || input_modifiers.control_key() {
-                let screen_anchor =
-                    CanvasPoint::new(self.mouse.pos.0 as f32, self.mouse.pos.1 as f32);
+                let screen_anchor = CanvasPoint::new(
+                    self.platform.mouse().pos.0 as f32,
+                    self.platform.mouse().pos.1 as f32,
+                );
                 let Some(factor) = canvas_wheel_zoom_factor(delta) else {
                     return AppEffect::NONE;
                 };
@@ -223,7 +225,6 @@ impl App {
         if !self.editor_runtime.scroll_active_text(pixels, line_height) {
             return AppEffect::NONE;
         }
-        self.last_scroll_time = std::time::Instant::now();
         AppEffect::REDRAW
     }
 }
@@ -297,10 +298,11 @@ mod tests {
     #[test]
     fn pixel_scroll_uses_instance_line_height() {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
-        app.settings.line_height = 36.0;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
+        app.editor_runtime.edit_settings(|settings| settings.line_height = 36.0);
         app.update_scale_factor(2.0);
-        app.mouse.pos = (500.0, 400.0);
+        app.platform.mouse_mut().pos = (500.0, 400.0);
 
         let dv = DocumentFixture::new((0..100).map(|i| format!("line {i}")).collect(), 10, 10.0);
         app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
@@ -312,14 +314,14 @@ mod tests {
 
         // line_height=36.0 logical * dpi 2.0 = 72.0 physical px per line.
         // Scroll -72.0 physical px = -1.0 visual lines.
-        app.needs_redraw = false;
+        app.platform.clear_redraw();
         let effect =
             app.handle_scroll(MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -72.0)));
 
         let scroll_top = app.active_tab_session().unwrap().scroll_top();
         assert!((scroll_top - 1.0).abs() < 0.01, "scroll_top={scroll_top}");
         assert_eq!(effect, AppEffect::REDRAW);
-        assert!(!app.needs_redraw);
+        assert!(!app.platform.redraw_pending());
     }
 
     #[test]
@@ -334,7 +336,7 @@ mod tests {
                 .collect(),
         );
         app.update_scale_factor(2.0);
-        app.mouse.pos = (400.0, 300.0);
+        app.platform.mouse_mut().pos = (400.0, 300.0);
         let line_height = app.ui_metrics().line_height;
         let _ = app.handle_scroll(MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(
             0.0,
@@ -355,12 +357,12 @@ mod tests {
         );
         app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
         app.switch_workspace_for_test(0);
-        app.needs_redraw = false;
+        app.platform.clear_redraw();
 
         let effect = app.page_down();
 
         assert_eq!(effect, AppEffect::REDRAW);
-        assert!(!app.needs_redraw);
+        assert!(!app.platform.redraw_pending());
     }
 
     // ── Non-editing plugin (reading mode) scroll tests ──
@@ -440,7 +442,8 @@ mod tests {
 
     fn make_reading_app(content_height: f32) -> App {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
         app.update_scale_factor(1.0);
         let dv = DocumentFixture::new(vec!["hello".to_string()], 80, 10.0);
         app.push_entry_for_test(dv, Box::new(ReadingPlugin::new(content_height)));
@@ -451,7 +454,8 @@ mod tests {
     #[test]
     fn plugin_scroll_routes_to_the_active_store_runtime() {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
         app.update_scale_factor(1.0);
         let document = DocumentFixture::new(vec!["hello".to_string()], 80, 10.0);
         let tab_id = app.push_entry_for_test(document, Box::new(EditorPlugin::new()));
@@ -623,7 +627,8 @@ mod tests {
 
     fn make_wysiwyg_app(content_height: f32) -> App {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
         app.update_scale_factor(1.0);
         let dv = DocumentFixture::new(vec!["hello **world**".to_string()], 80, 10.0);
         app.push_entry_for_test(dv, Box::new(WysiwygPlugin::new(content_height)));
@@ -686,7 +691,7 @@ mod tests {
     #[test]
     fn wysiwyg_handle_scroll_wheel_routes_to_plugin_scroll() {
         let mut app = make_wysiwyg_app(5000.0);
-        app.mouse.pos = (400.0, 300.0); // Set mouse away from tab bar / sidebar
+        app.platform.mouse_mut().pos = (400.0, 300.0); // Set mouse away from tab bar / sidebar
         let scroll_top_before =
             app.active_tab_session().unwrap().runtime.presentation.display.viewport.scroll_top;
 
@@ -733,8 +738,9 @@ mod tests {
 
     fn app_with_prepared_canvas_viewport() -> App {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
-        app.mouse.pos = (400.0, 300.0);
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
+        app.platform.mouse_mut().pos = (400.0, 300.0);
 
         let document = DocumentFixture::new(vec!["canvas".to_string()], 80, 10.0);
         app.push_entry_for_test(document, Box::new(CanvasScrollPlugin));
@@ -786,7 +792,10 @@ mod tests {
     #[test]
     fn canvas_command_scroll_zooms_at_mouse_anchor_without_panning() {
         let mut app = app_with_prepared_canvas_viewport();
-        let anchor = ui::canvas::CanvasPoint::new(app.mouse.pos.0 as f32, app.mouse.pos.1 as f32);
+        let anchor = ui::canvas::CanvasPoint::new(
+            app.platform.mouse().pos.0 as f32,
+            app.platform.mouse().pos.1 as f32,
+        );
         let before = app
             .active_tab_session()
             .expect("test canvas tab must be active")
@@ -818,7 +827,10 @@ mod tests {
     #[test]
     fn canvas_control_scroll_zooms_at_mouse_anchor_without_panning() {
         let mut app = app_with_prepared_canvas_viewport();
-        let anchor = ui::canvas::CanvasPoint::new(app.mouse.pos.0 as f32, app.mouse.pos.1 as f32);
+        let anchor = ui::canvas::CanvasPoint::new(
+            app.platform.mouse().pos.0 as f32,
+            app.platform.mouse().pos.1 as f32,
+        );
         let before = app
             .active_tab_session()
             .expect("test canvas tab must be active")

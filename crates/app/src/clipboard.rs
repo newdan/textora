@@ -193,7 +193,7 @@ mod tests {
     fn platform_clipboard_implementation_is_owned_only_by_the_shared_shell() {
         let app_manifest = include_str!("../Cargo.toml");
         let app_sources = [
-            include_str!("commands.rs"),
+            include_str!("dispatch/editor/command_tests.rs"),
             include_str!("dispatch/editor.rs"),
             include_str!("workspace_product.rs"),
         ];

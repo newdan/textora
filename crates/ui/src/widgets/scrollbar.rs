@@ -59,13 +59,25 @@ pub fn compute_axis_layout_px(
     scroll_primary: f64,
     active: bool,
 ) -> ScrollbarLayoutPx {
-    let min_thumb_primary_extent = MIN_THUMB_PRIMARY_EXTENT_PX * dpi;
-    let total = total_primary_extent.max(1) as f64;
-    let visible = viewport_primary_extent.max(1.0);
-    let max_scroll = (total - visible).max(0.0);
-    let show_thumb = total > visible;
+    let extents = ScrollExtents::from_rows(ScrollbarInput {
+        viewport_height_px: viewport_primary_extent,
+        total_display_rows: total_primary_extent,
+        scroll_top_rows: scroll_primary,
+    });
+    compute_scrollbar_layout(bar_rect, dpi, axis, extents, active)
+}
 
-    let thumb_ratio = (visible / total).min(1.0) as f32;
+fn compute_scrollbar_layout(
+    bar_rect: Rect,
+    dpi: f32,
+    axis: CanvasAxis,
+    extents: ScrollExtents,
+    active: bool,
+) -> ScrollbarLayoutPx {
+    let min_thumb_primary_extent = MIN_THUMB_PRIMARY_EXTENT_PX * dpi;
+    let max_scroll = extents.maximum();
+    let show_thumb = max_scroll > 0.0;
+    let thumb_ratio = if show_thumb { (extents.viewport / extents.content) as f32 } else { 1.0 };
     let primary_extent = match axis {
         CanvasAxis::Horizontal => bar_rect.w,
         CanvasAxis::Vertical => bar_rect.h,
@@ -78,7 +90,7 @@ pub fn compute_axis_layout_px(
         (primary_extent * thumb_ratio).max(min_thumb_primary_extent).min(primary_extent);
 
     let scroll_ratio =
-        if max_scroll > 0.0 { (scroll_primary / max_scroll).clamp(0.0, 1.0) as f32 } else { 0.0 };
+        if max_scroll > 0.0 { (extents.position / max_scroll).clamp(0.0, 1.0) as f32 } else { 0.0 };
 
     let thumb_primary_origin = scroll_ratio * (primary_extent - thumb_primary_extent);
     let thumb_cross_extent = if active {
@@ -213,12 +225,44 @@ impl Default for ScrollbarInput {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ScrollExtents {
+    viewport: f64,
+    content: f64,
+    position: f64,
+}
+
+impl ScrollExtents {
+    fn from_rows(input: ScrollbarInput) -> Self {
+        Self {
+            viewport: input.viewport_height_px.max(1.0),
+            content: input.total_display_rows.max(1) as f64,
+            position: finite_scroll_coordinate(input.scroll_top_rows),
+        }
+    }
+
+    fn from_pixels(viewport_px: f64, content_px: f64, offset_px: f64) -> Self {
+        Self {
+            viewport: finite_scroll_coordinate(viewport_px).max(0.0),
+            content: finite_scroll_coordinate(content_px).max(0.0),
+            position: finite_scroll_coordinate(offset_px),
+        }
+    }
+
+    fn maximum(self) -> f64 {
+        (self.content - self.viewport).max(0.0)
+    }
+}
+
+fn finite_scroll_coordinate(value: f64) -> f64 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
 pub struct ScrollbarWidget {
     rect: Rect,
     axis: CanvasAxis,
     state: ScrollbarState,
-    /// 由 app 每帧注入
-    pub input: ScrollbarInput,
+    extents: ScrollExtents,
     accessibility_id: Option<AccessibilityId>,
     accessibility_label: Option<String>,
 }
@@ -239,7 +283,7 @@ impl ScrollbarWidget {
             rect: Rect::ZERO,
             axis: CanvasAxis::Vertical,
             state: ScrollbarState::new(),
-            input: ScrollbarInput::default(),
+            extents: ScrollExtents::default(),
             accessibility_id: None,
             accessibility_label: None,
         }
@@ -250,7 +294,7 @@ impl ScrollbarWidget {
             rect: Rect::ZERO,
             axis: CanvasAxis::Horizontal,
             state: ScrollbarState::new(),
-            input: ScrollbarInput::default(),
+            extents: ScrollExtents::default(),
             accessibility_id: None,
             accessibility_label: None,
         }
@@ -258,11 +302,18 @@ impl ScrollbarWidget {
 
     /// App 每帧调用，注入滚动信息。
     /// 非有限 scroll_top_rows 会被规范化为 0.0。
-    pub fn set_input(&mut self, mut input: ScrollbarInput) {
-        if !input.scroll_top_rows.is_finite() {
-            input.scroll_top_rows = 0.0;
-        }
-        self.input = input;
+    pub fn set_input(&mut self, input: ScrollbarInput) {
+        self.extents = ScrollExtents::from_rows(input);
+    }
+
+    /// Use continuous pixel positions for both thumb geometry and `DragTo`.
+    pub fn set_pixel_input(&mut self, viewport_px: f64, content_px: f64, offset_px: f64) {
+        self.extents = ScrollExtents::from_pixels(viewport_px, content_px, offset_px);
+    }
+
+    #[cfg(test)]
+    pub(super) fn pixel_input_for_test(&self) -> (f64, f64, f64) {
+        (self.extents.viewport, self.extents.content, self.extents.position)
     }
 
     pub fn is_dragging(&self) -> bool {
@@ -278,9 +329,7 @@ impl ScrollbarWidget {
     }
 
     fn maximum_scroll(&self) -> f64 {
-        let total = self.input.total_display_rows.max(1) as f64;
-        let visible = self.input.viewport_height_px.max(1.0);
-        (total - visible).max(0.0)
+        self.extents.maximum()
     }
 
     /// 当前是否处于 active 状态（hover 或 drag）。
@@ -322,15 +371,7 @@ impl ScrollbarWidget {
 
     /// 按需计算 px layout（每次调用时以当前 rect 和 state 重新计算）。
     fn compute_layout(&self, dpi: f32) -> ScrollbarLayoutPx {
-        compute_axis_layout_px(
-            self.rect,
-            dpi,
-            self.axis,
-            self.input.viewport_height_px,
-            self.input.total_display_rows,
-            self.input.scroll_top_rows,
-            self.active(),
-        )
+        compute_scrollbar_layout(self.rect, dpi, self.axis, self.extents, self.active())
     }
 }
 
@@ -388,7 +429,7 @@ impl Widget for ScrollbarWidget {
             AccessibilityNode::new(id, AccessibilityRole::ScrollBar, ctx.screen_bounds(self.rect))
                 .with_name(self.accessibility_label.as_deref().unwrap_or(fallback_name))
                 .with_numeric_value(
-                    self.input.scroll_top_rows.clamp(0.0, maximum_scroll),
+                    self.extents.position.clamp(0.0, maximum_scroll),
                     0.0,
                     maximum_scroll,
                 )
@@ -587,14 +628,7 @@ mod tests {
             total_display_rows: 40,
             scroll_top_rows: 5.0,
         });
-        assert_eq!(
-            widget.input,
-            ScrollbarInput {
-                viewport_height_px: 20.0,
-                total_display_rows: 40,
-                scroll_top_rows: 5.0,
-            }
-        );
+        assert_eq!(widget.extents, ScrollExtents { viewport: 20.0, content: 40.0, position: 5.0 });
     }
 
     #[test]
@@ -606,7 +640,7 @@ mod tests {
                 total_display_rows: 40,
                 scroll_top_rows: value,
             });
-            assert_eq!(widget.input.scroll_top_rows, 0.0);
+            assert_eq!(widget.extents.position, 0.0);
         }
     }
 
@@ -617,14 +651,8 @@ mod tests {
         let w = make_widget(Rect::ZERO, 1.0, 100.0, 200, 0.0);
         let t = test_theme();
         let mut dl = DrawList::new();
-        let mut pc = PaintCtx {
-            global_alpha: 1.0,
-            list: &mut dl,
-            theme: &t,
-            dpi: 1.0,
-            offset: (0.0, 0.0),
-            shaper: None,
-        };
+        let mut pc =
+            PaintCtx { global_alpha: 1.0, list: &mut dl, theme: &t, dpi: 1.0, shaper: None };
         w.paint(&mut pc);
         assert!(dl.cmds.is_empty());
     }
@@ -635,14 +663,8 @@ mod tests {
         let w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 100.0, 200, 0.0);
         let t = test_theme();
         let mut dl = DrawList::new();
-        let mut pc = PaintCtx {
-            global_alpha: 1.0,
-            list: &mut dl,
-            theme: &t,
-            dpi: 1.0,
-            offset: (0.0, 0.0),
-            shaper: None,
-        };
+        let mut pc =
+            PaintCtx { global_alpha: 1.0, list: &mut dl, theme: &t, dpi: 1.0, shaper: None };
         w.paint(&mut pc);
 
         let fills: Vec<_> =
@@ -659,14 +681,8 @@ mod tests {
         w.on_event(&Event::MouseMove { px: 6.0, py: 368.0 }, &mut ec);
 
         let mut dl = DrawList::new();
-        let mut pc = PaintCtx {
-            global_alpha: 1.0,
-            list: &mut dl,
-            theme: &t,
-            dpi: 1.0,
-            offset: (0.0, 0.0),
-            shaper: None,
-        };
+        let mut pc =
+            PaintCtx { global_alpha: 1.0, list: &mut dl, theme: &t, dpi: 1.0, shaper: None };
         w.paint(&mut pc);
 
         let fills: Vec<_> =
@@ -680,14 +696,8 @@ mod tests {
         let w = make_widget(Rect::new(1188.0, 32.0, 12.0, 744.0), 1.0, 200.0, 100, 0.0);
         let t = test_theme();
         let mut dl = DrawList::new();
-        let mut pc = PaintCtx {
-            global_alpha: 1.0,
-            list: &mut dl,
-            theme: &t,
-            dpi: 1.0,
-            offset: (0.0, 0.0),
-            shaper: None,
-        };
+        let mut pc =
+            PaintCtx { global_alpha: 1.0, list: &mut dl, theme: &t, dpi: 1.0, shaper: None };
         w.paint(&mut pc);
 
         let fills: Vec<_> =

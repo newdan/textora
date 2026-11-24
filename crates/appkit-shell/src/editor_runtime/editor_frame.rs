@@ -1,6 +1,6 @@
 //! 产品 chrome 与编辑器共享的单帧借用 API。
 
-use crate::editor_runtime::{EditorOutcome, PaintedEditorBounds};
+use crate::editor_runtime::PaintedEditorBounds;
 use crate::gpu::GpuError;
 use crate::render_state::{GpuState, TextState};
 use render::GlyphVertex;
@@ -36,7 +36,6 @@ pub struct SurfaceFrameOptions {
     pub background: [f32; 4],
     pub empty_frame_target: EmptyFrameTarget,
     pub window_corner_clip: WindowCornerClip,
-    pub gamma_override: Option<render::GammaUniform>,
 }
 
 impl RenderResources {
@@ -72,9 +71,6 @@ impl RenderResources {
         };
         let text = self.text.as_mut().filter(|_| !vertices.is_empty()).map(|text| {
             upload_frame_vertices(text, gpu, vertices);
-            if let Some(gamma) = options.gamma_override {
-                text.update_gamma_if_changed(&gpu.ctx.queue, gamma);
-            }
             &*text
         });
         encode_surface_pass(
@@ -284,7 +280,6 @@ impl EditorFrame {
                 list: draw_list,
                 theme,
                 dpi,
-                offset: (0.0, 0.0),
                 global_alpha: 1.0,
                 shaper: ui_shaper.as_deref_mut(),
             };
@@ -351,10 +346,6 @@ impl EditorFrame {
             vertices,
         );
     }
-
-    pub fn present(self) -> Result<EditorOutcome, RenderError> {
-        Ok(EditorOutcome::default())
-    }
 }
 
 fn gamma_for_theme(theme: &ui::Theme) -> render::GammaUniform {
@@ -380,14 +371,8 @@ fn paint_with_context<T>(
     let mut ui_shaper = ui_shaper.map(|shaper| {
         shaper.lock().expect("UI shaper mutex must not be poisoned by another paint callback")
     });
-    let mut context = ui::PaintCtx {
-        list,
-        theme,
-        dpi,
-        offset: (0.0, 0.0),
-        global_alpha: 1.0,
-        shaper: ui_shaper.as_deref_mut(),
-    };
+    let mut context =
+        ui::PaintCtx { list, theme, dpi, global_alpha: 1.0, shaper: ui_shaper.as_deref_mut() };
     paint(&mut context)
 }
 
@@ -437,7 +422,6 @@ mod tests {
                 background: [0.0; 4],
                 empty_frame_target: EmptyFrameTarget::Surface,
                 window_corner_clip: WindowCornerClip::Synchronize(None),
-                gamma_override: None,
             },
         );
 
@@ -489,7 +473,6 @@ mod tests {
 
         assert_eq!(layout_dpi, 2.0);
         assert_eq!(paint_dpi, 2.0);
-        frame.present().expect("frame should be consumed once");
     }
 
     #[test]
@@ -539,7 +522,6 @@ mod tests {
         frame.with_paint_context(|context| {
             context.list.fill(ui::Rect::new(5.0, 5.0, 6.0, 6.0), [1.0; 4]);
         });
-        frame.present().expect("frame should be consumed once");
     }
 
     #[test]
@@ -552,7 +534,6 @@ mod tests {
             Err(RenderError::InvalidEditorRect)
         );
         frame.paint_editor(ui::Rect::ZERO).expect("zero rect should skip safely");
-        frame.present().expect("zero rect frame should still present");
     }
 
     #[test]
@@ -576,7 +557,6 @@ mod tests {
 
         assert_eq!(vertices.first().expect("editor vertex must be retained").position, [0.25, 0.5]);
         assert_eq!(vertices.len(), 9, "one editor triangle plus one product quad");
-        frame.present().expect("frame should be consumed once");
     }
 
     #[test]

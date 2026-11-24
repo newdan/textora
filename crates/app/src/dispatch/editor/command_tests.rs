@@ -34,7 +34,7 @@ pub(crate) fn execute_edit_command(
 }
 
 #[cfg(test)]
-mod command_tests {
+mod tests {
     use super::*;
     use appkit_core::line_index::LineIndex;
     use textora_core::types::ByteIndex;

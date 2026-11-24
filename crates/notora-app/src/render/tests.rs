@@ -1,4 +1,6 @@
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use ui::editor_toolbar::EditorToolbarAction;
 
 use crate::encrypted_note_dialog::{EncryptedNoteDialog, EncryptedNoteDialogInput};
 use crate::encrypted_note_unlock::{EncryptedNoteUnlock, EncryptedNoteUnlockInput};
@@ -44,7 +46,7 @@ use super::painting::{
 use super::widget_actions::new_document_menu_action;
 use super::{
     CanvasViewCommand, GLOBAL_SEARCH_BOX_ID, NEW_NOTE_BUTTON_ID, NOTE_TOOL_ICON_SIZE_LOGICAL,
-    NewNoteControlState, NoteToolbarButtonInput, NotoraRenderModel, NotoraShell, RenderCard,
+    NewNoteControlState, NoteToolbarButtonInput, NotoraRenderCache, NotoraRenderModel, NotoraShell,
     SEARCH_ICON_AREA_WIDTH_LOGICAL, SET_WORKSPACE_ROOT_BUTTON_ID, SIDEBAR_ICON_SIZE_LOGICAL,
     add_compact_editor_toolbar_commands, add_source_toggle_command,
     editor_toolbar_input_for_plugin,
@@ -112,7 +114,7 @@ fn three_panes_share_rounded_surfaces_with_native_or_immersive_title_bar() {
                     },
                     title_height,
                 );
-                let runtime = app.runtime_mut().editor_runtime_mut();
+                let runtime = app.editor_runtime_mut();
                 runtime.update_theme(theme.clone());
                 runtime.set_scale_factor(f64::from(dpi));
                 let mut frame = runtime.begin_frame().expect("surface test frame should begin");
@@ -221,6 +223,7 @@ fn encrypted_unlock_is_rendered_inline_instead_of_as_a_product_dialog() {
         title: "私密笔记".to_owned(),
         metadata: notora_core::NoteEditorMetadata {
             note_id,
+            starred: false,
             created_at: SystemTime::UNIX_EPOCH,
             modified_at: SystemTime::UNIX_EPOCH,
             encryption: notora_core::NoteEncryption::Encrypted,
@@ -269,7 +272,7 @@ fn collapsed_navigation_does_not_paint_search_over_the_expand_button() {
                 editor_property_row_visible: true,
                 editor_header_visible: true,
             });
-            let runtime = app.runtime_mut().editor_runtime_mut();
+            let runtime = app.editor_runtime_mut();
             runtime.set_scale_factor(f64::from(dpi));
             let mut frame = runtime.begin_frame().expect("navigation test frame should begin");
             shell.render(&mut frame, layout, &model).expect("navigation frame should render");
@@ -1264,7 +1267,7 @@ fn new_document_menu_exposes_only_direct_creation_actions() {
     let metrics = ui::settings::UiMetrics::from_settings(&ui::settings::Settings::new(), 1.0);
     let button_rect = Rect::new(300.0, 20.0, 128.0, 28.0);
     let menu = ui::sidebar::build_new_document_menu(button_rect, (800.0, 600.0), &metrics, true);
-    let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
+    let labels: Vec<&str> = menu.items.iter().map(|item| item.label()).collect();
 
     assert_eq!(labels, vec!["新建 TXT", "新建 MMAP", "新建 MD", "加密笔记"]);
     assert!(menu.menu_rect.y > button_rect.bottom());
@@ -1655,8 +1658,7 @@ fn current_frame_keys_map_to_typed_navigation_actions() {
     let model = NotoraRenderModel::default();
     let mut shell = NotoraShell::new();
     shell.update_model(&model);
-    shell
-        .navigation_actions
+    Arc::make_mut(&mut shell.navigation_actions)
         .insert(TreeRowKey(1), NotoraAction::NavigationSelected(NavigationScope::WorkspaceRoot));
 
     assert_eq!(
@@ -1689,7 +1691,7 @@ fn current_frame_keys_map_to_typed_navigation_actions() {
 #[test]
 fn tree_widget_directory_events_map_to_product_actions() {
     let mut shell = NotoraShell::new();
-    shell.navigation_trailing_actions.insert(
+    Arc::make_mut(&mut shell.navigation_trailing_actions).insert(
         (TreeRowKey(7), NEW_DIRECTORY_ACTION_KEY),
         NotoraAction::BeginDirectoryCreation { parent_relative_path: "docs".into() },
     );
@@ -1770,6 +1772,35 @@ fn save_conflict_is_exposed_as_a_four_way_product_decision() {
             ),
         ]
     );
+}
+
+#[test]
+fn shell_reuses_route_projections_across_frames_and_refreshes_changed_navigation() {
+    let mut state = NotoraState::default();
+    state.activate_workspace();
+    let note_id = NoteId::generate();
+    state.library.selected_card = Some(DocumentIdentity::Note(note_id));
+    let mut cache = NotoraRenderCache::default();
+    let settings = crate::ProductSettings::default();
+    let first = NotoraRenderModel::with_cache(&state, &settings, &mut cache);
+    let mut shell = NotoraShell::new();
+    shell.update_model(&first);
+
+    state.library.card_scroll_offset_px = 24.0;
+    let scrolled = NotoraRenderModel::with_cache(&state, &settings, &mut cache);
+    shell.update_model(&scrolled);
+
+    assert!(Arc::ptr_eq(&first.navigation_rows, &scrolled.navigation_rows));
+    assert!(Arc::ptr_eq(&shell.navigation_actions, &first.navigation_actions));
+    assert!(Arc::ptr_eq(&shell.editor_location_actions, &first.editor_location_actions));
+    assert!(Arc::ptr_eq(&shell.editor_tag_actions, &first.editor_tag_actions));
+
+    state.library.navigation_tree.directories.push("archive".into());
+    let refreshed = NotoraRenderModel::with_cache(&state, &settings, &mut cache);
+    shell.update_model(&refreshed);
+
+    assert!(!Arc::ptr_eq(&shell.navigation_actions, &first.navigation_actions));
+    assert!(shell.editor_location_actions.contains_key("archive"));
 }
 
 #[test]
@@ -1994,22 +2025,29 @@ fn editor_pane_input_matrix_keeps_external_and_trash_metadata_read_only() {
 
     let mut note_state = NotoraState::default();
     note_state.library.selected_card = Some(DocumentIdentity::Note(note_id));
-    let note_input = editor_pane_input(
-        &note_state,
-        &[RenderCard {
-            identity: DocumentIdentity::Note(note_id),
-            title: "路线图".to_owned(),
-            excerpt: String::new(),
-            timestamp: String::new(),
-            icon: None,
-            tag_summary: "★ #产品/Notora".to_owned(),
-            closable: false,
-        }],
-    );
+    let tag_id = notora_core::TagId::generate();
+    note_state.library.active_editor_metadata = Some(crate::state::ActiveEditorMetadata {
+        identity: DocumentIdentity::Note(note_id),
+        selection_generation: note_state.library.selected_document_generation,
+        metadata: notora_core::NoteEditorMetadata {
+            note_id,
+            starred: true,
+            created_at: SystemTime::UNIX_EPOCH,
+            modified_at: SystemTime::UNIX_EPOCH,
+            encryption: notora_core::NoteEncryption::Unencrypted,
+            title_initialization: notora_core::TitleInitialization::Independent,
+            file_name_binding: notora_core::NoteFileNameBinding::TitleBound { disambiguator: 1 },
+            title_revision: 0,
+        },
+        tags: vec![notora_core::TagSummary { tag_id, display_name: "产品 / Notora".to_owned() }],
+    });
+    let note_input = editor_pane_input(&note_state, &[]);
     assert_eq!(note_input.mode, EditorPaneMode::WorkspaceNote);
     assert!(note_input.header.title_editable);
     assert!(note_input.header.star_enabled);
-    assert_eq!(note_input.tags.chips[0].label, "产品/Notora");
+    assert!(note_input.header.starred);
+    assert_eq!(note_input.tags.chips[0].label, "产品 / Notora");
+    assert_eq!(note_input.tags.chips[0].chip_key, tag_id.to_string());
 
     note_state.library.navigation_scope = NavigationScope::Trash;
     let trash_input = editor_pane_input(&note_state, &[]);
@@ -2034,11 +2072,8 @@ fn canvas_toolbar_routes_viewport_commands_without_document_actions() {
         ("canvas_zoom_out", CanvasViewCommand::ZoomOut),
         ("canvas_fit", CanvasViewCommand::Fit),
     ] {
-        let route = shell.route_editor_widget_action(&WidgetAction::Control(
-            ControlAction::TextCommitted {
-                id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
-                value: TextPayload::Plain(key.to_owned()),
-            },
+        let route = shell.route_editor_widget_action(&WidgetAction::EditorToolbar(
+            EditorToolbarAction::CommandInvoked(key.to_owned()),
         ));
         assert!(route.consumed);
         assert!(route.actions.is_empty());
@@ -2178,6 +2213,7 @@ fn editor_widget_keys_translate_to_typed_note_actions() {
         selection_generation: 4,
         metadata: notora_core::NoteEditorMetadata {
             note_id,
+            starred: false,
             created_at: SystemTime::UNIX_EPOCH,
             modified_at: SystemTime::UNIX_EPOCH,
             encryption: notora_core::NoteEncryption::Unencrypted,
@@ -2228,10 +2264,9 @@ fn editor_widget_keys_translate_to_typed_note_actions() {
         Some(NotoraAction::FocusRequested(FocusTarget::EditorTitle))
     );
     assert_eq!(
-        shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
-            id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
-            value: TextPayload::Plain("inspector_panel".to_owned()),
-        })),
+        shell.translate_widget_action(&WidgetAction::EditorToolbar(
+            EditorToolbarAction::CommandInvoked("inspector_panel".to_owned())
+        )),
         Some(NotoraAction::ToggleInspectorPanelRequested)
     );
     assert_eq!(
@@ -2281,17 +2316,15 @@ fn editor_widget_keys_translate_to_typed_note_actions() {
         Some(NotoraAction::MoveRequested { note_id, target_directory: std::path::PathBuf::new() })
     );
     assert_eq!(
-        shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
-            id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
-            value: TextPayload::Plain("bold".to_owned()),
-        })),
+        shell.translate_widget_action(&WidgetAction::EditorToolbar(
+            EditorToolbarAction::CommandInvoked("bold".to_owned())
+        )),
         Some(NotoraAction::SemanticEditRequested(ui::plugin::SemanticEditCommand::ToggleBold,))
     );
     assert_eq!(
-        shell.translate_widget_action(&WidgetAction::Control(ControlAction::TextCommitted {
-            id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
-            value: TextPayload::Plain("toggle_source".to_owned()),
-        })),
+        shell.translate_widget_action(&WidgetAction::EditorToolbar(
+            EditorToolbarAction::CommandInvoked("toggle_source".to_owned())
+        )),
         Some(NotoraAction::ToggleSourceViewRequested)
     );
 }

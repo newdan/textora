@@ -2,6 +2,7 @@ use crate::action::NotoraAction;
 use crate::product::DocumentCompletion;
 
 use super::NotoraRuntime;
+use super::document_runtime::ConflictRetryRevision;
 
 impl NotoraRuntime {
     pub(super) fn apply_document_completion(&mut self, completion: DocumentCompletion) {
@@ -40,6 +41,15 @@ impl NotoraRuntime {
                 );
                 self.apply_document_outcome(outcome);
             }
+            DocumentCompletion::ExternalConflictCopyCompleted { identity, result } => {
+                if self.action_runtime.has_save_conflict(identity) {
+                    let action = match result {
+                        Ok(()) => NotoraAction::SaveConflictResolved { identity },
+                        Err(message) => NotoraAction::NoteCommandFailed(message),
+                    };
+                    self.dispatch_action(action);
+                }
+            }
             DocumentCompletion::ConflictReloadCompleted {
                 identity,
                 tab_id,
@@ -75,14 +85,17 @@ impl NotoraRuntime {
                 path,
                 disk_revision,
             } => {
-                let request = self.manual_save_request_for_tab(tab_id);
+                let origin = self.document_origin_for_tab(tab_id);
                 let outcome = self.document_runtime.complete_conflict_retry_revision_capture(
-                    identity,
-                    tab_id,
-                    content_revision,
-                    path,
-                    disk_revision,
-                    request,
+                    ConflictRetryRevision {
+                        identity,
+                        tab_id,
+                        content_revision,
+                        path,
+                        disk_revision,
+                    },
+                    origin,
+                    self.window_runtime.event_loop_proxy(),
                 );
                 self.apply_document_outcome(outcome);
             }

@@ -9,7 +9,7 @@ use appkit_core::file_safety::capture_revision;
 use appkit_shell::editor_plugin::EditorPluginFactory;
 use appkit_shell::editor_runtime::{
     EditorFocus, EditorInputContext, EditorNotification, EditorRuntime, EditorRuntimeConfig,
-    OpenDisposition, execute_prepared_save,
+    OpenDisposition, RenderResources, execute_prepared_save,
 };
 use appkit_shell::prepared_tab::PreparedTab;
 use appkit_shell::tab_runtime::TabRuntime;
@@ -105,7 +105,9 @@ fn fake_product_completes_nonzero_frame_save_and_late_close_lifecycle() {
     frame.with_paint_context(|context| {
         context.list.fill(ui::Rect::new(72.0, 0.0, 640.0, 96.0), [1.0; 4]);
     });
-    frame.present().expect("fake product frame should present");
+    let mut vertices = Vec::new();
+    frame.drain_into(ui::Screen::new(712.0, 600.0), &mut RenderResources::default(), &mut vertices);
+    assert!(!vertices.is_empty(), "fake product chrome should produce drainable vertices");
 
     let completion = execute_prepared_save(
         runtime.prepare_save(tab_id).expect("fake product dirty tab should prepare save"),

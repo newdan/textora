@@ -604,7 +604,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         modal.paint(&mut paint_ctx);
@@ -655,7 +654,6 @@ mod tests {
                 list: &mut draw_list,
                 theme: &theme,
                 dpi,
-                offset: (0.0, 0.0),
                 shaper: None,
             });
             let vertices: Vec<_> = draw_list

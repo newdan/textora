@@ -3,8 +3,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::document_runtime::{
-    DocumentCommand, PendingNoteMove, PendingTitleUpdate, PendingTrashMove,
-    initial_title_from_document,
+    DocumentCommand, PendingExternalSaveAs, PendingNoteMove, PendingTabOperation,
+    PendingTitleUpdate, PendingTrashMove, initial_title_from_document,
 };
 use super::frame_runtime::{FontSystemPreparation, StartupMilestone};
 use super::{
@@ -312,8 +312,7 @@ fn encrypted_note_reopens_from_the_process_cache_without_another_password() {
     let (encrypted_identity, encrypted_tab_id) =
         create_encrypted_note_for_test(&mut app, workspace.path(), "process-cache-password");
 
-    let _ = app.document_runtime.editor_mut().close_for_product(encrypted_tab_id);
-    app.document_runtime.remove_tab(encrypted_tab_id);
+    app.document_runtime.close_tab_discarding_changes(encrypted_tab_id);
     assert_eq!(app.document_runtime.tab_for(encrypted_identity), None);
     assert!(app.document_runtime.unlocked_note_session(encrypted_tab_id).is_none());
 
@@ -666,6 +665,46 @@ fn encrypted_note_plaintext_and_password_never_reach_workspace_catalog_or_snapsh
             );
         }
     }
+}
+
+#[test]
+fn external_conflict_copy_saves_local_edits_without_an_open_workspace() {
+    let directory = tempfile::tempdir().expect("external conflict fixture should exist");
+    let source_path = directory.path().join("source.md");
+    let target_path = directory.path().join("copy.md");
+    std::fs::write(&source_path, "remote contents").expect("source fixture should exist");
+    let mut app = app();
+    let (identity, tab_id) = install_registered_external(&mut app, &source_path);
+    let edit = app
+        .document_runtime
+        .editor_mut()
+        .commit_text(active_editor_input_context(), "local edit".to_owned());
+    app.apply_editor_outcome(edit);
+    let snapshot = app
+        .document_runtime
+        .editor()
+        .document_text_snapshot(tab_id)
+        .expect("external document should have a text snapshot");
+    app.dispatch_action(NotoraAction::SaveConflictDetected {
+        identity,
+        content_revision: snapshot.content_revision,
+    });
+
+    let copy = app.document_runtime.prepare_conflict_copy(identity, target_path.clone());
+    app.apply_document_outcome(copy);
+    assert_eq!(app.action_runtime.state().library.last_command_error, None);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while app.action_runtime.has_save_conflict(identity) {
+        app.drain_product_events();
+        assert!(Instant::now() < deadline, "external conflict copy should complete promptly");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read_to_string(&target_path).expect("copy should exist"), snapshot.text);
+    assert_eq!(
+        std::fs::read_to_string(&source_path).expect("source should exist"),
+        "remote contents"
+    );
 }
 
 #[test]
@@ -1165,10 +1204,7 @@ fn autosave_failure_retains_the_diagnostic_for_the_editor_header() {
         app.document_runtime.autosave.state(tab_id),
         Some(AutoSaveState::Failed { content_revision: request.content_revision })
     );
-    assert_eq!(
-        app.document_runtime.save_failure_messages.get(&tab_id).map(String::as_str),
-        Some("file is read-only")
-    );
+    assert_eq!(app.document_runtime.save_failure_message(tab_id), Some("file is read-only"));
 }
 
 #[test]
@@ -1222,7 +1258,7 @@ fn autosave_request_for_a_clean_document_finishes_without_a_failure() {
     app.submit_autosave(request);
 
     assert_eq!(app.document_runtime.autosave.state(tab_id), None);
-    assert_eq!(app.document_runtime.save_failure_messages.get(&tab_id), None);
+    assert_eq!(app.document_runtime.save_failure_message(tab_id), None);
 }
 
 #[test]
@@ -1271,7 +1307,7 @@ fn stale_autosave_request_is_replaced_by_the_current_dirty_revision() {
         Some(AutoSaveState::Scheduled { content_revision, .. })
             if content_revision == current_revision
     ));
-    assert_eq!(app.document_runtime.save_failure_messages.get(&tab_id), None);
+    assert_eq!(app.document_runtime.save_failure_message(tab_id), None);
 }
 
 #[test]
@@ -2300,7 +2336,7 @@ fn mindmap_title_commit_renames_the_existing_empty_root() {
     assert_eq!(snapshot.text, "# 项目路线图");
     let tree = textora_mindmap::mmf::parser::parse(&snapshot.text)
         .expect("renamed mmap must retain one valid root");
-    assert_eq!(tree.root.title, "项目路线图");
+    assert_eq!(tree.root().title, "项目路线图");
 }
 
 #[test]
@@ -3289,7 +3325,7 @@ fn dirty_note_is_not_moved_to_trash_when_its_required_save_fails() {
     assert!(workspace_directory.path().join("无标题.md").is_file());
     assert_eq!(app.document_tab_for(identity), Some(tab_id));
     assert_eq!(app.action_runtime.state().library.selected_card, Some(identity));
-    assert!(app.document_runtime.pending_trash_moves.is_empty());
+    assert!(app.document_runtime.pending_operation(tab_id).is_none());
     assert!(
         app.action_runtime
             .state()
@@ -3361,6 +3397,86 @@ fn dirty_note_move_waits_for_save_before_worker_command() {
             .as_deref()
             .is_some_and(|message| message.contains("未移动"))
     );
+}
+
+#[test]
+fn pending_note_move_prevents_a_concurrent_title_update_for_the_same_tab() {
+    let mut app = app();
+    let (identity, tab_id) = install_registered_note(&mut app, "note.md", "原始正文");
+    let DocumentIdentity::Note(note_id) = identity else {
+        panic!("registered document should be a note");
+    };
+    let edit = app
+        .document_runtime
+        .editor_mut()
+        .commit_text(active_editor_input_context(), "未保存修改".to_owned());
+    app.apply_editor_outcome(edit);
+    let origin = notora_core::DocumentOrigin::Note {
+        workspace_id: notora_core::WorkspaceId::generate(),
+        note_id,
+        relative_path: "note.md".into(),
+    };
+    let move_outcome = app.document_runtime.prepare_note_move(
+        notora_core::note_command::MoveNoteRequest { note_id, target_directory: "archive".into() },
+        Some(origin.clone()),
+    );
+    assert!(matches!(move_outcome.commands.as_slice(), [DocumentCommand::ProcessDueAutosaves]));
+
+    let title_outcome = app.document_runtime.prepare_title_update(
+        notora_core::UpdateNoteTitleRequest {
+            note_id,
+            expected_title_revision: 0,
+            title: "新标题".to_owned(),
+        },
+        Some(origin),
+    );
+
+    assert!(title_outcome.commands.is_empty());
+    assert!(matches!(title_outcome.actions.as_slice(), [NotoraAction::NoteCommandFailed(_)]));
+    assert_eq!(app.document_tab_for(identity), Some(tab_id));
+}
+
+#[test]
+fn editing_before_a_scheduled_move_save_releases_the_stale_operation() {
+    let mut app = app();
+    let (identity, tab_id) = install_registered_note(&mut app, "note.md", "原始正文");
+    let DocumentIdentity::Note(note_id) = identity else {
+        panic!("registered document should be a note");
+    };
+    let origin = notora_core::DocumentOrigin::Note {
+        workspace_id: notora_core::WorkspaceId::generate(),
+        note_id,
+        relative_path: "note.md".into(),
+    };
+    let documents = &mut app.document_runtime;
+    let content_revision = documents
+        .editor()
+        .document_summary(tab_id)
+        .expect("registered note should have a document summary")
+        .content_revision;
+    documents
+        .start_pending_operation(
+            tab_id,
+            PendingTabOperation::RelocateNote(PendingNoteMove {
+                request: notora_core::note_command::MoveNoteRequest {
+                    note_id,
+                    target_directory: "archive".into(),
+                },
+                content_revision,
+            }),
+        )
+        .expect("the move should reserve its tab workflow");
+    documents.request_immediate_workspace_note_save(
+        &origin,
+        super::document_runtime::WorkspaceNoteSaveCandidate { tab_id, content_revision },
+    );
+
+    let outcome = documents
+        .schedule_autosave(&origin, tab_id, content_revision + 1)
+        .expect("the scheduled move should surface its stale result");
+
+    assert!(documents.pending_operation(tab_id).is_none());
+    assert!(matches!(outcome.actions.as_slice(), [NotoraAction::NoteCommandFailed(_)]));
 }
 
 #[test]
@@ -3492,8 +3608,14 @@ fn redundant_autosave_dispatches_pending_title_update_for_saved_revision() {
         title: "新标题".to_owned(),
     };
     app.document_runtime
-        .pending_title_updates
-        .insert(tab_id, PendingTitleUpdate { request: title_request.clone(), content_revision });
+        .start_pending_operation(
+            tab_id,
+            PendingTabOperation::UpdateTitle(PendingTitleUpdate {
+                request: title_request.clone(),
+                content_revision,
+            }),
+        )
+        .expect("title operation should be installed on its tab");
 
     let outcome =
         app.document_runtime.submit_autosave(AutoSaveRequest { tab_id, content_revision }, None);
@@ -3503,7 +3625,7 @@ fn redundant_autosave_dispatches_pending_title_update_for_saved_revision() {
         [DocumentCommand::ExecuteNote(notora_core::NoteCommand::UpdateTitle(request))]
             if request == &title_request
     ));
-    assert!(!app.document_runtime.pending_title_updates.contains_key(&tab_id));
+    assert!(app.document_runtime.pending_operation(tab_id).is_none());
 }
 
 #[test]
@@ -3975,54 +4097,32 @@ fn shutting_down_with_dirty_external_text_preserves_source_and_writes_recovery()
 
 #[test]
 fn regression_closed_tab_releases_pending_document_workflows() {
-    use super::document_runtime::{PendingConflictRetry, PendingExternalSaveAs};
-
     let mut app = app();
     let (identity, tab_id) = install_registered_untitled_external(&mut app);
     let DocumentIdentity::ExternalFile(external_file_id) = identity else {
         panic!("fixture should be an external file");
     };
-    let note_id = notora_core::NoteId::generate();
     let content_revision = 1;
-    let documents = &mut app.document_runtime;
-    documents
-        .pending_external_save_as
-        .insert(tab_id, PendingExternalSaveAs { external_file_id, content_revision });
-    documents
-        .pending_conflict_retries
-        .insert(tab_id, PendingConflictRetry { identity, content_revision });
-    documents.pending_trash_moves.insert(tab_id, PendingTrashMove { note_id, content_revision });
-    documents.pending_note_moves.insert(
-        tab_id,
-        PendingNoteMove {
-            request: notora_core::note_command::MoveNoteRequest {
-                note_id,
-                target_directory: "archive".into(),
-            },
-            content_revision,
-        },
-    );
-    documents.pending_title_updates.insert(
-        tab_id,
-        PendingTitleUpdate {
-            request: notora_core::UpdateNoteTitleRequest {
-                note_id,
-                expected_title_revision: 0,
-                title: "renamed".to_owned(),
-            },
-            content_revision,
-        },
+    app.document_runtime
+        .start_pending_operation(
+            tab_id,
+            PendingTabOperation::ExternalSaveAs(PendingExternalSaveAs {
+                external_file_id,
+                content_revision,
+            }),
+        )
+        .expect("save as should be installed on its tab");
+    app.record_autosave_failure(
+        AutoSaveRequest { tab_id, content_revision },
+        "diagnostic for the open tab".to_owned(),
     );
 
     app.dispatch_action(NotoraAction::ExternalFileCloseRequested(external_file_id));
 
     let documents = &app.document_runtime;
     assert!(documents.tab_for(identity).is_none());
-    assert!(documents.pending_external_save_as.is_empty());
-    assert!(documents.pending_conflict_retries.is_empty());
-    assert!(documents.pending_trash_moves.is_empty());
-    assert!(documents.pending_note_moves.is_empty());
-    assert!(documents.pending_title_updates.is_empty());
+    assert!(documents.pending_operation(tab_id).is_none());
+    assert!(documents.save_failure_message(tab_id).is_none());
 }
 
 #[test]
@@ -4092,13 +4192,15 @@ fn successful_untitled_save_requested_by_close_closes_after_path_promotion() {
         .editor_runtime
         .prepare_save_as(tab_id, &saved_path)
         .expect("dirty untitled file should prepare the chosen save path");
-    app.document_runtime.pending_external_save_as.insert(
-        tab_id,
-        super::document_runtime::PendingExternalSaveAs {
-            external_file_id,
-            content_revision: prepared.content_revision,
-        },
-    );
+    app.document_runtime
+        .start_pending_operation(
+            tab_id,
+            PendingTabOperation::ExternalSaveAs(PendingExternalSaveAs {
+                external_file_id,
+                content_revision: prepared.content_revision,
+            }),
+        )
+        .expect("save as should be installed on its tab");
     app.document_runtime.request_external_file_close_after_save(external_file_id);
     app.document_runtime
         .editor_runtime
@@ -4295,6 +4397,44 @@ fn late_document_load_from_an_earlier_same_identity_selection_is_discarded() {
     assert_eq!(app.editor_runtime_tab_count(), 1);
     assert!(app.document_tab_for(selected_identity).is_some());
     assert_eq!(app.document_tab_for(intervening_identity), None);
+}
+
+#[test]
+fn replacing_a_preview_clears_its_save_failure() {
+    let mut app = app();
+    let install_preview = |app: &mut NotoraRuntime, name: &str| {
+        let identity = DocumentIdentity::Note(notora_core::NoteId::generate());
+        app.dispatch_action(NotoraAction::CardSelected(identity));
+        app.install_loaded_preview(
+            DocumentLoadRequest {
+                identity,
+                selection_generation: app
+                    .action_runtime
+                    .state()
+                    .library
+                    .selected_document_generation,
+            },
+            LoadedDocument { path: name.into(), contents: name.to_owned(), disk_revision: None },
+        );
+        (identity, app.document_tab_for(identity).expect("preview should install"))
+    };
+    let (identity, tab_id) = install_preview(&mut app, "preview.md");
+    let content_revision = app
+        .document_runtime
+        .editor()
+        .document_summary(tab_id)
+        .expect("installed tab should have a document")
+        .content_revision;
+    app.record_autosave_failure(
+        AutoSaveRequest { tab_id, content_revision },
+        "save failure retained for the editor header".to_owned(),
+    );
+    assert!(app.document_runtime.save_failure_message(tab_id).is_some());
+
+    install_preview(&mut app, "replacement.md");
+
+    assert!(app.document_tab_for(identity).is_none());
+    assert!(app.document_runtime.save_failure_message(tab_id).is_none());
 }
 
 #[test]

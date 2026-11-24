@@ -8,6 +8,21 @@ impl Default for BlockViewEngine {
 
 impl<S: BlockSource> BlockViewEngine<S> {
     pub fn new() -> Self {
+        Self { document_layout: BlockViewLayout::new(), replacement_preedit: None }
+    }
+
+    pub(in crate::view) fn set_preedit_text(
+        &mut self,
+        text: String,
+        cursor: Option<(usize, usize)>,
+    ) {
+        self.document_layout.set_preedit_context(text, cursor);
+        self.update_replacement_preedit();
+    }
+}
+
+impl<S: BlockSource> BlockViewLayout<S> {
+    pub(super) fn new() -> Self {
         Self {
             lazy: None,
             dirty: EngineDirty::SourceChanged,
@@ -47,7 +62,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
             source_generation: 0,
             cursor_visible: true,
             standalone_preedit_cursor_advance: None,
-            replacement_preedit: None,
         }
     }
 
@@ -72,7 +86,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
         let preedit_cursor = self.edit_ctx.as_ref().and_then(|ctx| ctx.preedit_cursor);
         self.edit_ctx =
             Some(crate::edit::EditContext { cursor_byte: new_byte, preedit_text, preedit_cursor });
-        self.update_replacement_preedit();
         if old_byte.is_none() {
             self.dirty = EngineDirty::SourceChanged;
         } else if !matches!(self.dirty, EngineDirty::SourceChanged) {
@@ -86,11 +99,7 @@ impl<S: BlockSource> BlockViewEngine<S> {
     /// 设置 IME preedit 文本。**严格保证不改动 `edit_ctx.cursor_byte`**（方案
     /// 2026-07-06 阶段 3a）：如果尚未收到 cursor，直接忽略 preedit——不能凭空
     /// 造出 cursor_byte=0 的假状态。
-    pub(in crate::view) fn set_preedit_text(
-        &mut self,
-        text: String,
-        cursor: Option<(usize, usize)>,
-    ) {
+    fn set_preedit_context(&mut self, text: String, cursor: Option<(usize, usize)>) {
         let Some(existing_ctx) = self.edit_ctx.as_ref() else {
             // 没有 cursor 时，preedit 无处附着；直接丢弃，避免制造 cursor_byte=0
             // 的伪状态被后续 visual_move / augment_edit 读到。
@@ -102,12 +111,10 @@ impl<S: BlockSource> BlockViewEngine<S> {
         if existing_ctx.preedit_text == preedit_text
             && existing_ctx.preedit_cursor == preedit_cursor
         {
-            self.update_replacement_preedit();
             return;
         }
         self.edit_ctx =
             Some(crate::edit::EditContext { cursor_byte, preedit_text, preedit_cursor });
-        self.update_replacement_preedit();
         if !matches!(self.dirty, EngineDirty::SourceChanged) {
             self.dirty =
                 EngineDirty::CursorMoved { old_byte: Some(cursor_byte), new_byte: cursor_byte };

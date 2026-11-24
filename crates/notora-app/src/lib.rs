@@ -4,7 +4,6 @@
 //! `textora-app` 或 `textora-sync`。产品状态、窗口生命周期和编辑器接入在后续 N2
 //! 子任务中逐步实现。
 
-mod app;
 pub mod autosave;
 pub mod dirty_snapshot;
 pub mod document_registry;
@@ -38,7 +37,6 @@ pub mod workspace_controller;
 
 pub mod action;
 
-pub use app::{NotoraApp, NotoraAppError};
 pub use external_files::{
     CanonicalExternalPath, ExternalFileOpenError, ExternalFilePathError, ExternalFileSession,
     ExternalFileSessions, OpenExistingExternalFile, RelocateExternalFile,
@@ -48,6 +46,7 @@ pub use external_files::{
 pub use macos_open_documents::install_macos_open_document_handler;
 pub use paths::{NotoraPaths, NotoraPathsError};
 pub use product::OpenDocumentSender;
+pub use runtime::{NotoraAppError, NotoraRuntime as NotoraApp};
 pub use session::{
     LoadedProductSession, ProductSession, SavedDocument, SavedNavigationScope, SessionError,
     WindowGeometry, load_product_session, save_product_session,

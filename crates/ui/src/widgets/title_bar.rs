@@ -787,7 +787,6 @@ mod tests {
             list: &mut draw_list,
             theme,
             dpi,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         widget.paint(&mut paint_ctx);
@@ -1008,7 +1007,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: None,
         };
 
@@ -1064,7 +1062,6 @@ mod tests {
             list: &mut dl,
             theme: &t,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         let mut m = NoopMeasure;
@@ -1103,7 +1100,6 @@ mod tests {
             list: &mut dl,
             theme: &t,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         w.paint(&mut pc);
@@ -1145,7 +1141,6 @@ mod tests {
             list: &mut dl,
             theme: &t,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         w.paint(&mut pc);
@@ -1194,7 +1189,6 @@ mod tests {
             list: &mut dl,
             theme: &t,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         w.paint(&mut pc);
@@ -1236,7 +1230,6 @@ mod tests {
             list: &mut dl,
             theme: &t,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         w.paint(&mut pc);
@@ -1677,7 +1670,6 @@ mod tests {
             list: &mut dl,
             theme: &t,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         w.paint(&mut pc);
@@ -1713,7 +1705,6 @@ mod tests {
             list: &mut dl,
             theme: &t,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         w.paint(&mut pc);
@@ -1764,7 +1755,6 @@ mod tests {
             list: &mut dl1,
             theme: &t,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper1),
         };
         w1.paint(&mut pc1);
@@ -1776,7 +1766,6 @@ mod tests {
             list: &mut dl2,
             theme: &t,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper2),
         };
         w2.paint(&mut pc2);

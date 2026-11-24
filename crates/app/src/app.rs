@@ -1,16 +1,19 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext, EditorRuntime};
 use appkit_shell::{EventPump, ProductHost, ProductWakeHandle};
 
-use crate::mouse::MouseState;
 use crate::native_menu::NativeMenu;
 use crate::ui_shell::UiShell;
-use appkit_core::file_history::FileHistory;
-use ui::theme::Theme;
+
+mod workspace_services;
+pub(crate) use workspace_services::WorkspaceServices;
+mod settings_ui_state;
+pub(crate) use settings_ui_state::{SettingsPersistenceState, SettingsUiState};
+mod platform_state;
+pub(crate) use platform_state::PlatformState;
 
 // Font size and line height are now in Settings
 
@@ -33,54 +36,16 @@ pub(crate) fn compute_cursor_phase(cursor_blink_instant: Instant) -> (bool, Inst
     (currently_visible, next_deadline)
 }
 
-/// The main application state.
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SettingsPersistenceState {
-    Saved,
-    SaveFailed { message: String },
-}
-
+/// Textora product and editor composition root.
 pub struct App {
-    pub(crate) file_path: Option<PathBuf>,
     pub(crate) paths: crate::product_paths::ProductPaths,
-    pub(crate) settings: ui::settings::Settings,
-    pub(crate) settings_persistence: SettingsPersistenceState,
-    pub(crate) current_theme: Theme,
-    pub(crate) theme_registry: ui::theme::ThemeRegistry,
-    pub(crate) active_theme_pair: ui::theme::ActiveThemePair,
+    pub(crate) settings_ui: SettingsUiState,
     pub(crate) product: crate::textora_product::TextoraProduct,
     pub(crate) action_pump: EventPump<crate::actions::AppAction>,
     pub(crate) editor_runtime: EditorRuntime,
-    pub(crate) accessibility_adapter: Option<PlatformAccessibilityAdapter>,
-    pub(crate) popup_tab_id_snapshot: Vec<appkit_core::tab_set::types::TabId>,
-    pub(crate) workspace_store: appkit_core::tab_set::store::WorkspaceStore,
+    pub(crate) workspace_services: WorkspaceServices,
     pub(crate) ui_shell: UiShell,
-    pub(crate) file_history: FileHistory,
-    pub(crate) library_file_monitor: Option<crate::library_file_monitor::LibraryFileMonitor>,
-    pub(crate) file_safety_notices: Vec<appkit_core::file_safety::FileSafetyNotice>,
-    pub(crate) pending_close_after_save: HashSet<appkit_core::tab_set::types::TabId>,
-    pub(crate) pending_quit_after_save: bool,
-    pub(crate) running: bool,
-    pub(crate) needs_redraw: bool,
-    pub(crate) sidebar_animating: bool,
-    /// Tab bar smooth-scroll animation.
-    pub(crate) tab_scroll: appkit_shell::smooth_scroll::SmoothScroll,
-    /// Mouse state for click/drag handling.
-    pub(crate) mouse: MouseState,
-    /// 上次滚轮事件的时间，用于快速滚动时不渲染、停手后再渲染。
-    pub(crate) last_scroll_time: Instant,
-    /// 上一帧的光标可见状态，用于 about_to_wait 检测 phase 变化
-    pub(crate) last_cursor_visible: bool,
-    /// 事件循环代理，用于后台线程唤醒主线程。
-    pub(crate) event_loop_proxy:
-        Option<winit::event_loop::EventLoopProxy<crate::app_event::AppEvent>>,
-    /// IME 预编辑文字的总像素宽度（每帧在 shape_visible_lines 前计算）
-    pub(crate) preedit_advance_px: f32,
-    /// 应用状态构造开始时刻，用于记录首帧可见的端到端耗时。
-    pub(crate) startup_started_at: Instant,
-    /// 生产启动时并行构建字体缓存；普通测试构造器保持字体立即可用。
-    pub(crate) startup_font_preparation: Option<std::thread::JoinHandle<shaping::FontSystem>>,
+    pub(crate) platform: PlatformState,
 }
 
 impl App {
@@ -117,18 +82,19 @@ impl App {
     }
 
     pub(crate) fn snapshot_popup_tab_ids(&mut self) {
-        self.popup_tab_id_snapshot = self.editor_tab_ids_in_order();
+        let ids = self.editor_tab_ids_in_order();
+        self.ui_shell.set_popup_tab_ids(ids);
     }
 
     pub(crate) fn clear_popup_tab_id_snapshot(&mut self) {
-        self.popup_tab_id_snapshot.clear();
+        self.ui_shell.clear_popup_tab_ids();
     }
 
     pub(crate) fn popup_tab_id_for_index(
         &self,
         index: usize,
     ) -> Option<appkit_core::tab_set::types::TabId> {
-        self.popup_tab_id_snapshot.get(index).copied().or_else(|| self.editor_tab_id_at(index))
+        self.ui_shell.popup_tab_id(index).or_else(|| self.editor_tab_id_at(index))
     }
 
     /// Register the event-loop proxy before background work is started.
@@ -136,7 +102,7 @@ impl App {
         &mut self,
         event_loop_proxy: winit::event_loop::EventLoopProxy<crate::app_event::AppEvent>,
     ) {
-        self.event_loop_proxy = Some(event_loop_proxy.clone());
+        self.platform.register_event_loop_proxy(event_loop_proxy.clone());
         let file_safety_proxy = event_loop_proxy.clone();
         if !self.editor_runtime.file_safety_worker_started() {
             self.editor_runtime.start_file_safety_worker(move || {
@@ -147,16 +113,16 @@ impl App {
     }
 
     pub(crate) fn start_background_services(&mut self) {
-        let Some(event_loop_proxy) = self.event_loop_proxy.clone() else { return };
+        let Some(event_loop_proxy) = self.platform.event_loop_proxy().cloned() else { return };
 
-        if self.library_file_monitor.is_none() {
+        if self.workspace_services.monitor().is_none() {
             let monitor_proxy = event_loop_proxy.clone();
             match crate::library_file_monitor::LibraryFileMonitor::spawn(move || {
                 let _ =
                     monitor_proxy.send_event(crate::app_event::AppEvent::FileSafetyResultsReady);
             }) {
                 Ok(monitor) => {
-                    self.library_file_monitor = Some(monitor);
+                    self.workspace_services.install_monitor(monitor);
                     self.refresh_file_monitor_roots();
                 }
                 Err(error) => eprintln!("[file-monitor] failed to start: {error}"),
@@ -182,7 +148,7 @@ impl App {
     }
 
     pub(crate) fn refresh_file_monitor_roots(&self) {
-        let Some(monitor) = self.library_file_monitor.as_ref() else { return };
+        let Some(monitor) = self.workspace_services.monitor() else { return };
         if let Err(error) = monitor.replace_roots(self.file_monitor_roots()) {
             eprintln!("[file-monitor] failed to refresh roots: {error}");
         }
@@ -200,7 +166,7 @@ impl App {
             if search_visible { ui::search_bar::SEARCH_BAR_HEIGHT * metrics.dpi } else { 0.0 };
 
         // Sidebar mode: title bar + search bar
-        if matches!(self.settings.view_mode, ui::view_mode::ViewMode::Sidebar) {
+        if matches!(self.editor_runtime.settings().view_mode, ui::view_mode::ViewMode::Sidebar) {
             return ui::title_bar::title_bar_height(metrics.dpi) + search_h;
         }
 
@@ -215,7 +181,11 @@ impl App {
 
     pub(crate) fn visible_height_lines(&self, screen_height: f32) -> f64 {
         let metrics = self.ui_metrics();
-        let status_h = if self.settings.show_status_bar { metrics.status_bar_height } else { 0.0 };
+        let status_h = if self.editor_runtime.settings().show_status_bar {
+            metrics.status_bar_height
+        } else {
+            0.0
+        };
         ((screen_height - status_h - self.content_top_offset()) / metrics.line_height).max(1.0)
             as f64
     }
@@ -250,7 +220,11 @@ impl App {
         let editor_right = editor_rect.x + editor_rect.w;
         let physical_w = editor_right - left_margin;
         const NO_WRAP_SENTINEL: f32 = 1_000_000.0;
-        if self.settings.word_wrap { physical_w.max(1.0) } else { NO_WRAP_SENTINEL }
+        if self.editor_runtime.settings().word_wrap {
+            physical_w.max(1.0)
+        } else {
+            NO_WRAP_SENTINEL
+        }
     }
 
     pub(crate) fn current_tab_bar_height(&self) -> f32 {
@@ -261,7 +235,9 @@ impl App {
         &self,
         metrics: &ui::settings::UiMetrics,
     ) -> f32 {
-        if self.settings.view_mode == ui::view_mode::ViewMode::Tabs && self.editor_tab_count() > 1 {
+        if self.editor_runtime.settings().view_mode == ui::view_mode::ViewMode::Tabs
+            && self.editor_tab_count() > 1
+        {
             ui::tab_bar::tab_bar_height(metrics.dpi)
         } else {
             0.0
@@ -273,7 +249,7 @@ impl App {
     /// the current scale factor to produce physical pixel values.
     pub(crate) fn ui_metrics(&self) -> ui::settings::UiMetrics {
         ui::settings::UiMetrics::from_settings(
-            &self.settings,
+            self.editor_runtime.settings(),
             self.editor_runtime.scale_factor() as f32,
         )
     }
@@ -287,17 +263,14 @@ impl App {
 
     /// Logical (pre-DPI-scale) font size, for persistence.
     pub(crate) fn persisted_font_size(&self) -> f32 {
-        self.settings.font_size
-    }
-
-    /// Convert the current physical sidebar width to logical units for persistence.
-    pub(crate) fn sidebar_width_for_persistence(&self) -> f32 {
-        let dpi = self.editor_runtime.scale_factor() as f32;
-        self.ui_shell.sidebar_width() / dpi.max(f32::EPSILON)
+        self.editor_runtime.settings().font_size
     }
 
     pub(crate) fn persist_editor_settings(&self) -> std::io::Result<()> {
-        crate::settings_io::save_editor_settings(&self.paths.settings_file, &self.settings)
+        crate::settings_io::save_editor_settings(
+            &self.paths.settings_file,
+            self.editor_runtime.settings(),
+        )
     }
 
     pub(crate) fn sync_window_chrome(&self) {
@@ -320,7 +293,7 @@ impl App {
                 }
                 AppEffectStep::PersistWorkspace => self.persist_workspace_state(),
                 AppEffectStep::Redraw => {
-                    self.needs_redraw = true;
+                    self.platform.schedule_redraw();
                     if let Some(window) = self.editor_runtime.window() {
                         window.request_redraw();
                     }
@@ -340,7 +313,7 @@ mod product_ownership_boundary_tests {
             "activate_editor_tab",
             "append_editor_tab",
             "editor_close_decision",
-            "close_editor_tab",
+            "discard_editor_tab",
         ] {
             assert!(source.contains(&format!("fn {method_name}")));
         }
@@ -464,7 +437,8 @@ mod geometry_metrics_tests {
         );
         app.switch_workspace_for_test(0);
         app.update_scale_factor(2.0);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
 
         let metrics = app.ui_metrics();
         // Geometry methods should derive from metrics, not settings directly.

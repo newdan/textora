@@ -113,7 +113,7 @@ pub struct LazyLayout<S: BlockSource> {
     /// Cached viewport width from construction — used by precise_block_at
     /// when the block hasn't been materialized yet.
     pub(in crate::layout::types) cached_viewport_w: f32,
-    /// Full source text for WYSIWYG span expansion via materialize_line.
+    /// Full source text for WYSIWYG source projection.
     pub(in crate::layout::types) source_snapshot: Option<SourceSnapshot>,
     /// Empty paragraph geometry derived from the same rows exposed in `flat_lines`.
     pub(in crate::layout::types) projected_empty_lines: Vec<ProjectedEmptyLine>,

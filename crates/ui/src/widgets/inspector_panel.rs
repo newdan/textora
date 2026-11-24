@@ -540,7 +540,6 @@ impl InspectorPanelWidget {
                     list: clipped_list,
                     theme: ctx.theme,
                     dpi: ctx.dpi,
-                    offset: ctx.offset,
                     global_alpha: ctx.global_alpha,
                     shaper: ctx.shaper.as_deref_mut(),
                 };
@@ -582,7 +581,6 @@ impl Widget for InspectorPanelWidget {
 
         let theme = ctx.theme;
         let dpi = ctx.dpi;
-        let offset = ctx.offset;
         let global_alpha = ctx.global_alpha;
         let mut shaper = ctx.shaper.take();
         ctx.list.clip(self.rect, |clipped_list| {
@@ -590,7 +588,6 @@ impl Widget for InspectorPanelWidget {
                 list: clipped_list,
                 theme,
                 dpi,
-                offset,
                 global_alpha,
                 shaper: shaper.as_deref_mut(),
             };

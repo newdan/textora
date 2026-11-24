@@ -462,7 +462,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         b.paint(&mut pc);
@@ -483,7 +482,6 @@ mod tests {
             list: &mut draw_list,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
 
@@ -513,7 +511,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         b.paint(&mut pc);
@@ -537,7 +534,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         b.paint(&mut pc);
@@ -557,7 +553,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         b.paint(&mut pc);
@@ -616,7 +611,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         b.paint(&mut pc);
@@ -636,7 +630,6 @@ mod tests {
             list: &mut dl,
             theme: &theme,
             dpi: 1.0,
-            offset: (0.0, 0.0),
             shaper: Some(&mut shaper),
         };
         b.paint(&mut pc);

@@ -2,6 +2,8 @@
 
 use std::ops::Range;
 
+use appkit_core::tab_set::types::TabId;
+
 use crate::editor_runtime::{EditorFocus, EditorInputContext};
 use crate::pointer_capture::{CanvasDragSession, MouseCapture};
 
@@ -22,6 +24,8 @@ pub(crate) enum TextSelectionGranularity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TextSelectionSession {
     Grapheme,
+    VisualCaret { scope: Option<Range<usize>> },
+    SourceRows { granularity: TextSelectionGranularity, pending_anchor: Option<usize> },
     AwaitingGroupedRange(TextSelectionGranularity),
     Grouped { granularity: TextSelectionGranularity, initial_range: Range<usize> },
 }
@@ -38,17 +42,20 @@ impl TextSelectionSession {
 
     fn granularity(&self) -> TextSelectionGranularity {
         match self {
-            Self::Grapheme => TextSelectionGranularity::Grapheme,
-            Self::AwaitingGroupedRange(granularity) | Self::Grouped { granularity, .. } => {
-                *granularity
-            }
+            Self::Grapheme | Self::VisualCaret { .. } => TextSelectionGranularity::Grapheme,
+            Self::AwaitingGroupedRange(granularity)
+            | Self::Grouped { granularity, .. }
+            | Self::SourceRows { granularity, .. } => *granularity,
         }
     }
 
     fn initial_range(&self) -> Option<Range<usize>> {
         match self {
             Self::Grouped { initial_range, .. } => Some(initial_range.clone()),
-            Self::Grapheme | Self::AwaitingGroupedRange(_) => None,
+            Self::Grapheme
+            | Self::VisualCaret { .. }
+            | Self::SourceRows { .. }
+            | Self::AwaitingGroupedRange(_) => None,
         }
     }
 }
@@ -60,11 +67,23 @@ impl PreeditUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CapturedCanvasDrag {
+    pub tab_id: TabId,
+    pub bounds: ui::Rect,
+    pub gesture: CanvasDragSession,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum PointerSession {
+    Idle,
+    TextSelection(TextSelectionSession),
+    CanvasDrag(CapturedCanvasDrag),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EditorInputSession {
     modifiers: winit::keyboard::ModifiersState,
-    pointer_capture: MouseCapture,
-    text_selection_session: Option<TextSelectionSession>,
-    canvas_drag_session: Option<CanvasDragSession>,
+    pointer: PointerSession,
     preedit_text: String,
     preedit_cursor: Option<(usize, usize)>,
     preferred_x: Option<f32>,
@@ -74,9 +93,7 @@ impl EditorInputSession {
     pub(crate) fn new() -> Self {
         Self {
             modifiers: winit::keyboard::ModifiersState::default(),
-            pointer_capture: MouseCapture::None,
-            text_selection_session: None,
-            canvas_drag_session: None,
+            pointer: PointerSession::Idle,
             preedit_text: String::new(),
             preedit_cursor: None,
             preferred_x: None,
@@ -103,7 +120,7 @@ impl EditorInputSession {
         if context.focus != EditorFocus::Active || context.modal_blocked {
             return false;
         }
-        self.pointer_capture != MouseCapture::None || pointer_inside_editor
+        !matches!(self.pointer, PointerSession::Idle) || pointer_inside_editor
     }
 
     pub(crate) fn start_text_selection(
@@ -114,73 +131,106 @@ impl EditorInputSession {
         if !self.keyboard_allowed(context) {
             return false;
         }
-        self.canvas_drag_session = None;
-        self.pointer_capture = MouseCapture::TextSelection;
-        self.text_selection_session = Some(TextSelectionSession::new(granularity));
-        true
-    }
-
-    pub(crate) fn start_canvas_drag(&mut self, context: EditorInputContext) -> bool {
-        if !self.keyboard_allowed(context) {
-            return false;
-        }
-        self.pointer_capture = MouseCapture::CanvasDrag;
-        self.text_selection_session = None;
+        self.pointer = PointerSession::TextSelection(TextSelectionSession::new(granularity));
         true
     }
 
     pub(crate) fn start_canvas_drag_session(
         &mut self,
         context: EditorInputContext,
-        session: CanvasDragSession,
+        session: CapturedCanvasDrag,
     ) -> bool {
-        if !self.start_canvas_drag(context) {
+        if !self.keyboard_allowed(context) {
             return false;
         }
-        self.canvas_drag_session = Some(session);
+        self.pointer = PointerSession::CanvasDrag(session);
         true
     }
 
-    pub(crate) fn canvas_drag_session_mut(&mut self) -> Option<&mut CanvasDragSession> {
-        self.canvas_drag_session.as_mut()
+    pub(crate) fn canvas_drag_session_mut(&mut self) -> Option<&mut CapturedCanvasDrag> {
+        match &mut self.pointer {
+            PointerSession::CanvasDrag(drag) => Some(drag),
+            _ => None,
+        }
     }
 
-    pub(crate) fn take_canvas_drag_session(&mut self) -> Option<CanvasDragSession> {
-        self.canvas_drag_session.take()
+    pub(crate) fn take_canvas_drag_session(&mut self) -> Option<CapturedCanvasDrag> {
+        match std::mem::replace(&mut self.pointer, PointerSession::Idle) {
+            PointerSession::CanvasDrag(drag) => Some(drag),
+            previous => {
+                self.pointer = previous;
+                None
+            }
+        }
     }
 
     pub(crate) fn end_pointer_capture(&mut self) {
-        self.pointer_capture = MouseCapture::None;
-        self.text_selection_session = None;
-        self.canvas_drag_session = None;
+        self.pointer = PointerSession::Idle;
     }
 
     pub(crate) fn pointer_capture(&self) -> MouseCapture {
-        self.pointer_capture
+        match &self.pointer {
+            PointerSession::Idle => MouseCapture::None,
+            PointerSession::CanvasDrag(_) => MouseCapture::CanvasDrag,
+            PointerSession::TextSelection(_) => MouseCapture::TextSelection,
+        }
+    }
+
+    fn text_selection(&self) -> Option<&TextSelectionSession> {
+        match &self.pointer {
+            PointerSession::TextSelection(selection) => Some(selection),
+            _ => None,
+        }
     }
 
     pub(crate) fn text_selection_granularity(&self) -> Option<TextSelectionGranularity> {
-        if self.pointer_capture != MouseCapture::TextSelection {
-            return None;
+        self.text_selection().map(TextSelectionSession::granularity)
+    }
+
+    pub(crate) fn set_visual_caret_scope(&mut self, scope: Option<Range<usize>>) {
+        if let PointerSession::TextSelection(selection) = &mut self.pointer {
+            *selection = TextSelectionSession::VisualCaret { scope };
         }
-        self.text_selection_session.as_ref().map(TextSelectionSession::granularity)
+    }
+
+    pub(crate) fn visual_caret_scope(&self) -> Option<&Range<usize>> {
+        match self.text_selection() {
+            Some(TextSelectionSession::VisualCaret { scope }) => scope.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(super) fn set_source_row_anchor(&mut self, pending_anchor: Option<usize>) {
+        if let PointerSession::TextSelection(selection) = &mut self.pointer {
+            *selection = TextSelectionSession::SourceRows {
+                granularity: selection.granularity(),
+                pending_anchor,
+            };
+        }
+    }
+
+    pub(super) fn take_source_row_anchor(&mut self) -> Option<usize> {
+        match &mut self.pointer {
+            PointerSession::TextSelection(TextSelectionSession::SourceRows {
+                pending_anchor,
+                ..
+            }) => pending_anchor.take(),
+            _ => None,
+        }
     }
 
     pub(crate) fn set_initial_text_selection_range(&mut self, initial_range: Range<usize>) {
-        let Some(TextSelectionSession::AwaitingGroupedRange(granularity)) =
-            self.text_selection_session.as_ref()
-        else {
+        let PointerSession::TextSelection(selection) = &mut self.pointer else {
             return;
         };
-        self.text_selection_session =
-            Some(TextSelectionSession::Grouped { granularity: *granularity, initial_range });
+        let TextSelectionSession::AwaitingGroupedRange(granularity) = selection else {
+            return;
+        };
+        *selection = TextSelectionSession::Grouped { granularity: *granularity, initial_range };
     }
 
     pub(crate) fn initial_text_selection_range(&self) -> Option<Range<usize>> {
-        if self.pointer_capture != MouseCapture::TextSelection {
-            return None;
-        }
-        self.text_selection_session.as_ref().and_then(TextSelectionSession::initial_range)
+        self.text_selection().and_then(TextSelectionSession::initial_range)
     }
 
     pub(crate) fn set_preferred_x(&mut self, preferred_x: Option<f32>) {
@@ -219,9 +269,7 @@ impl EditorInputSession {
     }
 
     pub(crate) fn focus_lost(&mut self) {
-        self.pointer_capture = MouseCapture::None;
-        self.text_selection_session = None;
-        self.canvas_drag_session = None;
+        self.end_pointer_capture();
         self.clear_preedit();
         self.preferred_x = None;
     }
@@ -281,7 +329,17 @@ mod tests {
         let mut session = EditorInputSession::new();
         let context = active_context();
 
-        assert!(session.start_canvas_drag(context));
+        let drag = CapturedCanvasDrag {
+            tab_id: appkit_core::tab_set::types::TabIdAllocator::new().allocate(),
+            bounds: ui::Rect::new(0.0, 0.0, 200.0, 100.0),
+            gesture: CanvasDragSession {
+                source_range: 0..1,
+                pressed_at: (50.0, 50.0),
+                source_generation: 1,
+                started: true,
+            },
+        };
+        assert!(session.start_canvas_drag_session(context, drag));
         assert_eq!(
             session.update_preedit(context, "拼音".to_owned(), Some((0, 2))),
             PreeditUpdate::Changed

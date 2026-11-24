@@ -217,30 +217,6 @@ impl Viewport {
         start..end
     }
 
-    /// Scroll by delta DisplayRows. Positive = down, negative = up.
-    /// Caller should clamp scroll_top after calling this.
-    #[deprecated(note = "Stage 5: 使用 scroll_doc_lines 或 scroll_pixels 替代。")]
-    pub fn scroll_by(&mut self, delta: f64) {
-        self.scroll_top = (self.scroll_top + delta).max(0.0);
-    }
-
-    /// Scroll to a specific DisplayRow position (fractional).
-    /// Caller should clamp scroll_top after calling this.
-    #[deprecated(note = "Stage 5: 使用 scroll_doc_lines 替代。")]
-    pub fn scroll_to_row(&mut self, row: f64) {
-        self.scroll_top = row.max(0.0);
-    }
-
-    /// Clamp scroll_top so it doesn't exceed the content bottom, then sync anchor.
-    #[deprecated(note = "Stage 5: 使用 clamp_anchor 替代。")]
-    pub fn clamp_scroll_top(&mut self, map: &impl LineMap, _line_height: f32) {
-        let total_visual = map.map_total_rows();
-        let max_visual = (total_visual as f64 - self.viewport_height).max(0.0);
-        if self.scroll_top > max_visual {
-            self.scroll_top = max_visual;
-        }
-    }
-
     /// Clamp scroll_top without WrapIndex (fallback for initialization).
     pub fn clamp_scroll_top_no_wrap(&mut self, total_lines: usize) {
         let max_visual = (total_lines as f64 - self.viewport_height).max(0.0);
@@ -253,34 +229,6 @@ impl Viewport {
     pub fn is_at_top(&self) -> bool {
         self.scroll_top < 1.0
     }
-
-    // ── ScrollAnchor methods ─────────────────────────────────────
-
-    /// 从 scroll_top 同步 scroll_anchor（通过 WrapIndex 映射）。
-    #[deprecated(
-        note = "Stage 5: anchor 是 SOT，不再需要从 scroll_top 反推。使用 scroll_doc_lines / scroll_pixels 直接设置 anchor。"
-    )]
-    pub fn sync_anchor_from_scroll(&mut self, map: &impl LineMap, line_height: f32) {
-        let display_row = self.scroll_top.floor() as usize;
-        let doc_line = map.map_display_to_doc(display_row);
-        let first_row_of_line = map.map_doc_to_display(doc_line);
-        // row_offset: 折行内第几行（0 = 该文档行的第一个显示行）
-        let row_offset = display_row.saturating_sub(first_row_of_line);
-        let sub_row = self.scroll_top.fract();
-        // pixel_offset = (折行偏移 + 亚行像素) × line_height
-        let total_offset = (row_offset as f32 + sub_row as f32) * line_height;
-        self.scroll_anchor = ScrollAnchor::new(doc_line, total_offset);
-    }
-
-    /// 从 scroll_anchor 恢复 scroll_top（通过 WrapIndex 映射）。
-    #[deprecated(note = "Stage 5: 使用 derive_scroll_top 替代。")]
-    pub fn restore_scroll_from_anchor(&mut self, map: &impl LineMap, line_height: f32) {
-        let display_row = map.map_doc_to_display(self.scroll_anchor.doc_line) as f64;
-        let lh = line_height.max(1.0) as f64;
-        self.scroll_top = display_row + self.scroll_anchor.pixel_offset as f64 / lh;
-    }
-
-    // ── Anchor-based API (Stage 5) ──────────────────────────────
 
     /// 可见的 doc_line 范围（直接从 anchor 计算）。
     ///
@@ -447,16 +395,15 @@ impl Viewport {
     // ── Doc-line convenience methods ──────────────────────────────
 
     /// Scroll to a specific document line (approximate).
-    #[allow(deprecated)]
     pub fn scroll_to_doc_line(&mut self, line: usize) {
-        self.scroll_to_row(line as f64);
+        self.scroll_anchor = ScrollAnchor::new(line, 0.0);
+        self.scroll_top = line as f64;
     }
 
     /// Scroll to a specific document line using WrapIndex (exact).
-    #[allow(deprecated)]
     pub fn scroll_to_doc_line_wrap(&mut self, line: usize, map: &impl LineMap) {
-        let display_row = map.map_doc_to_display(line);
-        self.scroll_to_row(display_row as f64);
+        self.scroll_anchor = ScrollAnchor::new(line, 0.0);
+        self.derive_scroll_top(map, 1.0);
     }
 }
 // ── Tests ───────────────────────────────────────────────────────────
@@ -570,10 +517,9 @@ mod tests {
         // Each doc_line = 1 display_row
         let map = MockLineMap { vl: 1 };
         let mut v = Viewport::new(30);
-        v.scroll_top = 42.5;
-        v.sync_anchor_from_scroll(&map, 14.0);
+        v.set_scroll_top(42.5, &map, 14.0);
         let saved_anchor = v.scroll_anchor;
-        v.restore_scroll_from_anchor(&map, 14.0);
+        v.derive_scroll_top(&map, 14.0);
         assert!(
             (v.scroll_top - 42.5).abs() < 0.01,
             "round-trip should be identity, got {:.2}",
@@ -592,12 +538,11 @@ mod tests {
         let mut v = Viewport::new(30);
         // scroll_top = 25.0 → display_row 25 → doc_line 8 (row 25 / VL 3 = 8)
         // row_offset in doc_line: 25 - 8*3 = 1
-        v.scroll_top = 25.0;
-        v.sync_anchor_from_scroll(&map, 14.0);
+        v.set_scroll_top(25.0, &map, 14.0);
         // anchor: doc_line = 8, pixel_offset = 1*14 = 14
         assert_eq!(v.scroll_anchor.doc_line, 8);
         assert!((v.scroll_anchor.pixel_offset - 14.0).abs() < 0.1);
-        v.restore_scroll_from_anchor(&map, 14.0);
+        v.derive_scroll_top(&map, 14.0);
         // restore: display_row = 8*3 = 24, + 14/14 = 1 → 25.0
         assert!(
             (v.scroll_top - 25.0).abs() < 0.01,
@@ -610,47 +555,26 @@ mod tests {
     fn anchor_roundtrip_fractional() {
         let map = MockLineMap { vl: 1 };
         let mut v = Viewport::new(30);
-        v.scroll_top = 100.3;
-        v.sync_anchor_from_scroll(&map, 10.0);
+        v.set_scroll_top(100.3, &map, 10.0);
         // doc_line = 100, pixel_offset = 0.3 * 10 = 3
         assert_eq!(v.scroll_anchor.doc_line, 100);
         assert!((v.scroll_anchor.pixel_offset - 3.0).abs() < 0.1);
-        v.restore_scroll_from_anchor(&map, 10.0);
+        v.derive_scroll_top(&map, 10.0);
         // display_row = 100, + 3/10 = 0.3 → 100.3
         assert!((v.scroll_top - 100.3).abs() < 0.01);
     }
 
     #[test]
-    fn clamp_scroll_top_does_not_write_anchor() {
-        // clamp should NOT call sync_anchor; anchor stays unchanged
+    fn deriving_scroll_top_does_not_write_anchor() {
         let map = MockLineMap { vl: 1 };
         let mut v = Viewport::new(30);
-        v.scroll_top = 500.0;
-        v.sync_anchor_from_scroll(&map, 14.0);
-        let anchor_before = v.scroll_anchor;
-        v.clamp_scroll_top(&map, 14.0);
-        assert_eq!(
-            v.scroll_anchor.doc_line, anchor_before.doc_line,
-            "clamp_scroll_top must not write anchor"
-        );
-        assert!(
-            (v.scroll_anchor.pixel_offset - anchor_before.pixel_offset).abs() < 0.1,
-            "clamp_scroll_top must not write anchor"
-        );
-    }
-
-    #[test]
-    fn restore_does_not_write_anchor() {
-        let map = MockLineMap { vl: 1 };
-        let mut v = Viewport::new(30);
-        v.scroll_top = 100.0;
-        v.sync_anchor_from_scroll(&map, 14.0);
+        v.set_scroll_top(100.0, &map, 14.0);
         let anchor_before = v.scroll_anchor;
         v.scroll_top = 200.0; // move scroll_top away
-        v.restore_scroll_from_anchor(&map, 14.0);
+        v.derive_scroll_top(&map, 14.0);
         assert_eq!(
             v.scroll_anchor.doc_line, anchor_before.doc_line,
-            "restore_scroll_from_anchor must not write anchor"
+            "derive_scroll_top must not write anchor"
         );
     }
 

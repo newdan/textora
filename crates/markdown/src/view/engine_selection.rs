@@ -1,6 +1,6 @@
 use super::*;
 
-impl<S: BlockSource> BlockViewEngine<S> {
+impl<S: BlockSource> BlockViewLayout<S> {
     // ── Scroll ──
 
     pub fn scroll(&mut self, delta: f32, viewport_h: f32) -> bool {
@@ -19,9 +19,6 @@ impl<S: BlockSource> BlockViewEngine<S> {
     // ── Selection ──
 
     pub fn hit_test(&self, px: f32, py: f32, offset_x: f32, offset_y: f32) -> Option<ViewPos> {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition.engine.hit_test(px, py, offset_x, offset_y);
-        }
         let lazy = self.lazy.as_ref()?;
         selection::hit_test(&lazy.flat_lines, self.scroll_y, px, py, offset_x, offset_y)
     }
@@ -29,36 +26,12 @@ impl<S: BlockSource> BlockViewEngine<S> {
     pub fn selection_range(&self) -> Option<(ViewPos, ViewPos)> {
         self.sel.range()
     }
-    pub fn clear_selection(&mut self) {
-        self.sel.clear();
-        self.sel_anchor_byte = None;
-        self.sel_cursor_byte = None;
-        self.mark_selection_changed();
-    }
-
-    pub fn select_all(&mut self) {
-        if let Some(lazy) = &self.lazy {
-            self.sel.select_all(&lazy.flat_lines);
-        } else if self.edit_source.is_none() {
-            return;
-        }
-        self.sel_anchor_byte = self.edit_source.as_ref().map(|_| 0);
-        self.sel_cursor_byte = self.edit_source.as_deref().map(|source| source.len());
-        self.mark_selection_changed();
-    }
-
     pub fn word_at_pos(&self, pos: ViewPos) -> (ViewPos, ViewPos) {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition.engine.word_at_pos(pos);
-        }
         let Some(ref lazy) = self.lazy else { return (pos, pos) };
         selection::word_at_pos(&lazy.flat_lines, pos)
     }
 
     pub fn line_range_at_pos(&self, pos: ViewPos) -> (ViewPos, ViewPos) {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition.engine.line_range_at_pos(pos);
-        }
         let Some(ref lazy) = self.lazy else {
             return (
                 ViewPos { flat_line_idx: pos.flat_line_idx, grapheme_pos: GraphemeIdx::new(0) },
@@ -79,15 +52,25 @@ impl<S: BlockSource> BlockViewEngine<S> {
     }
 
     pub(in crate::view) fn byte_selection_range(&self) -> Option<(usize, usize)> {
+        self.selection_source_bytes(|position| {
+            self.byte_from_flat_line_and_visual_grapheme(
+                position.flat_line_idx,
+                position.grapheme_pos,
+            )
+        })
+    }
+
+    fn selection_source_bytes(
+        &self,
+        byte_for_position: impl Fn(ViewPos) -> Option<usize>,
+    ) -> Option<(usize, usize)> {
         if let (Some(anchor), Some(cursor)) = (self.sel_anchor_byte, self.sel_cursor_byte) {
             return (anchor != cursor).then_some((anchor.min(cursor), anchor.max(cursor)));
         }
 
         let (start, end) = self.sel.range()?;
-        let start_byte =
-            self.byte_from_flat_line_and_visual_grapheme(start.flat_line_idx, start.grapheme_pos)?;
-        let end_byte =
-            self.byte_from_flat_line_and_visual_grapheme(end.flat_line_idx, end.grapheme_pos)?;
+        let start_byte = byte_for_position(start)?;
+        let end_byte = byte_for_position(end)?;
 
         if start_byte <= end_byte {
             Some((start_byte, end_byte))
@@ -96,14 +79,7 @@ impl<S: BlockSource> BlockViewEngine<S> {
         }
     }
 
-    pub fn selection_source_range(&self) -> Option<(usize, usize)> {
-        self.byte_selection_range()
-    }
-
     pub fn selection_highlights(&self, sel_color: [f32; 4]) -> DrawList {
-        if self.replacement_preedit.is_some() {
-            return DrawList::new();
-        }
         let Some(ref lazy) = self.lazy else { return DrawList::new() };
         let Some((start, end)) =
             self.sel.range().or_else(|| self.visual_range_for_byte_selection())
@@ -125,44 +101,7 @@ impl<S: BlockSource> BlockViewEngine<S> {
         self.sel.has_selection() || self.byte_selection_range().is_some()
     }
 
-    pub fn set_sel_cursor(&mut self, pos: Option<(usize, usize)>) {
-        self.sel.cursor =
-            pos.map(|(line_idx, grapheme_pos)| ViewPos::from_indices(line_idx, grapheme_pos));
-        self.sel_cursor_byte = None;
-        self.mark_selection_changed();
-    }
-
-    pub fn set_sel_anchor(&mut self, pos: Option<(usize, usize)>) {
-        self.sel.anchor =
-            pos.map(|(line_idx, grapheme_pos)| ViewPos::from_indices(line_idx, grapheme_pos));
-        self.sel_anchor_byte = None;
-        self.mark_selection_changed();
-    }
-
-    pub fn set_sel_cursor_byte(&mut self, byte: Option<usize>) {
-        if let Some(b) = byte {
-            self.sel_cursor_byte = Some(b);
-            self.sel.cursor = self.find_flat_and_grapheme_for_byte(b);
-        } else {
-            self.sel.cursor = None;
-            self.sel_cursor_byte = None;
-        }
-        self.mark_selection_changed();
-    }
-
-    pub fn set_sel_anchor_byte(&mut self, byte: Option<usize>) {
-        if let Some(b) = byte {
-            self.sel_anchor_byte = Some(b);
-            self.sel.anchor = self.find_flat_and_grapheme_for_byte(b);
-        } else {
-            self.sel.anchor = None;
-            self.sel_anchor_byte = None;
-        }
-        self.mark_selection_changed();
-    }
-
     pub(in crate::view) fn mark_selection_changed(&mut self) {
-        self.update_replacement_preedit();
         if matches!(self.dirty, EngineDirty::Clean | EngineDirty::SelectionChanged) {
             self.dirty = EngineDirty::SelectionChanged;
         }
@@ -232,28 +171,12 @@ impl<S: BlockSource> BlockViewEngine<S> {
     // ── Flat lines ──
 
     pub fn flat_lines(&self) -> &[crate::layout::FlatLine] {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition.engine.flat_lines();
-        }
         self.lazy.as_ref().map_or(&[], |l| &l.flat_lines)
     }
 
     /// Expose canonical projection boundaries for tests.
     #[cfg(test)]
     pub fn flat_line_projection_boundaries(&self) -> Vec<FlatLineProjectionBoundaries> {
-        if let Some(composition) = &self.replacement_preedit {
-            return composition
-                .engine
-                .flat_line_projection_boundaries()
-                .into_iter()
-                .map(|mut line| {
-                    for byte in &mut line.boundaries {
-                        *byte = composition.source_byte(*byte);
-                    }
-                    line
-                })
-                .collect();
-        }
         self.lazy
             .as_ref()
             .map(|lazy| {
@@ -310,5 +233,124 @@ impl<S: BlockSource> BlockViewEngine<S> {
             lazy.set_source_generation(source_generation);
         }
         self.mark_source_dirty();
+    }
+}
+
+impl<S: BlockSource> BlockViewEngine<S> {
+    pub fn hit_test(&self, px: f32, py: f32, offset_x: f32, offset_y: f32) -> Option<ViewPos> {
+        self.displayed_layout().hit_test(px, py, offset_x, offset_y)
+    }
+
+    pub fn word_at_pos(&self, pos: ViewPos) -> (ViewPos, ViewPos) {
+        self.displayed_layout().word_at_pos(pos)
+    }
+
+    pub fn line_range_at_pos(&self, pos: ViewPos) -> (ViewPos, ViewPos) {
+        self.displayed_layout().line_range_at_pos(pos)
+    }
+
+    pub fn flat_lines(&self) -> &[crate::layout::FlatLine] {
+        self.displayed_layout().flat_lines()
+    }
+
+    #[cfg(test)]
+    pub fn flat_line_projection_boundaries(&self) -> Vec<FlatLineProjectionBoundaries> {
+        let mut lines = self.displayed_layout().flat_line_projection_boundaries();
+        if let Some(replacement) = self.replacement_preedit.as_deref() {
+            for line in &mut lines {
+                for byte in &mut line.boundaries {
+                    *byte = replacement.source_byte(*byte);
+                }
+            }
+        }
+        lines
+    }
+
+    pub(in crate::view) fn byte_selection_range(&self) -> Option<(usize, usize)> {
+        self.document_layout.selection_source_bytes(|position| {
+            self.anchor_from_flat_line_and_visual_grapheme(
+                position.flat_line_idx,
+                position.grapheme_pos,
+            )
+            .map(|anchor| anchor.byte.get())
+        })
+    }
+
+    pub fn selection_highlights(&self, sel_color: [f32; 4]) -> DrawList {
+        if self.replacement_preedit.is_some() {
+            return DrawList::new();
+        }
+        self.document_layout.selection_highlights(sel_color)
+    }
+
+    pub fn handle_set_cursor_byte(&mut self, byte: usize) {
+        let previous = self.document_layout.edit_ctx.as_ref().map(|context| context.cursor_byte);
+        self.document_layout.handle_set_cursor_byte(byte);
+        if previous != Some(byte) {
+            self.update_replacement_preedit();
+        }
+    }
+
+    fn mark_selection_changed(&mut self) {
+        self.update_replacement_preedit();
+        self.document_layout.mark_selection_changed();
+    }
+
+    pub fn selection_source_range(&self) -> Option<(usize, usize)> {
+        self.byte_selection_range()
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.sel.clear();
+        self.sel_anchor_byte = None;
+        self.sel_cursor_byte = None;
+        self.mark_selection_changed();
+    }
+
+    pub fn select_all(&mut self) {
+        if let Some(lazy) = &self.document_layout.lazy {
+            self.document_layout.sel.select_all(&lazy.flat_lines);
+        } else if self.document_layout.edit_source.is_none() {
+            return;
+        }
+        self.sel_anchor_byte = self.edit_source.as_ref().map(|_| 0);
+        self.sel_cursor_byte = self.edit_source.as_deref().map(|source| source.len());
+        self.mark_selection_changed();
+    }
+
+    pub fn set_sel_cursor(&mut self, pos: Option<(usize, usize)>) {
+        self.sel.cursor =
+            pos.map(|(line_idx, grapheme_pos)| ViewPos::from_indices(line_idx, grapheme_pos));
+        self.sel_cursor_byte = None;
+        self.mark_selection_changed();
+    }
+
+    pub fn set_sel_anchor(&mut self, pos: Option<(usize, usize)>) {
+        self.sel.anchor =
+            pos.map(|(line_idx, grapheme_pos)| ViewPos::from_indices(line_idx, grapheme_pos));
+        self.sel_anchor_byte = None;
+        self.mark_selection_changed();
+    }
+
+    pub fn set_sel_cursor_byte(&mut self, byte: Option<usize>) {
+        if let Some(b) = byte {
+            self.sel_cursor_byte = Some(b);
+            self.sel.cursor = self.find_flat_and_grapheme_for_byte(b);
+        } else {
+            self.sel.cursor = None;
+            self.sel_cursor_byte = None;
+        }
+        self.mark_selection_changed();
+    }
+
+    pub fn set_sel_anchor_byte(&mut self, byte: Option<usize>) {
+        if let Some(b) = byte {
+            self.sel_anchor_byte = Some(b);
+            self.sel.anchor = self.find_flat_and_grapheme_for_byte(b);
+        } else {
+            self.sel.anchor = None;
+            self.sel_anchor_byte = None;
+        }
+        self.mark_selection_changed();
     }
 }

@@ -1,5 +1,4 @@
 use crate::mmf::model::{GlobalPropertySource, Node, Tree};
-use crate::mmf::utils::{collect_nodes_dfs, find_siblings};
 use ui::plugin::{
     EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, TextReplacement,
 };
@@ -17,10 +16,9 @@ pub(crate) enum MoveSubtreeTarget {
 ///
 /// 此函数只读取解析树、源码和请求；文档写入由 app 层统一执行事务。
 pub fn plan_mindmap_edit(tree: &Tree, source: &str, request: &EditRequest) -> EditPlan {
-    let Some(node) = focused_node(tree, request) else {
+    let Some((node_index, node)) = focused_node(tree, request) else {
         return EditPlan::Consume;
     };
-    let node_index = node_index(tree, node).expect("focused node always belongs to its tree");
     let node_selected = request.selection.as_ref() == Some(&node.subtree_source_range);
 
     match &request.intent {
@@ -47,21 +45,21 @@ pub fn plan_mindmap_edit(tree: &Tree, source: &str, request: &EditRequest) -> Ed
             if node_index == 0 {
                 EditPlan::Consume
             } else {
-                plan_promote_subtree(request, node)
+                plan_promote_subtree(tree, request, node_index, node)
             }
         }
         EditIntent::DemoteObject => {
-            if node_index == 0 || !has_previous_sibling(tree, node_index) {
+            if node_index == 0 || tree.sibling_slot(node_index) == Some(0) {
                 EditPlan::Consume
             } else {
-                plan_demote_subtree(request, node)
+                plan_demote_subtree(tree, request, node_index, node)
             }
         }
         EditIntent::DeleteBackward | EditIntent::DeleteForward if node_selected => {
             if node_index == 0 {
                 EditPlan::Consume
             } else {
-                plan_delete_subtree(tree, request, node)
+                plan_delete_subtree(tree, request, node_index, node)
             }
         }
         EditIntent::DeleteBackward => {
@@ -94,16 +92,20 @@ pub fn plan_new_child(source: &str, request: &EditRequest, node: &Node) -> EditP
 }
 
 /// 将当前节点和所有后代提升一级，只删除解析器确认的标题 marker。
-pub fn plan_promote_subtree(request: &EditRequest, node: &Node) -> EditPlan {
-    let nodes = collect_nodes_dfs(node);
-    let replacements = nodes
-        .iter()
+fn plan_promote_subtree(
+    tree: &Tree,
+    request: &EditRequest,
+    node_index: usize,
+    node: &Node,
+) -> EditPlan {
+    let replacements = tree
+        .subtree_nodes(node_index)
         .map(|descendant| TextReplacement {
             range: descendant.heading_marker_range.end - 1..descendant.heading_marker_range.end,
             text: String::new(),
         })
         .collect::<Vec<_>>();
-    let selection_after = level_change_selection(node, request, -(nodes.len() as isize));
+    let selection_after = level_change_selection(node, request, -(replacements.len() as isize));
 
     EditPlan::Apply(EditTransaction {
         source_generation: request.source_generation,
@@ -113,16 +115,20 @@ pub fn plan_promote_subtree(request: &EditRequest, node: &Node) -> EditPlan {
 }
 
 /// 将当前节点和所有后代降级一级，只修改解析器确认的标题 marker。
-pub fn plan_demote_subtree(request: &EditRequest, node: &Node) -> EditPlan {
-    let nodes = collect_nodes_dfs(node);
-    let replacements = nodes
-        .iter()
+fn plan_demote_subtree(
+    tree: &Tree,
+    request: &EditRequest,
+    node_index: usize,
+    node: &Node,
+) -> EditPlan {
+    let replacements = tree
+        .subtree_nodes(node_index)
         .map(|descendant| TextReplacement {
             range: descendant.heading_marker_range.end..descendant.heading_marker_range.end,
             text: "#".into(),
         })
         .collect::<Vec<_>>();
-    let selection_after = level_change_selection(node, request, nodes.len() as isize);
+    let selection_after = level_change_selection(node, request, replacements.len() as isize);
 
     EditPlan::Apply(EditTransaction {
         source_generation: request.source_generation,
@@ -132,12 +138,17 @@ pub fn plan_demote_subtree(request: &EditRequest, node: &Node) -> EditPlan {
 }
 
 /// 删除当前节点及其后代，并把选择恢复到相邻的可见对象。
-pub fn plan_delete_subtree(tree: &Tree, request: &EditRequest, node: &Node) -> EditPlan {
-    let delete_range = subtree_delete_range(node);
+fn plan_delete_subtree(
+    tree: &Tree,
+    request: &EditRequest,
+    node_index: usize,
+    node: &Node,
+) -> EditPlan {
+    let delete_range = node.subtree_source_range.clone();
     EditPlan::Apply(EditTransaction {
         source_generation: request.source_generation,
         replacements: vec![TextReplacement { range: delete_range.clone(), text: String::new() }],
-        selection_after: selection_after_subtree_deletion(tree, node, &delete_range),
+        selection_after: selection_after_subtree_deletion(tree, node_index, &delete_range),
     })
 }
 
@@ -148,15 +159,10 @@ pub(crate) fn plan_toggle_collapsed(
     node_range: std::ops::Range<usize>,
     source_generation: u32,
 ) -> EditPlan {
-    let nodes = collect_nodes_dfs(&tree.root);
-    let Some(node_index) = nodes.iter().position(|node| node.subtree_source_range == node_range)
-    else {
+    let Some(node_index) = tree.subtree_index(&node_range).filter(|index| *index != 0) else {
         return EditPlan::Consume;
     };
-    if node_index == 0 {
-        return EditPlan::Consume;
-    }
-    let node = nodes[node_index];
+    let node = tree.node(node_index).expect("subtree ranges refer to indexed source nodes");
     if node.children.is_empty() {
         return EditPlan::Consume;
     }
@@ -203,29 +209,28 @@ pub fn plan_set_mindmap_theme(
     if current_theme.unwrap_or(ui::theme::DEFAULT_MINDMAP_COLOR_SCHEME_ID) == theme_id {
         return EditPlan::Consume;
     }
-    match crate::mmf::parser::parse_global_property_source(source) {
-        Err(_) => EditPlan::Consume,
-        Ok(Some(property_source)) => plan_existing_global_block(
+    match &tree.global_property_source {
+        Some(property_source) => plan_existing_global_block(
             source,
             property_source,
             theme_id,
             source_generation,
             cursor_byte,
         ),
-        Ok(None) => plan_new_global_block(source, tree, theme_id, source_generation, cursor_byte),
+        None => plan_new_global_block(source, tree, theme_id, source_generation, cursor_byte),
     }
 }
 
 fn plan_existing_global_block(
     source: &str,
-    property_source: GlobalPropertySource,
+    property_source: &GlobalPropertySource,
     theme_id: &str,
     source_generation: u32,
     cursor_byte: usize,
 ) -> EditPlan {
     let newline = document_newline(source);
-    let (range, text) = match property_source.theme_value_range {
-        Some(value_range) => (value_range, format!("\"{theme_id}\"")),
+    let (range, text) = match &property_source.theme_value_range {
+        Some(value_range) => (value_range.clone(), format!("\"{theme_id}\"")),
         None => (
             property_source.body_range.end..property_source.body_range.end,
             format!("theme = \"{theme_id}\"{newline}"),
@@ -250,7 +255,7 @@ fn plan_new_global_block(
     cursor_byte: usize,
 ) -> EditPlan {
     let newline = document_newline(source);
-    let insertion_byte = tree.root.source_range.start;
+    let insertion_byte = tree.root().source_range.start;
     let text = format!(
         "```toml mindmap{newline}version = 1{newline}theme = \"{theme_id}\"{newline}```{newline}{newline}"
     );
@@ -290,24 +295,15 @@ pub(crate) fn plan_move_subtree(
     target: MoveSubtreeTarget,
     source_generation: u32,
 ) -> EditPlan {
-    let nodes = collect_nodes_dfs(&tree.root);
-    let Some(source_index) =
-        nodes.iter().position(|node| node.subtree_source_range == source_range)
-    else {
+    let Some(source_index) = tree.subtree_index(&source_range).filter(|index| *index != 0) else {
         return EditPlan::Consume;
     };
-    if source_index == 0 {
-        return EditPlan::Consume;
-    }
-    let Some(anchor_index) =
-        nodes.iter().position(|node| node.subtree_source_range == anchor_range)
-    else {
+    let Some(anchor_index) = tree.subtree_index(&anchor_range) else {
         return EditPlan::Consume;
     };
-
-    let source_node = nodes[source_index];
-    let anchor_node = nodes[anchor_index];
-    if collect_nodes_dfs(source_node).into_iter().any(|node| std::ptr::eq(node, anchor_node)) {
+    let source_node = tree.node(source_index).expect("source range refers to an indexed node");
+    let anchor_node = tree.node(anchor_index).expect("anchor range refers to an indexed node");
+    if tree.subtree_indices(source_index).is_some_and(|subtree| subtree.contains(&anchor_index)) {
         return EditPlan::Consume;
     }
 
@@ -324,8 +320,12 @@ pub(crate) fn plan_move_subtree(
     let Some(target_heading_level) = anchor_node.heading_level.checked_add(sibling_offset) else {
         return EditPlan::Consume;
     };
-    let Some(releveled_headings) = releveled_heading_levels(source_node, target_heading_level)
-    else {
+    let Some(releveled_headings) = releveled_heading_levels(
+        tree,
+        source_index,
+        source_node.heading_level,
+        target_heading_level,
+    ) else {
         return EditPlan::Consume;
     };
     let Some(source_block) = source.get(source_node.subtree_source_range.clone()) else {
@@ -391,13 +391,14 @@ pub(crate) fn plan_move_subtree(
 }
 
 fn releveled_heading_levels(
-    source_node: &Node,
+    tree: &Tree,
+    source_index: usize,
+    source_heading_level: u8,
     target_heading_level: u8,
 ) -> Option<Vec<(&Node, u8)>> {
-    collect_nodes_dfs(source_node)
-        .into_iter()
+    tree.subtree_nodes(source_index)
         .map(|node| {
-            let relative_depth = node.heading_level.checked_sub(source_node.heading_level)?;
+            let relative_depth = node.heading_level.checked_sub(source_heading_level)?;
             let releveled_heading = target_heading_level.checked_add(relative_depth)?;
             Some((node, releveled_heading))
         })
@@ -445,32 +446,20 @@ fn ensure_block_boundaries(
     BoundaryAdjustedBlock { text: moved_block, prefix_len }
 }
 
-fn focused_node<'a>(tree: &'a Tree, request: &EditRequest) -> Option<&'a Node> {
-    let nodes = collect_nodes_dfs(&tree.root);
+fn focused_node<'a>(tree: &'a Tree, request: &EditRequest) -> Option<(usize, &'a Node)> {
     if let Some(selection) = &request.selection {
-        if let Some(node) = nodes.iter().find(|node| node.subtree_source_range == *selection) {
-            return Some(*node);
+        if let Some(node_index) = tree.subtree_index(selection) {
+            return tree.node(node_index).map(|node| (node_index, node));
         }
-        return nodes.into_iter().find(|node| {
+        return tree.nodes().enumerate().find(|(_, node)| {
             selection.start >= node.title_byte_range.start
                 && selection.end <= node.title_byte_range.end
         });
     }
-    nodes.into_iter().find(|node| {
+    tree.nodes().enumerate().find(|(_, node)| {
         request.cursor_byte >= node.title_byte_range.start
             && request.cursor_byte <= node.title_byte_range.end
     })
-}
-
-fn node_index(tree: &Tree, target: &Node) -> Option<usize> {
-    collect_nodes_dfs(&tree.root).iter().position(|node| std::ptr::eq(*node, target))
-}
-
-fn has_previous_sibling(tree: &Tree, node_index: usize) -> bool {
-    let Some(siblings) = find_siblings(tree, node_index) else {
-        return false;
-    };
-    siblings.first().copied() != Some(node_index)
 }
 
 fn plan_title_text_insertion(
@@ -609,26 +598,16 @@ fn insertion_plan(
     ))
 }
 
-fn subtree_delete_range(node: &Node) -> std::ops::Range<usize> {
-    node.subtree_source_range.clone()
-}
-
 fn selection_after_subtree_deletion(
     tree: &Tree,
-    deleted_node: &Node,
+    deleted_index: usize,
     delete_range: &std::ops::Range<usize>,
 ) -> EditSelection {
-    let nodes = collect_nodes_dfs(&tree.root);
-    let Some(deleted_index) = nodes.iter().position(|node| std::ptr::eq(*node, deleted_node))
-    else {
-        return EditSelection::Caret(delete_range.start);
-    };
-
     let target = deleted_index
         .checked_sub(1)
-        .and_then(|index| nodes.get(index).copied())
-        .or_else(|| crate::mmf::utils::find_parent(tree, deleted_index))
-        .or_else(|| nodes.get(deleted_index + 1).copied());
+        .or_else(|| tree.parent_index(deleted_index))
+        .and_then(|index| tree.node(index))
+        .or_else(|| tree.node(deleted_index + 1));
 
     target
         .map(|node| selected_object_after_deletion(node, delete_range))

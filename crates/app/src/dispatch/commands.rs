@@ -51,18 +51,17 @@ impl App {
 
     fn open_recent_file_path(&mut self, path: &std::path::Path) -> Result<AppEffect, String> {
         let view_state = RecentFileViewState::from_history_entry(
-            self.file_history.entries.iter().find(|entry| entry.file_path == path),
+            self.workspace_services.history().entries.iter().find(|entry| entry.file_path == path),
         );
         let workspace_effect = if let Some(tab_id) = self.editor_tab_id_for_path(path) {
             self.activate_editor_tab(tab_id)
-                .unwrap_or(appkit_shell::editor_tab_set::WorkspaceEffect::None)
         } else {
             let viewport = self.viewport_dimensions(self.screen_height());
             let ProductPreparedTab { prepared, suggested_file_name } =
                 self.prepare_editor_file(path, viewport)?;
             self.install_editor_tab(prepared, suggested_file_name, OpenDisposition::Persistent)
         };
-        let app_effect = self.apply_workspace_effect(workspace_effect);
+        let app_effect = self.apply_editor_tab_outcome(workspace_effect);
 
         if let Some(mut tab) = self.active_tab_session_mut() {
             let document = tab.document_mut();
@@ -200,7 +199,7 @@ impl App {
                 effect = effect.merge(self.dispatch_edit_command(cmd, event_loop));
             }
             crate::menu_handler::AppCommand::ClearRecentFiles => {
-                self.file_history.entries.clear();
+                self.workspace_services.clear_history();
                 self.save_history();
             }
             crate::menu_handler::AppCommand::OpenRecentFile(idx) => {
@@ -218,10 +217,10 @@ impl App {
                 }
             }
             crate::menu_handler::AppCommand::ZoomIn => {
-                effect = effect.merge(self.apply_zoom(self.settings.font_size + 1.0));
+                effect = effect.merge(self.apply_zoom(self.persisted_font_size() + 1.0));
             }
             crate::menu_handler::AppCommand::ZoomOut => {
-                effect = effect.merge(self.apply_zoom((self.settings.font_size - 1.0).max(6.0)));
+                effect = effect.merge(self.apply_zoom((self.persisted_font_size() - 1.0).max(6.0)));
             }
             crate::menu_handler::AppCommand::ZoomReset => {
                 effect = effect.merge(self.reset_canvas_view_or_font_size());
@@ -231,7 +230,7 @@ impl App {
                     .merge(self.dispatch_settings_action(SettingsDispatchAction::ToggleStatusBar));
             }
             crate::menu_handler::AppCommand::ToggleTabBar => {
-                let new_mode = match self.settings.view_mode {
+                let new_mode = match self.editor_runtime.settings().view_mode {
                     ui::view_mode::ViewMode::Tabs => ui::view_mode::ViewMode::Sidebar,
                     ui::view_mode::ViewMode::Sidebar => ui::view_mode::ViewMode::Tabs,
                 };
@@ -379,8 +378,8 @@ mod recent_file_tests {
         let path = directory.path().join("recent.md");
         std::fs::write(&path, "zero\none\ntwo\nlast")
             .expect("recent-file fixture should be writable");
-        let mut app = App::new(None);
-        app.file_history.entries = vec![history_entry(&path, 2, 2, 3, 8.5)];
+        let mut app = App::new_with_test_home(directory.path());
+        app.workspace_services.record_history(history_entry(&path, 2, 2, 3, 8.5));
 
         let effect =
             app.open_recent_file_path(&path).expect("new recent file should prepare and open");
@@ -413,12 +412,12 @@ mod recent_file_tests {
         let path = directory.path().join("existing.txt");
         std::fs::write(&path, "first\nsecond\nthird")
             .expect("recent-file fixture should be writable");
-        let mut app = App::new(None);
+        let mut app = App::new_with_test_home(directory.path());
         let _ = app.open_file(&path).expect("fixture file should open");
         let existing_id = app.active_tab_id().expect("fixture file should have a tab id");
         let _ = app.new_untitled_doc();
         let tab_count_before_reopen = app.editor_tab_count();
-        app.file_history.entries = vec![history_entry(&path, 1, 3, 2, 4.25)];
+        app.workspace_services.record_history(history_entry(&path, 1, 3, 2, 4.25));
         std::fs::remove_file(&path)
             .expect("source deletion should prove existing-tab short-circuiting");
 
@@ -469,7 +468,7 @@ mod recent_file_tests {
             .active_overlay_widget_ref::<ui::modal_frame::ModalFrame>()
             .expect("table picker should be shown in a modal frame");
         assert!(frame.content_as_any().is::<ui::table_picker::TablePickerWidget>());
-        let theme = app.current_theme.clone();
+        let theme = app.editor_runtime.theme().clone();
         let dpi = app.ui_metrics().dpi;
         assert!(matches!(
             app.ui_shell.forward_key(ui::KeyCode::Right, ui::Modifiers::NONE, &theme, dpi),
@@ -623,7 +622,7 @@ mod tests {
             .canvas_viewport
             .snapshot()
             .expect("prepared canvas viewport must retain a snapshot");
-        let font_size_before = app.settings.font_size;
+        let font_size_before = app.editor_runtime.settings().font_size;
         let _ = app.apply_canvas_viewport_action(CanvasViewportAction::ZoomBy {
             factor: 1.25,
             screen_anchor: ui::canvas::CanvasPoint::new(500.0, 400.0),
@@ -639,18 +638,18 @@ mod tests {
             .snapshot()
             .expect("prepared canvas viewport must retain a snapshot");
         assert_eq!(reset, initial);
-        assert_eq!(app.settings.font_size, font_size_before);
+        assert_eq!(app.editor_runtime.settings().font_size, font_size_before);
     }
 
     #[test]
     fn non_canvas_zoom_reset_keeps_global_font_size_semantics() {
         let mut app = App::new(None);
-        app.settings.font_size = 20.0;
+        app.editor_runtime.edit_settings(|settings| settings.font_size = 20.0);
 
         let effect = app.reset_canvas_view_or_font_size();
 
         assert!(effect.reshape);
-        assert_eq!(app.settings.font_size, 15.0);
+        assert_eq!(app.editor_runtime.settings().font_size, 15.0);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use crate::encrypted_note_unlock::EncryptedNoteUnlockAction;
 use notora_core::{DocumentIdentity, DocumentKind};
 use ui::WidgetAction;
 use ui::core::widget::{ControlAction, TextPayload};
+use ui::editor_toolbar::EditorToolbarAction;
 use ui::popup_menu::{PopupMenuAction, PopupOutcome};
 use ui::sidebar::NewDocumentKind;
 use ui::splitter::SplitterAction;
@@ -48,10 +49,9 @@ impl NotoraShell {
                 id: ui::tag_editor::TAG_EDITOR_SUGGESTION_ID,
                 value: TextPayload::Plain(option_key),
             }) => self.editor_tag_actions.get(option_key).cloned(),
-            WidgetAction::Control(ControlAction::TextCommitted {
-                id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
-                value: TextPayload::Plain(command_key),
-            }) => self.editor_command_actions.get(command_key).cloned(),
+            WidgetAction::EditorToolbar(EditorToolbarAction::CommandInvoked(command_key)) => {
+                self.editor_command_actions.get(command_key).cloned()
+            }
             WidgetAction::InspectorPanel(action) => self
                 .inspector_panel_stamp
                 .as_ref()?

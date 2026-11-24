@@ -11,6 +11,7 @@ mod widget_actions;
 mod tests;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::encrypted_note_dialog::EncryptedNoteDialog;
 pub use crate::encrypted_note_dialog::{EncryptedNoteDialogInput, EncryptedNoteDialogMode};
@@ -30,7 +31,7 @@ use ui::splitter::SplitterWidget;
 use ui::status_state::{StatusStateInput, StatusStateKind, StatusStateWidget};
 use ui::text_box::TextBox;
 use ui::tooltip::TooltipHint;
-use ui::tree_list::{TreeListInput, TreeListWidget, TreeRowActionKey, TreeRowKey};
+use ui::tree_list::{TreeListInput, TreeListWidget, TreeRowActionKey, TreeRowInput, TreeRowKey};
 use ui::virtual_card_list::{
     CardInput, CardKey, CardSelection, VirtualCardListInput, VirtualCardListWidget,
 };
@@ -56,6 +57,7 @@ pub(crate) use self::editor_model::{
     editor_toolbar_input_for_plugin, selected_editor_pane_mode,
 };
 pub use self::event_routing::{CanvasViewCommand, NotoraEventRoute};
+pub(crate) use self::model::NotoraRenderCache;
 pub use self::model::{ConfirmationOverlayInput, NotoraRenderModel, SaveConflictOverlayInput};
 pub(crate) use self::painting::editor_inspector_rects;
 
@@ -96,9 +98,9 @@ pub struct NotoraShell {
     new_document_menu: Option<PopupMenuWidget>,
     editor_pane: EditorPaneChrome,
     editor_note_id: Option<NoteId>,
-    editor_location_actions: HashMap<String, NotoraAction>,
-    editor_tag_actions: HashMap<String, NotoraAction>,
-    editor_command_actions: HashMap<String, NotoraAction>,
+    editor_location_actions: Arc<HashMap<String, NotoraAction>>,
+    editor_tag_actions: Arc<HashMap<String, NotoraAction>>,
+    editor_command_actions: Arc<HashMap<String, NotoraAction>>,
     inspector_panel: InspectorPanelWidget,
     inspector_panel_stamp: Option<InspectorPanelStamp>,
     inspector_panel_rect: Rect,
@@ -113,9 +115,10 @@ pub struct NotoraShell {
     encrypted_note_unlock: Option<EncryptedNoteUnlock>,
     encrypted_note_unlock_input: EncryptedNoteUnlockInput,
     encrypted_note_unlock_open: bool,
-    navigation_actions: HashMap<TreeRowKey, NotoraAction>,
-    navigation_trailing_actions: HashMap<(TreeRowKey, TreeRowActionKey), NotoraAction>,
-    navigation_expansion_paths: HashMap<TreeRowKey, std::path::PathBuf>,
+    navigation_rows: Arc<Vec<TreeRowInput>>,
+    navigation_actions: Arc<HashMap<TreeRowKey, NotoraAction>>,
+    navigation_trailing_actions: Arc<HashMap<(TreeRowKey, TreeRowActionKey), NotoraAction>>,
+    navigation_expansion_paths: Arc<HashMap<TreeRowKey, std::path::PathBuf>>,
     card_identities: HashMap<CardKey, DocumentIdentity>,
     card_keys: HashMap<DocumentIdentity, CardKey>,
     next_card_key: u64,
@@ -158,9 +161,14 @@ impl NotoraShell {
         new_note_button.set_presentation(ui::split_button::SplitButtonPresentation::Toolbar);
         new_note_button.set_action_ids(NEW_NOTE_BUTTON_ID, NEW_NOTE_MENU_BUTTON_ID);
         new_note_button.set_icon(Some("plus".to_owned()));
+        let mut navigation_tree = TreeListWidget::new().with_id(NAVIGATION_TREE_ID);
+        navigation_tree.set_section_starts(vec![
+            TreeRowKey(STARRED_NAVIGATION_KEY),
+            TreeRowKey(TRASH_NAVIGATION_KEY),
+        ]);
         Self {
             search_box,
-            navigation_tree: TreeListWidget::new().with_id(NAVIGATION_TREE_ID),
+            navigation_tree,
             active_tooltip: None,
             card_list: VirtualCardListWidget::new(),
             card_empty_state: StatusStateWidget::new(),
@@ -176,9 +184,9 @@ impl NotoraShell {
             new_document_menu: None,
             editor_pane: EditorPaneChrome::new(),
             editor_note_id: None,
-            editor_location_actions: HashMap::new(),
-            editor_tag_actions: HashMap::new(),
-            editor_command_actions: HashMap::new(),
+            editor_location_actions: Arc::default(),
+            editor_tag_actions: Arc::default(),
+            editor_command_actions: Arc::default(),
             inspector_panel: InspectorPanelWidget::new(),
             inspector_panel_stamp: None,
             inspector_panel_rect: Rect::ZERO,
@@ -193,9 +201,10 @@ impl NotoraShell {
             encrypted_note_unlock: None,
             encrypted_note_unlock_input: EncryptedNoteUnlockInput::new(String::new()),
             encrypted_note_unlock_open: false,
-            navigation_actions: HashMap::new(),
-            navigation_trailing_actions: HashMap::new(),
-            navigation_expansion_paths: HashMap::new(),
+            navigation_rows: Arc::default(),
+            navigation_actions: Arc::default(),
+            navigation_trailing_actions: Arc::default(),
+            navigation_expansion_paths: Arc::default(),
             card_identities: HashMap::new(),
             card_keys: HashMap::new(),
             next_card_key: 1,
@@ -236,9 +245,7 @@ impl NotoraShell {
     }
 
     pub fn update_model(&mut self, model: &NotoraRenderModel) {
-        self.navigation_actions.clone_from(&model.navigation_actions);
-        self.navigation_trailing_actions.clone_from(&model.navigation_trailing_actions);
-        self.navigation_expansion_paths.clone_from(&model.navigation_expansion_paths);
+        self.update_navigation_model(model);
         self.card_identities.clear();
         let cards = model
             .cards
@@ -262,15 +269,6 @@ impl NotoraShell {
                 }
             })
             .collect();
-        self.navigation_tree.set_section_starts(vec![
-            TreeRowKey(STARRED_NAVIGATION_KEY),
-            TreeRowKey(TRASH_NAVIGATION_KEY),
-        ]);
-        self.navigation_tree.set_input(TreeListInput {
-            rows: model.navigation_rows.clone(),
-            editor: model.navigation_editor.clone(),
-            scroll_offset_px: 0.0,
-        });
         self.card_list.set_input(VirtualCardListInput {
             cards,
             scroll_offset_px: model.card_scroll_offset_px,
@@ -306,9 +304,9 @@ impl NotoraShell {
             model.save_conflict.as_ref().map(|conflict| conflict.actions.clone());
         self.editor_pane.set_input(model.editor_chrome.clone());
         self.editor_note_id = model.editor_note_id;
-        self.editor_location_actions.clone_from(&model.editor_location_actions);
-        self.editor_tag_actions.clone_from(&model.editor_tag_actions);
-        self.editor_command_actions.clone_from(&model.editor_command_actions);
+        self.editor_location_actions = Arc::clone(&model.editor_location_actions);
+        self.editor_tag_actions = Arc::clone(&model.editor_tag_actions);
+        self.editor_command_actions = Arc::clone(&model.editor_command_actions);
         self.card_empty_state.set_input(model.card_empty_state.clone());
         self.card_empty_state_visible = model.cards.is_empty();
         self.editor_empty_state.set_input(StatusStateInput {
@@ -318,6 +316,23 @@ impl NotoraShell {
             icon: Some("file-text".to_owned()),
             action_label: None,
             action_id: None,
+        });
+    }
+
+    fn update_navigation_model(&mut self, model: &NotoraRenderModel) {
+        self.navigation_actions = Arc::clone(&model.navigation_actions);
+        self.navigation_trailing_actions = Arc::clone(&model.navigation_trailing_actions);
+        self.navigation_expansion_paths = Arc::clone(&model.navigation_expansion_paths);
+        if Arc::ptr_eq(&self.navigation_rows, &model.navigation_rows)
+            && self.navigation_tree.input().editor == model.navigation_editor
+        {
+            return;
+        }
+        self.navigation_rows = Arc::clone(&model.navigation_rows);
+        self.navigation_tree.set_input(TreeListInput {
+            rows: model.navigation_rows.as_ref().clone(),
+            editor: model.navigation_editor.clone(),
+            scroll_offset_px: 0.0,
         });
     }
 

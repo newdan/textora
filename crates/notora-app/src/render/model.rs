@@ -1,11 +1,13 @@
 //! 从产品状态构建整帧输入，包含导航树和弹层。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::encrypted_note_dialog::EncryptedNoteDialogInput;
 use crate::encrypted_note_unlock::EncryptedNoteUnlockInput;
 use appkit_shell::inspector_panel::MountedInspectorPanel;
-use notora_core::{DocumentIdentity, NavigationScope, NoteId};
+use notora_core::{DocumentIdentity, NavigationScope, NoteId, TagSummary};
 use ui::status_state::StatusStateInput;
 use ui::tree_list::{
     TreeRowActionInput, TreeRowActionKey, TreeRowEditorInput, TreeRowExpansion, TreeRowInput,
@@ -19,7 +21,7 @@ use crate::settings::ProductSettings;
 use crate::settings_overlay::SettingsOverlayInput;
 use crate::state::{
     DirectoryCreationState, EncryptedConflictCopyState, EncryptedNoteCreationState,
-    EncryptedNoteUnlockState, WorkspaceCreationState,
+    EncryptedNoteUnlockState, NavigationTreeState, WorkspaceCreationState,
 };
 use crate::{NotoraState, OverlayState, WorkspaceRootState};
 
@@ -29,6 +31,7 @@ use super::card_model::{
 };
 use super::editor_model::{
     EditorPaneState, editor_action_maps, editor_command_actions, editor_pane_input,
+    metadata_for_selection,
 };
 
 pub(super) const WORKSPACE_NAVIGATION_KEY: u64 = 1;
@@ -47,10 +50,10 @@ pub(super) const DIRECTORY_EDITOR_KEY: TreeRowKey = TreeRowKey(u64::MAX - 1);
 #[derive(Clone, Debug, Default)]
 pub struct NotoraRenderModel {
     pub search_query: String,
-    pub navigation_rows: Vec<TreeRowInput>,
-    pub navigation_actions: HashMap<TreeRowKey, NotoraAction>,
-    pub navigation_trailing_actions: HashMap<(TreeRowKey, TreeRowActionKey), NotoraAction>,
-    pub navigation_expansion_paths: HashMap<TreeRowKey, std::path::PathBuf>,
+    pub navigation_rows: Arc<Vec<TreeRowInput>>,
+    pub navigation_actions: Arc<HashMap<TreeRowKey, NotoraAction>>,
+    pub navigation_trailing_actions: Arc<HashMap<(TreeRowKey, TreeRowActionKey), NotoraAction>>,
+    pub navigation_expansion_paths: Arc<HashMap<TreeRowKey, std::path::PathBuf>>,
     pub navigation_editor: Option<TreeRowEditorInput>,
     pub cards: Vec<RenderCard>,
     pub selected_card: Option<DocumentIdentity>,
@@ -69,9 +72,9 @@ pub struct NotoraRenderModel {
     pub save_conflict: Option<SaveConflictOverlayInput>,
     pub editor_chrome: EditorPaneInput,
     pub editor_note_id: Option<NoteId>,
-    pub editor_location_actions: HashMap<String, NotoraAction>,
-    pub editor_tag_actions: HashMap<String, NotoraAction>,
-    pub editor_command_actions: HashMap<String, NotoraAction>,
+    pub editor_location_actions: Arc<HashMap<String, NotoraAction>>,
+    pub editor_tag_actions: Arc<HashMap<String, NotoraAction>>,
+    pub editor_command_actions: Arc<HashMap<String, NotoraAction>>,
     pub inspector_panel: Option<MountedInspectorPanel>,
     pub editor_pane: EditorPaneState,
 }
@@ -102,6 +105,144 @@ impl NotoraRenderModel {
         state: &NotoraState,
         product_settings: &ProductSettings,
     ) -> Self {
+        Self::with_cache(state, product_settings, &mut NotoraRenderCache::default())
+    }
+
+    pub(crate) fn with_cache(
+        state: &NotoraState,
+        product_settings: &ProductSettings,
+        cache: &mut NotoraRenderCache,
+    ) -> Self {
+        let (navigation, editor_routes) = cache.project_routes(state);
+        let selected_scope = &state.library.navigation_scope;
+        let search_query = state.library.search_text.clone();
+        let cards = render_cards(state);
+        let selected_note_id = state.library.selected_card.and_then(|identity| match identity {
+            DocumentIdentity::Note(note_id)
+                if cards.iter().any(|card| card.identity == identity) =>
+            {
+                Some(note_id)
+            }
+            DocumentIdentity::ExternalFile(_) => None,
+            DocumentIdentity::Note(_) => None,
+        });
+        let editor_note_id = state.library.selected_card.and_then(|identity| match identity {
+            DocumentIdentity::Note(note_id) => Some(note_id),
+            DocumentIdentity::ExternalFile(_) => None,
+        });
+        let editor_chrome = editor_pane_input(state, &cards);
+        let external_files_present =
+            *selected_scope == NavigationScope::ExternalFiles && !cards.is_empty();
+        Self {
+            search_query,
+            navigation_rows: Arc::clone(&navigation.navigation_rows),
+            navigation_actions: Arc::clone(&navigation.navigation_actions),
+            navigation_trailing_actions: Arc::clone(&navigation.navigation_trailing_actions),
+            navigation_expansion_paths: Arc::clone(&navigation.navigation_expansion_paths),
+            navigation_editor: navigation.navigation_editor.clone(),
+            cards,
+            selected_card: state.library.selected_card,
+            card_scroll_offset_px: state.library.card_scroll_offset_px,
+            card_list_title: card_list_title(selected_scope).to_owned(),
+            card_empty_state: card_empty_state_input(state),
+            show_settings_overlay: state.layout.overlay == OverlayState::Settings,
+            settings_overlay: SettingsOverlayInput::from_product_settings(product_settings),
+            new_workspace_dialog: match &state.workspace_creation {
+                WorkspaceCreationState::Editing { name, parent_directory } => {
+                    Some(NewWorkspaceDialogInput {
+                        name: name.clone(),
+                        parent_directory: parent_directory.clone(),
+                        error_message: state.library.last_command_error.clone(),
+                    })
+                }
+                WorkspaceCreationState::Inactive => None,
+            },
+            encrypted_note_dialog: encrypted_note_dialog_input(state),
+            encrypted_note_unlock: encrypted_note_unlock_input(&state.encrypted_note_unlock),
+            confirmation: confirmation_overlay_input(state.layout.overlay),
+            show_new_document_menu: state.layout.overlay == OverlayState::NewDocumentMenu,
+            new_note_control: new_note_control_state(selected_scope, state.workspace_root),
+            note_toolbar: note_toolbar_buttons(
+                selected_scope,
+                selected_note_id,
+                external_files_present,
+            ),
+            save_conflict: state.library.save_conflict.map(|conflict| SaveConflictOverlayInput {
+                identity: conflict.identity,
+                content_revision: conflict.content_revision,
+                actions: [
+                    NotoraAction::SaveConflictResolutionRequested(
+                        ConflictResolution::ReloadFromDisk,
+                    ),
+                    NotoraAction::SaveConflictResolutionRequested(ConflictResolution::SaveCopy),
+                    NotoraAction::SaveConflictResolutionRequested(ConflictResolution::RetrySave),
+                    NotoraAction::SaveConflictResolutionRequested(ConflictResolution::Cancel),
+                ],
+            }),
+            editor_chrome,
+            editor_note_id,
+            editor_location_actions: Arc::clone(&editor_routes.editor_location_actions),
+            editor_tag_actions: Arc::clone(&editor_routes.editor_tag_actions),
+            editor_command_actions: Arc::clone(&editor_routes.editor_command_actions),
+            inspector_panel: None,
+            editor_pane: EditorPaneState::Empty,
+        }
+    }
+}
+
+/// Retains shell inputs whose sources change independently from the frame and editor layout.
+#[derive(Default)]
+pub(crate) struct NotoraRenderCache {
+    navigation: Option<NavigationProjection>,
+    editor_routes: Option<EditorRouteProjection>,
+}
+
+impl NotoraRenderCache {
+    fn project_routes(
+        &mut self,
+        state: &NotoraState,
+    ) -> (&NavigationProjection, &EditorRouteProjection) {
+        if self.navigation.as_ref().is_none_or(|projection| !projection.matches(state)) {
+            self.navigation = Some(NavigationProjection::from_state(state));
+            self.editor_routes = None;
+        }
+        let selected = state.library.selected_card;
+        let tags = selected
+            .and_then(|identity| metadata_for_selection(state, identity))
+            .map(|metadata| metadata.tags.as_slice());
+        if self.editor_routes.as_ref().is_none_or(|routes| !routes.matches(selected, tags)) {
+            self.editor_routes = Some(EditorRouteProjection::from_state(state, selected, tags));
+        }
+        (
+            self.navigation.as_ref().expect("navigation projection was initialized"),
+            self.editor_routes.as_ref().expect("editor route projection was initialized"),
+        )
+    }
+}
+
+struct NavigationProjection {
+    workspace_root: WorkspaceRootState,
+    workspace_root_path: Option<PathBuf>,
+    navigation_scope: NavigationScope,
+    navigation_tree: NavigationTreeState,
+    directory_creation: DirectoryCreationState,
+    navigation_rows: Arc<Vec<TreeRowInput>>,
+    navigation_actions: Arc<HashMap<TreeRowKey, NotoraAction>>,
+    navigation_trailing_actions: Arc<HashMap<(TreeRowKey, TreeRowActionKey), NotoraAction>>,
+    navigation_expansion_paths: Arc<HashMap<TreeRowKey, PathBuf>>,
+    navigation_editor: Option<TreeRowEditorInput>,
+}
+
+impl NavigationProjection {
+    fn matches(&self, state: &NotoraState) -> bool {
+        self.workspace_root == state.workspace_root
+            && self.workspace_root_path == state.workspace_root_path
+            && self.navigation_scope == state.library.navigation_scope
+            && self.navigation_tree == state.library.navigation_tree
+            && self.directory_creation == state.directory_creation
+    }
+
+    fn from_state(state: &NotoraState) -> Self {
         let selected_scope = &state.library.navigation_scope;
         let mut navigation_rows = Vec::new();
         let mut navigation_actions = HashMap::new();
@@ -260,24 +401,43 @@ impl NotoraRenderModel {
             NavigationScope::ExternalFiles,
             selected_scope,
         );
-        let search_query = state.library.search_text.clone();
-        let cards = render_cards(state);
-        let selected_note_id = state.library.selected_card.and_then(|identity| match identity {
-            DocumentIdentity::Note(note_id)
-                if cards.iter().any(|card| card.identity == identity) =>
-            {
-                Some(note_id)
-            }
-            DocumentIdentity::ExternalFile(_) => None,
-            DocumentIdentity::Note(_) => None,
-        });
-        let editor_note_id = state.library.selected_card.and_then(|identity| match identity {
-            DocumentIdentity::Note(note_id) => Some(note_id),
-            DocumentIdentity::ExternalFile(_) => None,
-        });
-        let editor_chrome = editor_pane_input(state, &cards);
-        let external_files_present =
-            *selected_scope == NavigationScope::ExternalFiles && !cards.is_empty();
+        Self {
+            workspace_root: state.workspace_root,
+            workspace_root_path: state.workspace_root_path.clone(),
+            navigation_scope: state.library.navigation_scope.clone(),
+            navigation_tree: state.library.navigation_tree.clone(),
+            directory_creation: state.directory_creation.clone(),
+            navigation_rows: Arc::new(navigation_rows),
+            navigation_actions: Arc::new(navigation_actions),
+            navigation_trailing_actions: Arc::new(navigation_trailing_actions),
+            navigation_expansion_paths: Arc::new(navigation_expansion_paths),
+            navigation_editor,
+        }
+    }
+}
+
+struct EditorRouteProjection {
+    selected: Option<DocumentIdentity>,
+    tags: Option<Vec<TagSummary>>,
+    editor_location_actions: Arc<HashMap<String, NotoraAction>>,
+    editor_tag_actions: Arc<HashMap<String, NotoraAction>>,
+    editor_command_actions: Arc<HashMap<String, NotoraAction>>,
+}
+
+impl EditorRouteProjection {
+    fn matches(&self, selected: Option<DocumentIdentity>, tags: Option<&[TagSummary]>) -> bool {
+        self.selected == selected && self.tags.as_deref() == tags
+    }
+
+    fn from_state(
+        state: &NotoraState,
+        selected: Option<DocumentIdentity>,
+        tags: Option<&[TagSummary]>,
+    ) -> Self {
+        let editor_note_id = match selected {
+            Some(DocumentIdentity::Note(note_id)) => Some(note_id),
+            Some(DocumentIdentity::ExternalFile(_)) | None => None,
+        };
         let (editor_location_actions, editor_tag_actions) = editor_action_maps(state);
         let mut editor_command_actions = editor_command_actions();
         if let Some(note_id) = editor_note_id
@@ -290,58 +450,11 @@ impl NotoraRenderModel {
             );
         }
         Self {
-            search_query,
-            navigation_rows,
-            navigation_actions,
-            navigation_trailing_actions,
-            navigation_expansion_paths,
-            navigation_editor,
-            cards,
-            selected_card: state.library.selected_card,
-            card_scroll_offset_px: state.library.card_scroll_offset_px,
-            card_list_title: card_list_title(selected_scope).to_owned(),
-            card_empty_state: card_empty_state_input(state),
-            show_settings_overlay: state.layout.overlay == OverlayState::Settings,
-            settings_overlay: SettingsOverlayInput::from_product_settings(product_settings),
-            new_workspace_dialog: match &state.workspace_creation {
-                WorkspaceCreationState::Editing { name, parent_directory } => {
-                    Some(NewWorkspaceDialogInput {
-                        name: name.clone(),
-                        parent_directory: parent_directory.clone(),
-                        error_message: state.library.last_command_error.clone(),
-                    })
-                }
-                WorkspaceCreationState::Inactive => None,
-            },
-            encrypted_note_dialog: encrypted_note_dialog_input(state),
-            encrypted_note_unlock: encrypted_note_unlock_input(&state.encrypted_note_unlock),
-            confirmation: confirmation_overlay_input(state.layout.overlay),
-            show_new_document_menu: state.layout.overlay == OverlayState::NewDocumentMenu,
-            new_note_control: new_note_control_state(selected_scope, state.workspace_root),
-            note_toolbar: note_toolbar_buttons(
-                selected_scope,
-                selected_note_id,
-                external_files_present,
-            ),
-            save_conflict: state.library.save_conflict.map(|conflict| SaveConflictOverlayInput {
-                identity: conflict.identity,
-                content_revision: conflict.content_revision,
-                actions: [
-                    NotoraAction::SaveConflictResolutionRequested(
-                        ConflictResolution::ReloadFromDisk,
-                    ),
-                    NotoraAction::SaveConflictResolutionRequested(ConflictResolution::SaveCopy),
-                    NotoraAction::SaveConflictResolutionRequested(ConflictResolution::RetrySave),
-                    NotoraAction::SaveConflictResolutionRequested(ConflictResolution::Cancel),
-                ],
-            }),
-            editor_chrome,
-            editor_note_id,
-            editor_location_actions,
-            editor_tag_actions,
-            editor_command_actions,
-            inspector_panel: None,
-            editor_pane: EditorPaneState::Empty,
+            selected,
+            tags: tags.map(<[_]>::to_vec),
+            editor_location_actions: Arc::new(editor_location_actions),
+            editor_tag_actions: Arc::new(editor_tag_actions),
+            editor_command_actions: Arc::new(editor_command_actions),
         }
     }
 }

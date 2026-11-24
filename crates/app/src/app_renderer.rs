@@ -1,16 +1,14 @@
 //! Vertex generation and GPU submission. Extracted from app.rs.
 //! Methods here are part of `impl App`, just defined in a separate file.
 
-use render::GlyphVertex;
-use std::ops::Deref;
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::app::App;
 use appkit_shell::editor_runtime::{
-    EditorFrame, EditorPaintStyle, EditorRuntime, EmptyFrameTarget, PluginContentTarget,
-    PreeditAdvanceMeasure, RenderResources, SearchHighlightStyle, SurfaceFrameOptions,
-    TextSurfaceLayout, WindowCornerClip,
+    EditorFrame, EditorPaintOptions, EditorRuntime, EmptyFrameTarget, PreeditAdvanceMeasure,
+    PreparedPluginContent, RenderResources, SearchHighlightStyle, SurfaceFrameOptions,
+    TextCaretReveal, TextHighlightLayer, WindowCornerClip,
 };
 use ui::canvas::CanvasViewportSnapshot;
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_NOVEL_VIEW};
@@ -19,11 +17,9 @@ const PERF_LOG_ENV: &str = "EDIT_PLUS_PERF_LOG";
 const PERF_LOG_THRESHOLD_US_ENV: &str = "EDIT_PLUS_PERF_LOG_THRESHOLD_US";
 const DEFAULT_PERF_LOG_THRESHOLD_US: u128 = 1_000;
 const WYSIWYG_CURSOR_LOG_ENV: &str = "EDIT_PLUS_WYSIWYG_CURSOR_LOG";
+const SEARCH_FOCUSED_CARET_OPACITY: f32 = 0.4;
 const MACOS_TRAFFIC_LIGHT_INSET_LOGICAL: f32 = 68.0;
 const WINDOWS_FRAMELESS_RESIZE_INSET_LOGICAL: f32 = crate::events::WINDOW_RESIZE_MARGIN_LOGICAL;
-const DARK_SURFACE_LUMINANCE_THRESHOLD: f32 = 0.5;
-const DARK_SURFACE_GAMMA: f32 = 2.2;
-const LIGHT_SURFACE_GAMMA: f32 = 1.45;
 
 #[derive(Clone, Copy)]
 enum SidebarWindowChrome {
@@ -100,22 +96,6 @@ mod sidebar_chrome_tests {
             sidebar_traffic_light_inset(dpi, chrome),
             (super::WINDOWS_FRAMELESS_RESIZE_INSET_LOGICAL * dpi, 0.0)
         );
-    }
-}
-
-/// 已完成 Prepare、Shell 布局和画布渲染的正常帧结果。
-///
-/// 保留快照供调用方和测试检查，并携带尚待提交到 GPU 的绘制命令。
-struct NormalCanvasFrame {
-    snapshot: CanvasViewportSnapshot,
-    draw_list: ui::core::paint::DrawList,
-}
-
-impl Deref for NormalCanvasFrame {
-    type Target = CanvasViewportSnapshot;
-
-    fn deref(&self) -> &Self::Target {
-        &self.snapshot
     }
 }
 
@@ -253,7 +233,7 @@ mod tests {
             .prepare_active_canvas_frame(&mut shaper)
             .expect("画布 Prepare 应生成可渲染的视口快照");
         let dpi = app.ui_metrics().dpi;
-        let theme = app.current_theme.clone();
+        let theme = app.editor_runtime.theme().clone();
         let mut tab = app.active_tab_session_mut().expect("测试工作区必须保留活动画布标签");
         let _ = tab.render_canvas_plugin(&snapshot, &theme, &mut shaper, dpi);
 
@@ -269,7 +249,8 @@ mod tests {
             Box::new(CanvasSequencePlugin { events }),
         );
         app.switch_workspace_for_test(0);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
         let metrics = app.ui_metrics();
         let legacy_inputs = crate::ui_shell::ShellInputs {
             tabs_visible: false,
@@ -288,13 +269,13 @@ mod tests {
         let mut measure = ui::core::NoopMeasure;
         app.ui_shell.update_frame(
             ui::core::Screen::new(app.screen_width(), app.screen_height()),
-            &app.current_theme,
+            app.editor_runtime.theme(),
             &mut measure,
             &legacy_inputs,
         );
         app.ui_shell.update_frame(
             ui::core::Screen::new(app.screen_width(), app.screen_height()),
-            &app.current_theme,
+            app.editor_runtime.theme(),
             &mut measure,
             &legacy_inputs,
         );
@@ -333,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_canvas_frame_layouts_synced_overlay_in_same_frame() {
+    fn prepared_canvas_layouts_synced_overlay_and_registers_its_editor_bounds() {
         let state = Rc::new(RefCell::new(SourceSynchronizedCanvasState::new(200.0)));
         let mut app = App::new(None);
         app.push_entry_for_test(
@@ -343,12 +324,21 @@ mod tests {
         app.switch_workspace_for_test(0);
         let mut shaper = shaping::Shaper::new().expect("测试画布插件必须能够创建文本整形器");
 
-        let snapshot = app
-            .run_normal_canvas_frame(&mut shaper)
-            .expect("常规帧必须在单一调度入口中准备、布局并渲染画布");
+        let snapshot =
+            app.prepare_editor_frame(&mut shaper).expect("常规帧必须在布局覆盖层前准备画布");
         let editor_rect = app.ui_shell.editor_rect();
+        let mut frame = app.editor_runtime.begin_frame().expect("无窗口的测试可以开始帧");
+        app.paint_editor_surface(&mut frame, &mut Default::default(), Some(&snapshot))
+            .expect("无 GPU 的画布帧也应记录编辑区位置");
+        assert!(app.editor_runtime.editor_hit_test_allowed(
+            appkit_shell::editor_runtime::EditorInputContext {
+                focus: appkit_shell::editor_runtime::EditorFocus::Active,
+                modal_blocked: false,
+            },
+            (editor_rect.x + 1.0, editor_rect.y + 1.0),
+        ));
         let mut event_context =
-            ui::core::widget::EventCtx::new(&app.current_theme, app.ui_metrics().dpi);
+            ui::core::widget::EventCtx::new(app.editor_runtime.theme(), app.ui_metrics().dpi);
         let action = app.ui_shell.dispatch(
             &ui::core::widget::Event::MouseDown {
                 px: editor_rect.x + editor_rect.w * 0.5,
@@ -357,12 +347,49 @@ mod tests {
             },
             &mut event_context,
         );
-        assert_eq!(state.borrow().events, ["update_source", "prepare", "render_canvas"]);
+        assert_eq!(state.borrow().events, ["update_source", "prepare"]);
         assert!(snapshot.max_scroll.x > 0.0, "测试夹具必须产生横向覆盖滚动条");
         assert!(
             matches!(action, Some(ui::core::widget::WidgetAction::CanvasScrollbars(_))),
             "同步后的覆盖滚动条必须在当前 Shell 布局帧命中"
         );
+    }
+
+    #[test]
+    fn shared_source_frame_keeps_gutter_clear_of_pinned_sidebar_at_retina_scale() {
+        let mut app = App::new(None);
+        app.editor_runtime
+            .edit_settings(|settings| settings.set_view_mode(ui::view_mode::ViewMode::Sidebar));
+        app.update_scale_factor(2.0);
+        app.ui_shell.set_sidebar_pinned(true);
+        app.ui_shell.set_sidebar_width_logical(240.0);
+        app.ui_shell.set_sidebar_visibility(ui::sidebar::Visibility::Pinned);
+        app.push_entry_for_test(
+            DocumentFixture::new(vec!["source text".to_owned()], 10, 10.0),
+            Box::new(crate::plugins::editor::EditorPlugin::new()),
+        );
+        app.switch_workspace_for_test(0);
+        let mut shaper = shaping::Shaper::new().expect("行号栏测试需要文字整形器");
+        assert!(app.prepare_editor_frame(&mut shaper).is_none());
+        let dpi = app.ui_metrics().dpi;
+        app.ui_shell.paint_chrome(app.editor_runtime.theme(), dpi, Some(&mut shaper));
+        assert!(app.prepare_editor_frame(&mut shaper).is_none());
+
+        let editor = app.ui_shell.editor_rect();
+        assert!(editor.x > 0.0, "固定侧栏应占据编辑区左侧");
+        let screen = ui::Screen::new(editor.right(), editor.bottom());
+        let mut frame = app.editor_runtime.begin_frame().expect("应能创建无窗口编辑帧");
+        let mut resources = Default::default();
+        app.paint_editor_surface(&mut frame, &mut resources, None)
+            .expect("纯文本布局可在无 GPU 时绘制行号背景");
+        let mut vertices = Vec::new();
+        frame.drain_into(screen, &mut resources, &mut vertices);
+
+        assert_eq!(vertices.len(), 6);
+        let right = screen.px_to_ndc(app.editor_left_margin(1), editor.y)[0];
+        let left_edge = screen.px_to_ndc(editor.x, editor.y)[0];
+        assert!(vertices.iter().all(|vertex| vertex.position[0] >= left_edge));
+        assert!(vertices.iter().any(|vertex| (vertex.position[0] - right).abs() < f32::EPSILON));
     }
 
     struct CanvasSequencePlugin {
@@ -535,7 +562,11 @@ mod tests {
 
 impl App {
     fn file_safety_status_label(&self) -> Option<String> {
-        self.file_safety_notices.last().map(file_safety_notice_label).map(str::to_owned)
+        self.workspace_services
+            .file_safety_notices()
+            .last()
+            .map(file_safety_notice_label)
+            .map(str::to_owned)
     }
 
     /// Compute the left margin for editor content positioning.
@@ -553,11 +584,11 @@ impl App {
         line_count: usize,
         metrics: &ui::settings::UiMetrics,
     ) -> f32 {
-        let gutter_w = self.settings.gutter_width(line_count) * metrics.dpi;
+        let gutter_w = self.editor_runtime.settings().gutter_width(line_count) * metrics.dpi;
         let lm = metrics.content_left_margin.max(gutter_w);
 
-        if matches!(self.settings.view_mode, ui::view_mode::ViewMode::Sidebar) {
-            let sidebar_offset = self.ui_shell.sidebar_editor_left_offset();
+        if matches!(self.editor_runtime.settings().view_mode, ui::view_mode::ViewMode::Sidebar) {
+            let sidebar_offset = self.ui_shell.sidebar_editor_left_offset(metrics.dpi);
             if sidebar_offset > 0.0 {
                 let gap = 10.0 * metrics.dpi;
                 lm.max(sidebar_offset + gap + gutter_w)
@@ -578,141 +609,12 @@ impl App {
         if toc_vis { 10.0 * metrics.dpi } else { 0.0 }
     }
 
-    pub(crate) fn cursor_vertices(
-        &self,
-        screen_w: f32,
-        screen_h: f32,
-        tab_bar_height: f32,
-    ) -> Vec<GlyphVertex> {
-        let metrics = self.ui_metrics();
-        let Some(tab) = self.active_tab_session() else {
-            return vec![];
-        };
-        let sub_line_offset = tab.sub_line_pixel_offset(metrics.line_height);
-        let search_has_focus =
-            tab.search_state().panel_visible && self.ui_shell.search_bar_has_keyboard_focus();
-        let dim_factor: Option<f32> = if search_has_focus { Some(0.4) } else { None };
-        let cursor_x = tab.cursor_pixel_x() + self.preedit_advance_px;
-        ui::decorations::cursor_vertices(
-            &self.current_theme,
-            tab.cursor_visual_line(),
-            tab_bar_height,
-            cursor_x,
-            tab.cursor_blink_instant(),
-            &metrics,
-            screen_w,
-            screen_h,
-            sub_line_offset,
-            dim_factor,
-        )
-    }
-
-    pub(crate) fn gutter_bg_vertices(
-        &self,
-        left_margin: f32,
-        screen_w: f32,
-        screen_h: f32,
-        tab_bar_height: f32,
-    ) -> Vec<GlyphVertex> {
-        let line_count = self.active_document_line_count();
-        if line_count == 0 {
-            return vec![];
-        }
-        let gutter_w =
-            self.settings.gutter_width(line_count) * self.editor_runtime.scale_factor() as f32;
-        if gutter_w <= 0.0 {
-            return vec![];
-        }
-        let mut vertices = Vec::new();
-        let bg_color = self.current_theme.editor.gutter_bg;
-        let bg_left = ((left_margin - gutter_w) / screen_w * 2.0) - 1.0;
-        let bg_right = (left_margin / screen_w * 2.0) - 1.0;
-        let bg_top = 1.0 - (tab_bar_height / screen_h * 2.0);
-        let bg_bottom = -1.0;
-        let uv = 0.0;
-        vertices.push(GlyphVertex {
-            position: [bg_left, bg_top],
-            tex_coords: [uv, uv],
-            color: bg_color,
-        });
-        vertices.push(GlyphVertex {
-            position: [bg_right, bg_top],
-            tex_coords: [uv, uv],
-            color: bg_color,
-        });
-        vertices.push(GlyphVertex {
-            position: [bg_left, bg_bottom],
-            tex_coords: [uv, uv],
-            color: bg_color,
-        });
-        vertices.push(GlyphVertex {
-            position: [bg_right, bg_top],
-            tex_coords: [uv, uv],
-            color: bg_color,
-        });
-        vertices.push(GlyphVertex {
-            position: [bg_right, bg_bottom],
-            tex_coords: [uv, uv],
-            color: bg_color,
-        });
-        vertices.push(GlyphVertex {
-            position: [bg_left, bg_bottom],
-            tex_coords: [uv, uv],
-            color: bg_color,
-        });
-        vertices
-    }
-
-    pub(crate) fn shape_visible_lines(
-        &mut self,
-        tab_bar_height: f32,
-        tree_dirty: &mut bool,
-        metrics: &ui::settings::UiMetrics,
-        resources: &mut RenderResources,
-    ) -> Vec<GlyphVertex> {
-        self.refresh_active_source_spacing_state();
-        let line_count = self.active_document_line_count();
-        let Some(gpu) = resources.gpu.as_ref() else {
-            return Vec::new();
-        };
-        let layout = TextSurfaceLayout {
-            screen: ui::Screen { w: gpu.ctx.config.width as f32, h: gpu.ctx.config.height as f32 },
-            left_margin: self.toc_left_offset()
-                + self.editor_left_margin_with_metrics(line_count, metrics),
-            top: tab_bar_height,
-            gutter_width: self.settings.gutter_width(line_count) * metrics.dpi,
-        };
-        let search_has_focus =
-            self.active_tab_session().is_some_and(|tab| tab.search_state().panel_visible)
-                && self.ui_shell.search_bar_has_keyboard_focus();
-        let (preedit_text, _) = self.editor_runtime.preedit();
-        let preedit_text = if search_has_focus { "" } else { &preedit_text };
-        let style =
-            EditorPaintStyle { theme: &self.current_theme, settings: &self.settings, metrics };
-        let Some(shaped) = self.editor_runtime.shape_active_text_surface(
-            resources,
-            layout,
-            &style,
-            preedit_text,
-            PreeditAdvanceMeasure::AtLeastOnePixel,
-        ) else {
-            return Vec::new();
-        };
-        self.preedit_advance_px = shaped.preedit_advance_px;
-        *tree_dirty = shaped.tree_dirty;
-        shaped.vertices
-    }
-
     pub(crate) fn render(&mut self) -> Option<()> {
         let mut frame = self.editor_runtime.begin_frame().ok()?;
         EditorRuntime::with_render_resources_for(
             self,
             |app| &mut app.editor_runtime,
-            |app, resources| {
-                let result = app.render_with_runtime_resources(resources, &mut frame);
-                let _frame_outcome = frame.present();
-                result
-            },
+            |app, resources| app.render_with_runtime_resources(resources, &mut frame),
         )
     }
 
@@ -729,232 +631,40 @@ impl App {
         if let Some(text) = resources.text.as_mut() {
             text.begin_frame();
         }
-        self.needs_redraw = false;
+        self.platform.clear_redraw();
         let screen_w = self.screen_width();
         let screen_h = self.screen_height();
 
         let metrics = self.ui_metrics();
-        let mut perf_mode = "editor";
-        let mut perf_plugin_name = String::new();
-        let mut perf_plugin_paint_us = 0;
-        let mut perf_editor_reshape_us = 0;
-        let mut perf_editor_shape_us = 0;
-        let mut perf_editor_selection_us = 0;
-        let mut perf_editor_search_us = 0;
-        let mut perf_editor_cursor_us = 0;
-        let sync_plugin_state_started_at = Instant::now();
-        let normal_canvas_frame = if let Some(text) = resources.text.as_mut() {
-            let frame = self.run_normal_canvas_frame(&mut text.shaper);
-            if frame.is_none() {
-                self.update_shell_layout(&mut text.shaper);
-            }
-            frame
+        let sync_prepare_started_at = Instant::now();
+        let canvas = if let Some(text) = resources.text.as_mut() {
+            self.prepare_editor_frame(&mut text.shaper)
         } else {
             self.sync_plugin_state();
             self.ui_shell.set_canvas_scrollbars_input(None);
             None
         };
-        let perf_sync_prepare_us = sync_plugin_state_started_at.elapsed().as_micros();
+        let perf_sync_prepare_us = sync_prepare_started_at.elapsed().as_micros();
 
-        let content_top = self.content_top_offset();
+        let editor_paint_started_at = Instant::now();
+        self.paint_editor_surface(frame, resources, canvas.as_ref())?;
+        let perf_editor_paint_us = editor_paint_started_at.elapsed().as_micros();
+
+        let chrome_list = self.ui_shell.paint_chrome(
+            self.editor_runtime.theme(),
+            metrics.dpi,
+            resources.text.as_mut().map(|text| &mut text.shaper),
+        );
+        frame.with_paint_context(|context| {
+            context.list.cmds.extend(chrome_list.cmds);
+        });
 
         let mut vertices = Vec::new();
-        let _editor_r = self.ui_shell.editor_rect();
-        let line_count = self.active_document_line_count();
-        let toc_off = self.toc_left_offset();
-        let shows_gutter = self.active_shows_gutter();
-
-        let gutter_left_margin =
-            if line_count > 0 { toc_off + self.editor_left_margin(line_count) } else { 0.0 };
-
-        if shows_gutter {
-            vertices.extend(self.gutter_bg_vertices(
-                gutter_left_margin,
-                screen_w,
-                screen_h,
-                content_top,
-            ));
-        }
-
-        // ── Plugin-rendered mode (MarkdownView, NovelView, Mindmap, WYSIWYG) ──
-        if self.active_handles_own_rendering() || normal_canvas_frame.is_some() {
-            perf_mode = "plugin";
-            if perf_logging_enabled() {
-                perf_plugin_name = self
-                    .active_plugin_name()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "unknown".to_string());
-            }
-            let plugin_paint_started_at = Instant::now();
-            let content = if let Some(frame) = normal_canvas_frame {
-                frame.draw_list
-            } else {
-                let bounds = self.plugin_render_bounds();
-                let style = EditorPaintStyle {
-                    theme: &self.current_theme,
-                    settings: &self.settings,
-                    metrics: &metrics,
-                };
-                self.editor_runtime
-                    .render_active_plugin_content(
-                        PluginContentTarget::Bounds(bounds),
-                        &style,
-                        resources.text.as_mut().map(|text| &mut text.shaper),
-                    )
-                    .unwrap_or_default()
-            };
-            self.editor_runtime.paint_active_plugin_layers(
-                content,
-                resources,
-                ui::Screen::new(screen_w, screen_h),
-                &self.current_theme,
-                SearchHighlightStyle::Theme,
-                &mut vertices,
-            );
-            perf_plugin_paint_us = plugin_paint_started_at.elapsed().as_micros();
-
-            // Compute preedit advance so IME candidate window X tracks
-            // the end of the composing text (shared with update_ime_cursor_area).
-            let search_has_focus =
-                self.active_tab_session().is_some_and(|tab| tab.search_state().panel_visible)
-                    && self.ui_shell.search_bar_has_keyboard_focus();
-            let (preedit_text, _) = self.editor_runtime.preedit();
-            if !preedit_text.is_empty() && !search_has_focus {
-                if let Some(text) = resources.text.as_mut() {
-                    self.preedit_advance_px = PreeditAdvanceMeasure::AtLeastOnePixel.measure(
-                        &mut text.shaper,
-                        &preedit_text,
-                        metrics.font_size,
-                    );
-                } else {
-                    self.preedit_advance_px = 0.0;
-                }
-            }
-
-            // Skip normal editor content; jump to chrome below
-        } else {
-            // Drain reshape worker results into DisplayLineMap before shaping
-            let reshape_started_at = Instant::now();
-            self.drain_reshape_results();
-            perf_editor_reshape_us = reshape_started_at.elapsed().as_micros();
-
-            let mut tree_dirty = false;
-            let shape_started_at = Instant::now();
-            let shape_verts =
-                self.shape_visible_lines(content_top, &mut tree_dirty, &metrics, resources);
-            perf_editor_shape_us = shape_started_at.elapsed().as_micros();
-
-            if tree_dirty {
-                if let Some(mut tab) = self.active_tab_session_mut() {
-                    tab.derive_scroll_top(metrics.line_height);
-                }
-                self.needs_redraw = true;
-            }
-            let text_layout = TextSurfaceLayout {
-                screen: ui::Screen { w: screen_w, h: screen_h },
-                left_margin: toc_off + self.editor_left_margin(line_count),
-                top: content_top,
-                gutter_width: self.settings.gutter_width(line_count) * metrics.dpi,
-            };
-            let style = EditorPaintStyle {
-                theme: &self.current_theme,
-                settings: &self.settings,
-                metrics: &metrics,
-            };
-            let selection_started_at = Instant::now();
-            vertices
-                .extend(self.editor_runtime.active_text_selection_vertices(text_layout, &style));
-            perf_editor_selection_us = selection_started_at.elapsed().as_micros();
-
-            let search_started_at = Instant::now();
-            vertices.extend(self.editor_runtime.active_text_search_vertices(
-                text_layout,
-                &style,
-                SearchHighlightStyle::Theme,
-            ));
-            perf_editor_search_us = search_started_at.elapsed().as_micros();
-
-            vertices.extend(shape_verts);
-
-            let cursor_started_at = Instant::now();
-            vertices.extend(self.cursor_vertices(screen_w, screen_h, content_top));
-            // IME preedit text rendering for document cursor
-            let (preedit_text, _) = self.editor_runtime.preedit();
-            if !preedit_text.is_empty() {
-                let search_has_focus =
-                    self.active_tab_session().is_some_and(|tab| tab.search_state().panel_visible)
-                        && self.ui_shell.search_bar_has_keyboard_focus();
-
-                if !search_has_focus {
-                    let ime_fallback_x = toc_off + self.editor_left_margin(0);
-                    let active_tab_id = self.active_tab_id();
-                    if let (Some(text), Some(gpu)) =
-                        (resources.text.as_mut(), resources.gpu.as_ref())
-                        && let Some(tab) =
-                            active_tab_id.and_then(|id| self.editor_runtime.tab_session(id))
-                    {
-                        if let Some(cursor_vl) = tab.cursor_visual_line() {
-                            let line_height = metrics.line_height;
-                            let sub_line_offset = tab.sub_line_pixel_offset(line_height);
-                            let cursor_x = tab.cursor_pixel_x();
-                            let cursor_y =
-                                content_top + cursor_vl as f32 * line_height + sub_line_offset;
-                            vertices.extend(appkit_shell::render_pipeline::preedit_text_vertices(
-                                &metrics,
-                                &preedit_text,
-                                cursor_x,
-                                cursor_y,
-                                text,
-                                gpu,
-                                screen_w,
-                                screen_h,
-                                self.current_theme.editor.foreground,
-                            ));
-                        } else {
-                            vertices.extend(appkit_shell::render_pipeline::preedit_text_vertices(
-                                &metrics,
-                                &preedit_text,
-                                ime_fallback_x,
-                                content_top,
-                                text,
-                                gpu,
-                                screen_w,
-                                screen_h,
-                                self.current_theme.editor.foreground,
-                            ));
-                        }
-                    }
-                }
-            }
-            perf_editor_cursor_us = cursor_started_at.elapsed().as_micros();
-        } // end else (normal editor mode)
-
-        // Phase 3：用 ui_shell 渲染 chrome
-        {
-            let dpi = metrics.dpi;
-            let chrome_list = self.ui_shell.paint_chrome(
-                &self.current_theme,
-                dpi,
-                resources.text.as_mut().map(|t| &mut t.shaper),
-            );
-            frame.with_paint_context(|context| {
-                context.list.cmds.extend(chrome_list.cmds);
-            });
-        }
-
-        let editor_rect = self.ui_shell.editor_rect();
-        frame.paint_editor_vertices(editor_rect, vertices.drain(..)).ok()?;
         let frame_drain_started_at = Instant::now();
         frame.drain_into(ui::core::Screen::new(screen_w, screen_h), resources, &mut vertices);
         let perf_chrome_drain_us = frame_drain_started_at.elapsed().as_micros();
 
-        let [red, green, blue, _] = self.current_theme.editor.background;
-        let luminance = 0.299 * red + 0.587 * green + 0.114 * blue;
-        let gamma = if luminance < DARK_SURFACE_LUMINANCE_THRESHOLD {
-            DARK_SURFACE_GAMMA
-        } else {
-            LIGHT_SURFACE_GAMMA
-        };
+        let [red, green, blue, _] = self.editor_runtime.theme().editor.background;
         let perf_gpu_submit_us = resources
             .submit_surface_frame(
                 &vertices,
@@ -962,7 +672,6 @@ impl App {
                     background: [red, green, blue, 1.0],
                     empty_frame_target: EmptyFrameTarget::MultisampledWhenTextAvailable,
                     window_corner_clip: WindowCornerClip::Preserve,
-                    gamma_override: Some(render::GammaUniform { contrast: 1.0, gamma }),
                 },
             )
             .ok()??
@@ -970,11 +679,8 @@ impl App {
 
         if !self.editor_runtime.first_frame_presented() {
             self.editor_runtime.mark_frame_presented();
-            eprintln!(
-                "[startup] first_frame_visible total: {:?}",
-                self.startup_started_at.elapsed()
-            );
-            if let Some(event_loop_proxy) = self.event_loop_proxy.as_ref() {
+            eprintln!("[startup] first_frame_visible total: {:?}", self.platform.startup_elapsed());
+            if let Some(event_loop_proxy) = self.platform.event_loop_proxy() {
                 let _ = event_loop_proxy
                     .send_event(crate::app_event::AppEvent::StartBackgroundServices);
             }
@@ -982,32 +688,11 @@ impl App {
 
         let _total_render_us = _render_t0.elapsed().as_micros();
         if should_log_perf(_total_render_us) {
-            if perf_mode == "plugin" {
-                eprintln!(
-                    "[perf:app_render] mode=plugin plugin={} total={}us sync_prepare={}us plugin_paint={}us chrome_drain={}us gpu_submit={}us vertices={}",
-                    perf_plugin_name,
-                    _total_render_us,
-                    perf_sync_prepare_us,
-                    perf_plugin_paint_us,
-                    perf_chrome_drain_us,
-                    perf_gpu_submit_us,
-                    vertices.len(),
-                );
-            } else {
-                eprintln!(
-                    "[perf:app_render] mode=editor total={}us sync_prepare={}us reshape={}us shape={}us selection={}us search={}us cursor={}us chrome_drain={}us gpu_submit={}us vertices={}",
-                    _total_render_us,
-                    perf_sync_prepare_us,
-                    perf_editor_reshape_us,
-                    perf_editor_shape_us,
-                    perf_editor_selection_us,
-                    perf_editor_search_us,
-                    perf_editor_cursor_us,
-                    perf_chrome_drain_us,
-                    perf_gpu_submit_us,
-                    vertices.len(),
-                );
-            }
+            let plugin = self.active_plugin_name().unwrap_or("unknown");
+            eprintln!(
+                "[perf:app_render] plugin={plugin} total={_total_render_us}us sync_prepare={perf_sync_prepare_us}us editor_paint={perf_editor_paint_us}us chrome_drain={perf_chrome_drain_us}us gpu_submit={perf_gpu_submit_us}us vertices={}",
+                vertices.len(),
+            );
         }
         #[cfg(debug_assertions)]
         if _total_render_us > 1000 || _frame_interval_us > 20000 {
@@ -1043,21 +728,23 @@ impl App {
                     tab.invalidate_render_cache_all();
                 }
             }
-            self.needs_redraw = true;
+            self.platform.schedule_redraw();
         }
 
-        self.post_shape_update();
-        self.submit_reshape_ahead();
-
-        // Sync animation target from TabBarWidget after render
-        self.tab_scroll.set_target(self.ui_shell.tab_bar_scroll_target());
-
-        if self.tab_scroll.tick() {
-            self.needs_redraw = true;
+        if self.editor_runtime.take_redraw_request() {
+            self.platform.schedule_redraw();
         }
 
-        self.needs_redraw =
-            needs_redraw_after_render(self.needs_redraw, self.ui_shell.scrollbar_is_dragging());
+        if self.ui_shell.advance_tab_scroll() {
+            self.platform.schedule_redraw();
+        }
+
+        if needs_redraw_after_render(
+            self.platform.redraw_pending(),
+            self.ui_shell.scrollbar_is_dragging(),
+        ) {
+            self.platform.schedule_redraw();
+        }
         Some(())
     }
 
@@ -1147,7 +834,7 @@ impl App {
                     has_back_history,
                     has_forward_history,
                     self.ui_shell.tab_bar_hovered_index(),
-                    self.tab_scroll.current(),
+                    self.ui_shell.animated_tab_scroll_offset(),
                 );
 
                 let dpi = metrics.dpi;
@@ -1170,10 +857,11 @@ impl App {
                     PLUGIN_MARKDOWN_EDITOR => "MD编辑".to_string(),
                     _ => name.to_string(),
                 });
-                let sidebar_mode = self.settings.view_mode == ui::view_mode::ViewMode::Sidebar;
+                let sidebar_mode =
+                    self.editor_runtime.settings().view_mode == ui::view_mode::ViewMode::Sidebar;
                 let sidebar_left = if sidebar_mode {
                     self.ui_shell
-                        .sidebar_editor_left_offset()
+                        .sidebar_editor_left_offset(dpi)
                         .max(sidebar_titlebar_reserved_width(dpi, chrome))
                 } else if cfg!(target_os = "macos") {
                     ui::constants::TRAFFIC_LIGHT_TOTAL_W * dpi
@@ -1181,7 +869,7 @@ impl App {
                     0.0
                 };
                 let titlebar_x = if sidebar_mode {
-                    self.ui_shell.sidebar_editor_left_offset().max(0.5)
+                    self.ui_shell.sidebar_editor_left_offset(metrics.dpi).max(0.5)
                 } else {
                     0.0
                 };
@@ -1239,9 +927,9 @@ impl App {
             self.refresh_sync_settings_overlay();
 
             let mut measure = appkit_shell::measure_adapter::MeasureFromShaper(shaper);
-            self.ui_shell.update_frame(screen, &self.current_theme, &mut measure, &inputs);
+            self.ui_shell.update_frame(screen, self.editor_runtime.theme(), &mut measure, &inputs);
             if self.ui_shell.dock_is_dirty() {
-                self.needs_redraw = true;
+                self.platform.schedule_redraw();
             }
         }
     }
@@ -1255,29 +943,67 @@ impl App {
         self.prepare_active_canvas_frame(shaper)
     }
 
-    /// 调度正常画布帧：同步→Prepare/Resolve→Shell 布局→Canvas Render。
-    ///
-    /// `None` 表示当前插件未能提供画布快照，调用方应继续使用既有渲染路径。
-    fn run_normal_canvas_frame(
+    /// 同步内容，先解析画布滚动条，再将覆盖层和编辑区布局到同一帧。
+    fn prepare_editor_frame(
         &mut self,
         shaper: &mut shaping::Shaper,
-    ) -> Option<NormalCanvasFrame> {
-        let snapshot = self.sync_and_prepare_canvas_frame(shaper)?;
+    ) -> Option<CanvasViewportSnapshot> {
+        let canvas = self.sync_and_prepare_canvas_frame(shaper);
         self.update_shell_layout(shaper);
+        canvas
+    }
 
-        let metrics = self.ui_metrics();
-        let style = EditorPaintStyle {
-            theme: &self.current_theme,
-            settings: &self.settings,
-            metrics: &metrics,
+    #[cfg(test)]
+    pub(crate) fn prepare_editor_pointer_frame_for_test(&mut self) {
+        let mut shaper = shaping::Shaper::new().expect("指针测试需要文字整形器");
+        let canvas = self.prepare_editor_frame(&mut shaper);
+        let mut frame = self.editor_runtime.begin_frame().expect("应能创建无窗口帧");
+        self.paint_editor_surface(&mut frame, &mut RenderResources::default(), canvas.as_ref())
+            .expect("应能发布活动编辑区的指针坐标");
+    }
+
+    fn paint_editor_surface(
+        &mut self,
+        frame: &mut EditorFrame,
+        resources: &mut RenderResources,
+        canvas: Option<&CanvasViewportSnapshot>,
+    ) -> Option<()> {
+        let handles_own_rendering = self.active_handles_own_rendering();
+        if !handles_own_rendering {
+            self.refresh_active_source_spacing_state();
+        }
+        let tab = self.active_tab_session()?;
+        let search_has_focus =
+            tab.search_state().panel_visible && self.ui_shell.search_bar_has_keyboard_focus();
+        let editor_rect = self.ui_shell.editor_rect();
+        let plugin_content = handles_own_rendering.then(|| {
+            canvas.map_or_else(
+                || PreparedPluginContent::Bounds(self.plugin_render_bounds()),
+                PreparedPluginContent::Canvas,
+            )
+        });
+        let options = EditorPaintOptions {
+            plugin_content,
+            text_left_margin: Some(
+                self.toc_left_offset() + self.editor_left_margin(tab.document().line_count()),
+            ),
+            gutter_background: true,
+            search_highlights: SearchHighlightStyle::Theme,
+            text_highlight_layer: TextHighlightLayer::BelowGlyphs,
+            search_caret_opacity: search_has_focus.then_some(SEARCH_FOCUSED_CARET_OPACITY),
+            preedit_advance: PreeditAdvanceMeasure::AtLeastOnePixel,
+            preedit_fallback_origin: Some((
+                self.toc_left_offset() + self.editor_left_margin(0),
+                self.content_top_offset(),
+            )),
+            caret_reveal: TextCaretReveal::SourceLine,
+            reshape_ahead_width: (!handles_own_rendering)
+                .then(|| self.viewport_content_width(tab.document())),
         };
-        let draw_list = self.editor_runtime.render_active_plugin_content(
-            PluginContentTarget::PreparedCanvas(&snapshot),
-            &style,
-            Some(shaper),
-        )?;
-
-        Some(NormalCanvasFrame { snapshot, draw_list })
+        self.editor_runtime
+            .paint_active_editor_with(frame, resources, editor_rect, options)
+            .ok()?;
+        Some(())
     }
 
     /// 为活动画布执行 Prepare → Resolve，并把本帧滚动条输入交给覆盖层。
@@ -1297,7 +1023,7 @@ impl App {
         self.ui_shell.mark_dock_dirty();
         let bounds = self.plugin_render_bounds();
         let dpi = self.ui_metrics().dpi;
-        let theme = self.current_theme.clone();
+        let theme = self.editor_runtime.theme().clone();
         let prepared = (|| {
             let mut tab = self.active_tab_session_mut()?;
             let metrics = tab.prepare_canvas_plugin(&theme, shaper, dpi)?;
@@ -1325,8 +1051,9 @@ impl App {
         let sync_started_at = Instant::now();
         let (preedit_text, preedit_cursor) = self.editor_runtime.preedit();
         let preedit_len = preedit_text.len();
-        let should_sync_selection = !self.mouse.is_down;
-        let mouse_is_down = self.mouse.is_down;
+        let mouse_is_down = self.editor_runtime.pointer_capture()
+            != appkit_shell::editor_runtime::MouseCapture::None;
+        let should_sync_selection = !mouse_is_down;
         let Some(mut tab) = self.active_tab_session_mut() else {
             return;
         };
@@ -1439,15 +1166,16 @@ mod toc_left_offset_tests {
         assert_eq!(app.toc_left_offset(), 0.0);
     }
 
+    #[cfg(feature = "markdown")]
     #[test]
     fn toc_left_offset_returns_only_gap_when_toc_visible() {
         let mut app = App::new(None);
         app.push_entry_for_test(
             DocumentFixture::new(vec!["# Hello".into()], 80, 10.0),
-            Box::new(EditorPlugin::new()),
+            Box::new(textora_markdown::view::MarkdownEditorView::new()),
         );
         app.switch_workspace_for_test(0);
-        app.active_tab_session_mut().unwrap().runtime.toc_visible = true;
+        app.active_tab_session_mut().expect("active Markdown tab").toggle_toc_visible();
         let metrics = app.ui_metrics();
         let expected_gap = 10.0 * metrics.dpi;
         // Must NOT include toc_width (the dock allocates that).

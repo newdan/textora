@@ -113,9 +113,9 @@ impl SidebarState {
     pub fn editor_left_offset(
         &self,
         cfg: &SidebarConfig,
-        _metrics: &crate::settings::UiMetrics,
+        metrics: &crate::settings::UiMetrics,
     ) -> f32 {
-        self.interaction.editor_left_offset(cfg)
+        self.interaction.editor_left_offset(cfg, metrics.dpi)
     }
 
     pub fn is_visible(&self) -> bool {
@@ -167,7 +167,7 @@ impl SidebarState {
                 .with_active(show_line_numbers),
             PopupMenuItem::action("自动换行", PMA::ToggleWordWrap).with_active(word_wrap),
             PopupMenuItem::action("显示状态栏", PMA::ToggleStatusBar).with_active(show_status_bar),
-            PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+            PopupMenuItem::Separator,
             PopupMenuItem::action(
                 "跟随系统",
                 PMA::SetThemeMode(crate::settings::ThemeMode::System),
@@ -177,12 +177,12 @@ impl SidebarState {
                 .with_active(theme_mode == crate::settings::ThemeMode::Dark),
             PopupMenuItem::action("浅色模式", PMA::SetThemeMode(crate::settings::ThemeMode::Light))
                 .with_active(theme_mode == crate::settings::ThemeMode::Light),
-            PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+            PopupMenuItem::Separator,
             PopupMenuItem::action("Sidebar 模式", PMA::SetViewMode(ViewMode::Sidebar))
                 .with_active(current_mode == ViewMode::Sidebar),
             PopupMenuItem::action("Tabs 模式", PMA::SetViewMode(ViewMode::Tabs))
                 .with_active(current_mode == ViewMode::Tabs),
-            PopupMenuItem::separator(PMA::SetViewMode(ViewMode::Sidebar)),
+            PopupMenuItem::Separator,
             PopupMenuItem::action("打开Settings", PMA::OpenSettingsFile),
         ];
 
@@ -191,7 +191,7 @@ impl SidebarState {
         let mut top_px = anchor_y;
         let mut item_rects = Vec::with_capacity(items.len());
         for item in &items {
-            let h = if item.is_separator { 8.0 * dpi } else { item_h };
+            let h = if item.is_separator() { 8.0 * dpi } else { item_h };
             item_rects.push(Rect::new(menu_left, top_px, menu_right - menu_left, h));
             top_px += h;
         }
@@ -292,7 +292,7 @@ impl SidebarState {
         let pad = PADDING * dpi;
         let edge_w = EDGE_RESIZE_W * dpi;
         let native_titlebar = input.traffic_light_inset.0 == 0.0;
-        let w = cfg.width;
+        let w = cfg.width_px(metrics.dpi);
         let top = input.content_top.max(0.0);
         let sh = input.screen_h.max(1.0);
 
@@ -430,7 +430,7 @@ impl SidebarState {
             self.layout.as_ref().map(|l| l.menu_btn_rect.contains(px, py)).unwrap_or(false);
         let in_hot_zone = in_left_hot || on_hamburger;
 
-        let in_sidebar = px >= 0.0 && px <= cfg.width && px < screen_w;
+        let in_sidebar = px >= 0.0 && px <= cfg.width_px(metrics.dpi) && px < screen_w;
         if self.interaction.hover.pointer_moved(in_hot_zone, in_sidebar, Instant::now()) {
             self.hovered_button = SidebarHoverButton::None;
         }
@@ -700,7 +700,7 @@ mod tests {
     use super::*;
 
     fn laid_out_sidebar_state(dpi: f32) -> (SidebarState, crate::settings::UiMetrics) {
-        let mut cfg = SidebarConfig::new_default(dpi);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let metrics =
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), dpi);
@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn high_dpi_sidebar_hover_accepts_scaled_left_edge() {
         let dpi = 2.0;
-        let cfg = SidebarConfig { pinned: false, ..SidebarConfig::new_default(dpi) };
+        let cfg = SidebarConfig { pinned: false, ..SidebarConfig::new_default() };
         let metrics =
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), dpi);
         let mut state = SidebarState::new(&cfg);
@@ -802,7 +802,7 @@ mod tests {
         let layout = state.current_layout().expect("sidebar layout must exist");
         let primary = layout.new_btn_rect;
         let dropdown = layout.new_menu_btn_rect;
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
 
         state.on_mouse_move(
             primary.x + primary.w * 0.5,
@@ -828,27 +828,27 @@ mod tests {
     #[test]
     fn clamp_width_below_min() {
         let mut c = SidebarConfig { pinned: false, width: 50.0 };
-        c.clamp_width(1.0);
+        c.clamp_width();
         assert_eq!(c.width, 160.0);
     }
 
     #[test]
     fn clamp_width_above_max() {
         let mut c = SidebarConfig { pinned: false, width: 9999.0 };
-        c.clamp_width(2.0);
-        assert_eq!(c.width, 800.0);
+        c.clamp_width();
+        assert_eq!(c.width, 400.0);
     }
 
     #[test]
     fn clamp_width_within_range_unchanged() {
         let mut c = SidebarConfig { pinned: false, width: 300.0 };
-        c.clamp_width(1.0);
+        c.clamp_width();
         assert_eq!(c.width, 300.0);
     }
 
     #[test]
     fn sidebar_state_respects_cfg_pinned() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let s = SidebarState::new(&cfg);
         assert_eq!(s.visibility(), Visibility::Pinned);
@@ -877,7 +877,7 @@ mod tests {
 
     #[test]
     fn sidebar_hidden_offsets_zero() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Hidden);
@@ -893,7 +893,7 @@ mod tests {
 
     #[test]
     fn sidebar_hover_peek_does_not_offset_editor() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::HoverPeek);
@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn sidebar_layout_zero_items_when_no_tabs() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let mut s = SidebarState::new(&cfg);
         let input = SidebarInput {
@@ -932,7 +932,7 @@ mod tests {
     #[test]
     fn high_dpi_narrow_window_hides_pinned_sidebar_before_editor_becomes_too_narrow() {
         let dpi = 2.0;
-        let mut cfg = SidebarConfig::new_default(dpi);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let metrics =
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), dpi);
@@ -940,7 +940,7 @@ mod tests {
         let input = SidebarInput {
             tabs: &[],
             active_index: None,
-            screen_w: cfg.width + 180.0,
+            screen_w: cfg.width_px(dpi) + 180.0,
             screen_h: 800.0 * dpi,
             traffic_light_inset: (0.0, 0.0),
             content_top: 0.0,
@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn sidebar_click_new_btn_emits_new_doc() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let mut s = SidebarState::new(&cfg);
         let input = SidebarInput {
@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn sidebar_click_open_btn_emits_open_doc() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let mut s = SidebarState::new(&cfg);
         let input = SidebarInput {
@@ -1034,7 +1034,7 @@ mod tests {
 
     #[test]
     fn sidebar_open_btn_hover_sets_open_file() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let mut s = SidebarState::new(&cfg);
         let input = SidebarInput {
@@ -1067,7 +1067,7 @@ mod tests {
 
     #[test]
     fn sidebar_click_outside_returns_none() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         let input = SidebarInput {
             tabs: &[],
@@ -1094,7 +1094,7 @@ mod tests {
 
     #[test]
     fn sidebar_hover_clears_when_no_hit() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         cfg.pinned = true;
         let mut s = SidebarState::new(&cfg);
         let input = SidebarInput {
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn sidebar_scroll_clamps_to_zero() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.interaction.list_scroll_offset = -50.0;
         let dpi = 1.0;
@@ -1127,7 +1127,7 @@ mod tests {
 
     #[test]
     fn sidebar_scroll_clamps_to_max() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         let dpi = 1.0;
         let row_h = 24.0 * dpi;
@@ -1190,7 +1190,7 @@ mod tests {
 
     #[test]
     fn sidebar_hover_exit_instant() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::HoverPeek);
         let t0 = Instant::now();
@@ -1223,7 +1223,7 @@ mod tests {
 
     #[test]
     fn sidebar_hover_exit_cancelled_by_reentry() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::HoverPeek);
         let t0 = Instant::now();
@@ -1256,7 +1256,7 @@ mod tests {
 
     #[test]
     fn sidebar_pinned_immune_to_hover_leave() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let t0 = Instant::now();
@@ -1279,7 +1279,7 @@ mod tests {
 
     #[test]
     fn sidebar_hover_fading_out_animating_flag() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::HoverPeek);
         let t0 = Instant::now();
@@ -1323,7 +1323,7 @@ mod tests {
 
     #[test]
     fn sidebar_hover_fading_out_cancel_by_reenter() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::HoverPeek);
         let t0 = Instant::now();
@@ -1357,7 +1357,7 @@ mod tests {
 
     #[test]
     fn sidebar_esc_during_fading_out_collapses() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::HoverPeek);
         let t0 = Instant::now();
@@ -1443,7 +1443,7 @@ mod tests {
 
     #[test]
     fn sidebar_esc_collapses_hover_only() {
-        let mut cfg = SidebarConfig::new_default(1.0);
+        let mut cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::HoverPeek);
         let action = s.on_key(SidebarKey::Escape, &mut cfg);
@@ -1524,7 +1524,7 @@ mod tests {
 
     #[test]
     fn sidebar_settings_menu_open_close() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -1564,7 +1564,7 @@ mod tests {
 
     #[test]
     fn sidebar_settings_menu_switch_to_tabs() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -1603,7 +1603,7 @@ mod tests {
 
     #[test]
     fn sidebar_settings_menu_open_settings_file() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -1642,7 +1642,7 @@ mod tests {
 
     #[test]
     fn sidebar_settings_menu_click_outside_closes() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -1676,7 +1676,7 @@ mod tests {
 
     #[test]
     fn sidebar_settings_menu_has_four_items() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -1701,18 +1701,18 @@ mod tests {
         let menu = s.open_menu().unwrap();
         assert_eq!(menu.items.len(), 12);
         // Verify labels
-        assert_eq!(menu.items[0].label, "显示行号");
-        assert_eq!(menu.items[1].label, "自动换行");
-        assert_eq!(menu.items[2].label, "显示状态栏");
-        assert!(menu.items[3].is_separator);
-        assert_eq!(menu.items[4].label, "跟随系统");
-        assert_eq!(menu.items[5].label, "深色模式");
-        assert_eq!(menu.items[6].label, "浅色模式");
-        assert!(menu.items[7].is_separator);
-        assert_eq!(menu.items[8].label, "Sidebar 模式");
-        assert_eq!(menu.items[9].label, "Tabs 模式");
-        assert!(menu.items[10].is_separator);
-        assert_eq!(menu.items[11].label, "打开Settings");
+        assert_eq!(menu.items[0].label(), "显示行号");
+        assert_eq!(menu.items[1].label(), "自动换行");
+        assert_eq!(menu.items[2].label(), "显示状态栏");
+        assert!(menu.items[3].is_separator());
+        assert_eq!(menu.items[4].label(), "跟随系统");
+        assert_eq!(menu.items[5].label(), "深色模式");
+        assert_eq!(menu.items[6].label(), "浅色模式");
+        assert!(menu.items[7].is_separator());
+        assert_eq!(menu.items[8].label(), "Sidebar 模式");
+        assert_eq!(menu.items[9].label(), "Tabs 模式");
+        assert!(menu.items[10].is_separator());
+        assert_eq!(menu.items[11].label(), "打开Settings");
     }
 
     // ── SidebarInteraction 测试 ──
@@ -1737,14 +1737,14 @@ mod tests {
     fn persistent_current_width_hidden() {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
         let p = SidebarInteraction::new(&cfg);
-        assert_eq!(p.current_width(&cfg), 0.0);
+        assert_eq!(p.current_width(&cfg, 1.0), 0.0);
     }
 
     #[test]
     fn persistent_current_width_pinned() {
         let cfg = SidebarConfig { pinned: true, width: 220.0 };
         let p = SidebarInteraction::new(&cfg);
-        assert_eq!(p.current_width(&cfg), 220.0);
+        assert_eq!(p.current_width(&cfg, 1.0), 220.0);
     }
 
     #[test]
@@ -1752,21 +1752,21 @@ mod tests {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
         let mut p = SidebarInteraction::new(&cfg);
         p.hover.visibility = Visibility::HoverPeek;
-        assert_eq!(p.current_width(&cfg), 220.0);
+        assert_eq!(p.current_width(&cfg, 1.0), 220.0);
     }
 
     #[test]
     fn persistent_editor_left_offset_pinned() {
         let cfg = SidebarConfig { pinned: true, width: 220.0 };
         let p = SidebarInteraction::new(&cfg);
-        assert_eq!(p.editor_left_offset(&cfg), 220.0);
+        assert_eq!(p.editor_left_offset(&cfg, 1.0), 220.0);
     }
 
     #[test]
     fn persistent_editor_left_offset_hidden() {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
         let p = SidebarInteraction::new(&cfg);
-        assert_eq!(p.editor_left_offset(&cfg), 0.0);
+        assert_eq!(p.editor_left_offset(&cfg, 1.0), 0.0);
     }
 
     #[test]
@@ -1774,7 +1774,7 @@ mod tests {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
         let mut p = SidebarInteraction::new(&cfg);
         p.hover.visibility = Visibility::HoverPeek;
-        assert_eq!(p.editor_left_offset(&cfg), 0.0);
+        assert_eq!(p.editor_left_offset(&cfg, 1.0), 0.0);
     }
 
     #[test]
@@ -1788,7 +1788,7 @@ mod tests {
 
     #[test]
     fn update_menu_hover_tracks_item() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -1823,7 +1823,7 @@ mod tests {
 
     #[test]
     fn update_menu_hover_ignores_separator() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -1848,7 +1848,7 @@ mod tests {
 
         // Find separator index (index 3)
         let menu = s.open_menu().unwrap().clone();
-        assert!(menu.items[3].is_separator);
+        assert!(menu.items[3].is_separator());
         let r = menu.item_rects[3];
         s.update_menu_hover(r.x + r.w * 0.5, r.y + r.h * 0.5);
         assert_eq!(s.menu_hovered_index(), None);
@@ -1856,7 +1856,7 @@ mod tests {
 
     #[test]
     fn update_menu_hover_resets_on_close() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -1891,7 +1891,7 @@ mod tests {
 
     #[test]
     fn settings_menu_overflow_protection() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -1925,7 +1925,7 @@ mod tests {
 
     #[test]
     fn menu_stays_open_after_pointer_leaves_until_explicitly_dismissed() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -1970,7 +1970,7 @@ mod tests {
 
     #[test]
     fn settings_menu_uses_latest_behavior_input() {
-        let cfg = SidebarConfig::new_default(2.0);
+        let cfg = SidebarConfig::new_default();
         let mut state = SidebarState::new(&cfg);
         let metrics =
             crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 2.0);
@@ -1984,16 +1984,16 @@ mod tests {
 
         state.open_settings_menu(800.0, 600.0, &metrics, &input);
         let menu = state.open_menu.as_ref().unwrap();
-        assert!(!menu.items[0].is_active);
-        assert!(!menu.items[1].is_active);
-        assert!(menu.items[2].is_active);
-        assert!(menu.items[5].is_active);
-        assert!(menu.items[9].is_active);
+        assert!(!menu.items[0].is_active());
+        assert!(!menu.items[1].is_active());
+        assert!(menu.items[2].is_active());
+        assert!(menu.items[5].is_active());
+        assert!(menu.items[9].is_active());
     }
 
     #[test]
     fn menu_does_not_close_when_mouse_inside() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Pinned);
         let input = SidebarInput {
@@ -2035,7 +2035,7 @@ mod tests {
     fn native_titlebar_places_sidebar_toggle_beside_file_actions() {
         for dpi in [1.0, 2.0] {
             for width in [160.0, 220.0, 400.0] {
-                let cfg = SidebarConfig { pinned: true, width: width * dpi };
+                let cfg = SidebarConfig { pinned: true, width };
                 let metrics = crate::settings::UiMetrics::from_settings(
                     &crate::settings::Settings::new(),
                     dpi,
@@ -2060,7 +2060,7 @@ mod tests {
                 );
                 assert!(layout.menu_btn_rect.right() < layout.new_btn_rect.x);
                 assert!(layout.new_menu_btn_rect.right() < layout.open_btn_rect.x);
-                assert!(layout.open_btn_rect.right() <= cfg.width);
+                assert!(layout.open_btn_rect.right() <= cfg.width_px(dpi));
                 assert_eq!(layout.new_btn_rect.y, 0.0);
             }
         }
@@ -2074,7 +2074,7 @@ mod tests {
                 (220.0, OPEN_BUTTON_WIDTH_LOGICAL),
                 (400.0, OPEN_BUTTON_WIDTH_LOGICAL),
             ] {
-                let cfg = SidebarConfig { pinned: true, width: width * dpi };
+                let cfg = SidebarConfig { pinned: true, width };
                 let metrics = crate::settings::UiMetrics::from_settings(
                     &crate::settings::Settings::new(),
                     dpi,
@@ -2096,7 +2096,7 @@ mod tests {
                 );
                 assert_eq!(layout.new_btn_rect.y, layout.open_btn_rect.y);
                 assert!(layout.new_menu_btn_rect.right() < layout.open_btn_rect.x);
-                assert!(layout.open_btn_rect.right() <= cfg.width);
+                assert!(layout.open_btn_rect.right() <= cfg.width_px(dpi));
                 assert_eq!(layout.open_btn_rect.w, expected_open_width * dpi);
                 for (rect, action) in [
                     (layout.new_btn_rect, SidebarAction::NewDocument(NewDocumentKind::Markdown)),
@@ -2125,7 +2125,7 @@ mod tests {
 
     #[test]
     fn pinned_sidebar_returns_when_window_is_widened() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let (mut state, metrics) = laid_out_sidebar_state(1.0);
         let mut input = SidebarInput {
             tabs: &[],
@@ -2144,7 +2144,7 @@ mod tests {
 
     #[test]
     fn automatically_hidden_sidebar_can_remain_temporarily_expanded() {
-        let cfg = SidebarConfig::new_default(1.0);
+        let cfg = SidebarConfig::new_default();
         let (mut state, metrics) = laid_out_sidebar_state(1.0);
         state.set_visibility(Visibility::HoverPeek);
         let input = SidebarInput {

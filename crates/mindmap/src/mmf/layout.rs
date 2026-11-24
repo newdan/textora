@@ -1,5 +1,5 @@
-use super::model::*;
-use super::utils::collect_nodes_dfs;
+pub use super::model::SourceNodeIdx;
+use super::model::{Node, Tree};
 use shaping::{GlyphCluster, Shaper};
 use std::cmp::Ordering;
 use std::ops::Range;
@@ -88,6 +88,10 @@ impl LayoutConstants {
     }
 }
 
+/// Index into the visible nodes of a layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleNodeIdx(pub usize);
+
 /// 单个节点的布局结果
 #[derive(Debug, Clone)]
 pub struct LayoutNode {
@@ -95,10 +99,10 @@ pub struct LayoutNode {
     pub y: f32,
     pub w: f32,
     pub h: f32,
-    /// 布局数组中的可见节点序号（保留旧字段供现有渲染代码使用）。
-    pub node_idx: usize,
+    /// 布局数组中的可见节点序号。
+    pub node_idx: VisibleNodeIdx,
     /// 节点在完整 AST DFS 先序遍历中的序号。
-    pub source_node_index: usize,
+    pub source_node_index: SourceNodeIdx,
     pub depth: u8,
     pub connector_from: (f32, f32),    // 连线起点（父右边缘中点）
     pub connector_to: (f32, f32),      // 连线终点（本节点左边缘中点）
@@ -111,7 +115,7 @@ pub struct LayoutNode {
 pub struct LayoutTree {
     pub nodes: Vec<LayoutNode>, // DFS 序
     /// 按 `(y, x)` 稳定排序的 DFS 节点索引，用于确定性的视口裁剪。
-    pub y_sorted_indices: Vec<usize>,
+    pub y_sorted_indices: Vec<VisibleNodeIdx>,
     pub total_w: f32,
     pub total_h: f32,
 }
@@ -145,7 +149,7 @@ impl LayoutTree {
     }
 
     /// 返回与垂直视口（含缓冲区）相交的节点 DFS 索引，顺序按 `(y, x)` 确定。
-    pub fn visible_node_indices(&self, viewport: Rect, buffer: f32) -> Vec<usize> {
+    pub fn visible_node_indices(&self, viewport: Rect, buffer: f32) -> Vec<VisibleNodeIdx> {
         let top = viewport.y - buffer;
         let bottom = viewport.y + viewport.h + buffer;
 
@@ -153,7 +157,7 @@ impl LayoutTree {
             .iter()
             .copied()
             .filter(|&index| {
-                let node = &self.nodes[index];
+                let node = &self.nodes[index.0];
                 node.y + node.h >= top
                     && node.y <= bottom
                     && node.x + node.w >= viewport.x - buffer
@@ -227,8 +231,8 @@ fn assign_positions(
         y: card_y,
         w: card_w,
         h: card_h,
-        node_idx: visible_node_index,
-        source_node_index,
+        node_idx: VisibleNodeIdx(visible_node_index),
+        source_node_index: SourceNodeIdx(source_node_index),
         depth,
         connector_from,
         connector_to,
@@ -371,7 +375,7 @@ pub fn compute_layout(
     let mut nodes = Vec::new();
     let mut card_widths_by_depth = Vec::new();
     collect_card_widths_by_depth(
-        &tree.root,
+        tree.root(),
         0,
         0,
         constants,
@@ -380,7 +384,7 @@ pub fn compute_layout(
         &mut card_widths_by_depth,
     );
     assign_positions(
-        &tree.root,
+        tree.root(),
         0,
         0,
         0.0,
@@ -392,14 +396,14 @@ pub fn compute_layout(
         &card_widths_by_depth,
         &mut nodes,
     );
-    let total_h = subtree_height(&tree.root, 0, 0, constants);
+    let total_h = subtree_height(tree.root(), 0, 0, constants);
     let total_w = nodes.iter().map(|node| node.x + node.w).max_by(f32::total_cmp).unwrap_or(0.0);
-    let mut y_sorted_indices: Vec<usize> = (0..nodes.len()).collect();
+    let mut y_sorted_indices: Vec<_> = (0..nodes.len()).map(VisibleNodeIdx).collect();
     y_sorted_indices.sort_by(|left, right| {
-        nodes[*left]
+        nodes[left.0]
             .y
-            .total_cmp(&nodes[*right].y)
-            .then_with(|| nodes[*left].x.total_cmp(&nodes[*right].x))
+            .total_cmp(&nodes[right.0].y)
+            .then_with(|| nodes[left.0].x.total_cmp(&nodes[right.0].x))
     });
 
     LayoutTree { nodes, y_sorted_indices, total_w, total_h }
@@ -459,11 +463,8 @@ pub fn build_hit_map(
     let mut node_rects = Vec::with_capacity(n);
     let mut title_char_edges = Vec::with_capacity(n);
 
-    // DFS 收集节点引用；布局只保留可见节点，因此必须按完整 DFS 序查找。
-    let nodes = collect_nodes_dfs(&tree.root);
-
     for ln in &layout.nodes {
-        let Some(node) = nodes.get(ln.source_node_index) else {
+        let Some(node) = tree.node(ln.source_node_index.0) else {
             continue;
         };
         // 命中几何必须与渲染（Task 8）使用同一按深度缩放的字号，否则点击/光标会漂移。
@@ -471,7 +472,7 @@ pub fn build_hit_map(
         shaper.set_font_size(base_size * constants.font_scale_for_depth(ln.depth));
         let text_x = ln.x + constants.card_padding_x;
         let title = projected_title
-            .filter(|projected| projected.node_index == ln.source_node_index)
+            .filter(|projected| projected.node_index == ln.source_node_index.0)
             .map(|projected| projected.text)
             .unwrap_or_else(|| title_or_placeholder(&node.title));
         let grapheme_byte_offsets = grapheme_byte_boundaries(title);
@@ -493,7 +494,7 @@ pub fn build_hit_map(
             &grapheme_edges,
         ));
         hit_nodes.push(NodeHitGeometry {
-            source_node_index: ln.source_node_index,
+            source_node_index: ln.source_node_index.0,
             card_rect,
             title_rect,
             grapheme_byte_offsets,
@@ -503,22 +504,22 @@ pub fn build_hit_map(
         });
     }
 
-    let controls = build_control_hit_geometries(layout, &nodes, constants);
+    let controls = build_control_hit_geometries(layout, tree, constants);
 
     HitMap { nodes: hit_nodes, controls, node_rects, title_char_edges }
 }
 
 fn build_control_hit_geometries(
     layout: &LayoutTree,
-    source_nodes: &[&Node],
+    tree: &Tree,
     constants: &LayoutConstants,
 ) -> Vec<ControlHitGeometry> {
     let mut controls = Vec::new();
     for (visible_index, layout_node) in layout.nodes.iter().enumerate() {
-        let Some(node) = source_nodes.get(layout_node.source_node_index) else {
+        let Some(node) = tree.node(layout_node.source_node_index.0) else {
             continue;
         };
-        if layout_node.source_node_index == 0 || node.children.is_empty() {
+        if layout_node.source_node_index.0 == 0 || node.children.is_empty() {
             continue;
         }
 
@@ -532,7 +533,7 @@ fn build_control_hit_geometries(
             .nodes
             .get(visible_index + 1)
             .filter(|first_child| {
-                first_child.source_node_index == layout_node.source_node_index + 1
+                first_child.source_node_index.0 == layout_node.source_node_index.0 + 1
             })
             .and_then(|first_child| first_child.connector_turn_x)
             .unwrap_or(
@@ -543,7 +544,7 @@ fn build_control_hit_geometries(
         let center_y = layout_node.y + layout_node.h / 2.0;
         let half_size = control_size / 2.0;
         controls.push(ControlHitGeometry {
-            source_node_index: layout_node.source_node_index,
+            source_node_index: layout_node.source_node_index.0,
             bounds: Rect::new(
                 control_turn_x - half_size,
                 center_y - half_size,
@@ -843,7 +844,7 @@ mod tests {
 
         assert_eq!(geometry.grapheme_byte_offsets, vec![0, 1, 19, 22]);
         assert_eq!(geometry.grapheme_byte_offsets.first(), Some(&0));
-        assert_eq!(geometry.grapheme_byte_offsets.last(), Some(&tree.root.title.len()));
+        assert_eq!(geometry.grapheme_byte_offsets.last(), Some(&tree.root().title.len()));
         assert_eq!(geometry.grapheme_byte_offsets.len(), geometry.grapheme_edges.len());
     }
 
@@ -882,12 +883,12 @@ mod tests {
 
         assert!(visible.len() < layout.nodes.len());
         assert!(visible.iter().all(|&index| {
-            let node = &layout.nodes[index];
+            let node = &layout.nodes[index.0];
             node.y + node.h >= 0.0 && node.y <= 50.0
         }));
         assert!(visible.windows(2).all(|pair| {
-            let left = &layout.nodes[pair[0]];
-            let right = &layout.nodes[pair[1]];
+            let left = &layout.nodes[pair[0].0];
+            let right = &layout.nodes[pair[1].0];
             (left.y, left.x) <= (right.y, right.x)
         }));
     }
@@ -900,15 +901,15 @@ mod tests {
                 y: 20.0,
                 w: 30.0,
                 h: 40.0,
-                node_idx: 0,
-                source_node_index: 0,
+                node_idx: VisibleNodeIdx(0),
+                source_node_index: SourceNodeIdx(0),
                 depth: 0,
                 connector_from: (-50.0, 100.0),
                 connector_to: (-20.0, -30.0),
                 connector_turn_x: None,
                 branch_index: None,
             }],
-            y_sorted_indices: vec![0],
+            y_sorted_indices: vec![VisibleNodeIdx(0)],
             total_w: 40.0,
             total_h: 60.0,
         };
@@ -925,10 +926,10 @@ mod tests {
         let layout = compute_layout(&tree, &mut shaper, &LayoutConstants::default(), None);
 
         assert_eq!(
-            layout.nodes.iter().map(|node| node.source_node_index).collect::<Vec<_>>(),
+            layout.nodes.iter().map(|node| node.source_node_index.0).collect::<Vec<_>>(),
             vec![0, 1, 3]
         );
-        assert!(layout.nodes.iter().all(|node| node.source_node_index != 2));
+        assert!(layout.nodes.iter().all(|node| node.source_node_index.0 != 2));
     }
 
     #[test]
@@ -936,9 +937,9 @@ mod tests {
         let tree =
             parser::parse("# Root\n## A\n### B\n#### C\n## D\n").expect("fixture must parse");
 
-        assert_eq!(descendant_count(&tree.root), 4);
-        assert_eq!(descendant_count(&tree.root.children[0]), 2);
-        assert_eq!(descendant_count(&tree.root.children[0].children[0]), 1);
+        assert_eq!(descendant_count(tree.root()), 4);
+        assert_eq!(descendant_count(&tree.root().children[0]), 2);
+        assert_eq!(descendant_count(&tree.root().children[0].children[0]), 1);
     }
 
     #[test]
@@ -956,12 +957,12 @@ mod tests {
         let collapsed_child = collapsed_layout
             .nodes
             .iter()
-            .find(|node| node.source_node_index == 1)
+            .find(|node| node.source_node_index.0 == 1)
             .expect("collapsed child layout");
         let expanded_child = expanded_layout
             .nodes
             .iter()
-            .find(|node| node.source_node_index == 1)
+            .find(|node| node.source_node_index.0 == 1)
             .expect("expanded child layout");
         assert!(
             (collapsed_child.w - expanded_child.w).abs() < f32::EPSILON,
@@ -983,11 +984,11 @@ mod tests {
             vec![1]
         );
         let branch_layout =
-            layout.nodes.iter().find(|node| node.source_node_index == 1).expect("branch layout");
+            layout.nodes.iter().find(|node| node.source_node_index.0 == 1).expect("branch layout");
         let first_child_layout = layout
             .nodes
             .iter()
-            .find(|node| node.source_node_index == 2)
+            .find(|node| node.source_node_index.0 == 2)
             .expect("first child layout");
         let control = &hit_map.controls[0];
         assert_eq!(control.bounds.w, constants.nested_child_gap);
@@ -1045,7 +1046,7 @@ mod tests {
         let layout = compute_layout(&tree, &mut shaper, &constants, None);
         let hit_map = build_hit_map(&tree, &layout, &mut shaper, &constants, None);
         let branch =
-            layout.nodes.iter().find(|node| node.source_node_index == 1).expect("branch layout");
+            layout.nodes.iter().find(|node| node.source_node_index.0 == 1).expect("branch layout");
         let control = hit_map.controls.first().expect("branch control");
         let control_center_x = control.bounds.x + control.bounds.w / 2.0;
         let connector_turn_x = branch.x + branch.w + constants.nested_child_gap / 2.0;
@@ -1141,7 +1142,7 @@ mod tests {
         let first_child = layout
             .nodes
             .iter()
-            .find(|node| node.source_node_index == 2)
+            .find(|node| node.source_node_index.0 == 2)
             .expect("first child layout");
         let control = hit_map.controls.first().expect("branch control");
         let control_center_x = control.bounds.x + control.bounds.w / 2.0;

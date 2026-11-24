@@ -505,7 +505,7 @@ impl ViewPlugin for MarkdownEditorView {
             return commands;
         }
         editor_render::render_engine(
-            &mut self.engine,
+            &mut self.engine.document_layout,
             &self.source,
             None,
             bounds,

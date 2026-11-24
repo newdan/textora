@@ -4,6 +4,7 @@
 use super::layout::max_tab_scroll;
 use super::{TabBarAction, TabBarCtx, TabBarInput, TabBarState, TabHit, tab_bar_height};
 use crate::core::geom::Rect;
+#[cfg(test)]
 use crate::core::paint::DrawList;
 use crate::core::text_util::estimate_text_width_px;
 use crate::core::widget::{Event, EventCtx, LayoutCtx, PaintCtx, Widget, WidgetAction};
@@ -114,15 +115,13 @@ impl Widget for TabBarWidget {
     }
 
     fn paint(&self, ctx: &mut PaintCtx) {
-        let mut dl = DrawList::new();
         self.state.to_drawlist(
             self.active_index,
             ctx.theme,
             ctx.dpi,
-            &mut dl,
+            ctx.list,
             ctx.shaper.as_deref_mut(),
         );
-        ctx.list.cmds.extend(dl.cmds);
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {
@@ -252,6 +251,22 @@ mod tests {
         let mut ctx = LayoutCtx { ui_measure: None, measure: &mut m, theme: &t, dpi: 1.0 };
         w.set_rect(Rect::new(0.0, 0.0, 800.0, 32.0), &mut ctx);
         w
+    }
+
+    #[test]
+    fn tab_bar_paint_uses_parent_draw_list_offset() {
+        use crate::core::paint::DrawCmd;
+
+        let widget = setup_widget(3);
+        let theme = crate::theme::test_theme();
+        let mut commands = DrawList::new();
+        commands.offset = (18.0, 42.0);
+        widget.paint(&mut PaintCtx::new(&mut commands, &theme, 1.0));
+
+        let Some(DrawCmd::FillRect { rect, .. }) = commands.cmds.first() else {
+            panic!("tab strip must draw its background");
+        };
+        assert_eq!((rect.x, rect.y), (18.0, 42.0));
     }
 
     #[test]

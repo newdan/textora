@@ -4,7 +4,6 @@
 use std::time::{Duration, Instant};
 
 use crate::app::{App, compute_cursor_phase};
-use crate::app_init::build_product_workspace;
 use crate::ui_shell::ShellInputs;
 use crate::workspace_persistence::restore_workspace;
 use appkit_shell::ProductHost;
@@ -93,14 +92,6 @@ fn window_position_has_visible_region(
     })
 }
 
-pub(crate) fn ime_cursor_x(
-    cursor_rect: ui::core::geom::Rect,
-    cursor_is_preedit_projected: bool,
-    preedit_advance_px: f32,
-) -> f32 {
-    if cursor_is_preedit_projected { cursor_rect.x } else { cursor_rect.x + preedit_advance_px }
-}
-
 impl App {
     /// 设置弹窗中聚焦输入框的 IME 光标区域（窗口物理坐标）。
     fn settings_overlay_ime_cursor_rect(&self) -> Option<ui::core::geom::Rect> {
@@ -151,7 +142,7 @@ impl App {
     pub(crate) fn build_shell_inputs(&self) -> ShellInputs {
         let metrics = self.ui_metrics();
         let dpi = metrics.dpi;
-        let view_mode = self.settings.view_mode;
+        let view_mode = self.editor_runtime.settings().view_mode;
 
         let tabs_visible = match view_mode {
             ui::view_mode::ViewMode::Tabs => self.editor_tab_count() > 1,
@@ -164,15 +155,21 @@ impl App {
         let search_thickness =
             if search_visible { ui::search_bar::SEARCH_BAR_HEIGHT * dpi } else { 0.0 };
 
-        let status_thickness =
-            if self.settings.show_status_bar { metrics.status_bar_height } else { 0.0 };
+        let status_thickness = if self.editor_runtime.settings().show_status_bar {
+            metrics.status_bar_height
+        } else {
+            0.0
+        };
 
         let sidebar_visible = match view_mode {
             ui::view_mode::ViewMode::Sidebar => true,
             _ => false,
         };
-        let sidebar_thickness =
-            if sidebar_visible { self.ui_shell.sidebar_editor_left_offset().max(0.5) } else { 0.0 };
+        let sidebar_thickness = if sidebar_visible {
+            self.ui_shell.sidebar_editor_left_offset(dpi).max(0.5)
+        } else {
+            0.0
+        };
 
         let scrollbar_thickness =
             if self.active_is_canvas() { 0.0 } else { metrics.scrollbar_reserve };
@@ -190,7 +187,9 @@ impl App {
             toc_visible: toc_vis,
             toc_thickness: if toc_vis { metrics.toc_width } else { 0.0 },
             metrics,
-            sidebar_settings: ui::sidebar::SidebarSettingsInput::from(&self.settings),
+            sidebar_settings: ui::sidebar::SidebarSettingsInput::from(
+                self.editor_runtime.settings(),
+            ),
         }
     }
 
@@ -199,9 +198,7 @@ impl App {
         self.record_all_entries_to_history();
         self.save_history();
         self.save_window_geometry();
-        if let Some(monitor) = self.library_file_monitor.take() {
-            monitor.shutdown();
-        }
+        self.workspace_services.stop_monitor();
         self.shutdown_product_services();
         self.editor_runtime.shutdown();
         event_loop.exit();
@@ -232,43 +229,7 @@ impl App {
         settings.window_width = Some(logical_window_dimension(size.width, scale_factor));
         settings.window_height = Some(logical_window_dimension(size.height, scale_factor));
         settings.window_geometry_is_logical = true;
-        let (
-            theme_mode,
-            show_line_numbers,
-            word_wrap,
-            markdown_first_line_indent,
-            text_spacing_mode,
-            show_status_bar,
-            font_family,
-            font_size,
-            line_height_ratio,
-            tab_width,
-        ) = {
-            let s = &self.settings;
-            (
-                s.theme_mode,
-                s.show_line_numbers,
-                s.word_wrap,
-                s.markdown_first_line_indent,
-                s.text_spacing_mode,
-                s.show_status_bar,
-                s.font_family.clone(),
-                s.font_size,
-                s.line_height_ratio,
-                s.tab_width,
-            )
-        };
-        settings.theme_mode = theme_mode;
-        settings.show_line_numbers = show_line_numbers;
-        settings.word_wrap = word_wrap;
-        settings.markdown_first_line_indent = markdown_first_line_indent;
-        settings.text_spacing_mode = text_spacing_mode;
-        settings.show_status_bar = show_status_bar;
-        settings.font_family = font_family;
-        settings.font_size = font_size;
-        settings.line_height_ratio = line_height_ratio;
-        settings.tab_width = tab_width;
-        settings.sidebar_width = self.sidebar_width_for_persistence();
+        settings.sidebar_width = self.ui_shell.sidebar_width_logical();
         if let Err(e) = crate::settings_io::save(&self.paths.settings_file, &settings) {
             eprintln!("[settings] save error: {}", e);
         }
@@ -315,18 +276,21 @@ impl App {
                         PhysicalSize::new(2.0, ime_rect.h as f64),
                     );
                 }
-            } else if let Some(tab) = self.active_tab_session() {
-                let cursor_byte = tab.document().cursor_offset().to_usize();
-                let handles_own_rendering = self.active_handles_own_rendering();
-                if let Some(rect) = self.plugin_cursor_window_rect(cursor_byte) {
-                    let cursor_x =
-                        ime_cursor_x(rect, handles_own_rendering, self.preedit_advance_px);
-                    let cursor_y = rect.y + rect.h;
-                    window.set_ime_cursor_area(
-                        PhysicalPosition::new(cursor_x as f64, cursor_y as f64),
-                        PhysicalSize::new(2.0, rect.h as f64),
-                    );
-                }
+                return;
+            }
+
+            let rect = if self.active_handles_own_rendering() {
+                self.active_tab_session().and_then(|tab| {
+                    self.plugin_cursor_window_rect(tab.document().cursor_offset().to_usize())
+                })
+            } else {
+                self.editor_runtime.active_editor_ime_cursor_rect()
+            };
+            if let Some(rect) = rect {
+                window.set_ime_cursor_area(
+                    PhysicalPosition::new(rect.x as f64, rect.bottom() as f64),
+                    PhysicalSize::new(2.0, rect.h as f64),
+                );
             }
         }
     }
@@ -361,7 +325,7 @@ impl App {
 
     pub(crate) fn apply_resize_layout(&mut self, height: u32, width_changed: bool) {
         let lh = self.ui_metrics().line_height;
-        self.needs_redraw = true;
+        self.platform.schedule_redraw();
 
         if width_changed {
             let tab_ids = self.editor_tab_ids_in_order();
@@ -395,7 +359,7 @@ impl App {
 
     /// 是否有正在进行的动画（标签栏滚动）需要持续渲染。
     pub(crate) fn has_active_animation(&self) -> bool {
-        self.tab_scroll.is_animating() || self.sidebar_animating
+        self.ui_shell.animations_pending()
     }
 
     /// 计算下一次需要唤醒事件循环的时间点。
@@ -492,33 +456,24 @@ impl App {
             )));
         }
         let shared_font_system = self.resolve_startup_font_system();
+        let font_size = self.persisted_font_size();
+        let font_family = self.editor_runtime.settings().font_family.clone();
         self.editor_runtime
-            .resume(
-                event_loop,
-                attrs,
-                shared_font_system.clone(),
-                self.persisted_font_size(),
-                &self.settings.font_family,
-            )
+            .resume(event_loop, attrs, shared_font_system.clone(), font_size, &font_family)
             .map_err(|error| GpuError::SurfaceCreation(error.to_string()))?;
-        let scale_factor = self.editor_runtime.scale_factor();
-        self.ui_shell.scale_sidebar_width(scale_factor as f32);
-        self.ui_shell.sidebar_clamp_width(scale_factor as f32);
         let window = self.editor_runtime.window().ok_or(GpuError::NoAdapter)?;
-        if let Some(event_loop_proxy) = self.event_loop_proxy.clone() {
-            self.accessibility_adapter =
-                Some(PlatformAccessibilityAdapter::new(event_loop, window, event_loop_proxy));
+        if let Some(event_loop_proxy) = self.platform.event_loop_proxy().cloned() {
+            self.platform.install_accessibility(PlatformAccessibilityAdapter::new(
+                event_loop,
+                window,
+                event_loop_proxy,
+            ));
         }
         window.set_visible(true);
         window.set_ime_allowed(true);
         window.set_cursor(winit::window::CursorIcon::Text);
         // Follow system appearance after runtime creates the window.
-        self.current_theme = {
-            let system = window.theme().unwrap_or(winit::window::Theme::Dark);
-            let mode = &self.settings.theme_mode;
-            ui::Theme::resolve(*mode, system, &self.active_theme_pair, &self.theme_registry)
-        };
-        self.editor_runtime.update_theme(self.current_theme.clone());
+        self.rebuild_theme_state(window.theme().unwrap_or(winit::window::Theme::Dark));
         eprintln!("[startup] window create + theme: {:?}", _t0.elapsed());
 
         // Both view modes draw content beneath the native macOS traffic lights.
@@ -559,32 +514,32 @@ impl App {
         self.editor_runtime.start_reshape_worker(
             shared_font_system,
             metrics.font_size,
-            self.settings.font_family.clone(),
+            font_family,
         );
 
         let _t3 = std::time::Instant::now();
         let screen_h =
             self.editor_runtime.surface_size().map_or(600.0, |(_, height)| height as f32);
         // Clean up orphaned snapshot files once at startup
-        self.workspace_store.cleanup_snapshot_orphans();
-        if let Ok(Some(restored_snap)) = self.workspace_store.load_workspace() {
+        self.workspace_services.store().cleanup_snapshot_orphans();
+        if let Ok(Some(restored_snap)) = self.workspace_services.store().load_workspace() {
             let viewport = self.viewport_dimensions(screen_h);
-            let line_height = metrics.line_height as f64;
-            if let Ok(restored) = restore_workspace(
-                build_product_workspace(),
+            if restore_workspace(
+                &mut self.editor_runtime,
                 restored_snap,
                 viewport,
-                line_height,
+                metrics.line_height,
                 &self.paths.snapshots_dir,
-            ) {
-                eprintln!("[startup] workspace restored: {} tabs", restored.workspace.len());
-                self.replace_editor_model(restored.workspace, restored.runtimes);
+            )
+            .is_ok()
+            {
+                eprintln!("[startup] workspace restored: {} tabs", self.editor_runtime.tab_count());
                 self.refresh_file_monitor_roots();
                 // Auto-scroll active tab into view after workspace restore
                 let effect = self.update_entry_layout();
                 self.apply_effect(effect);
                 // Clear file_path so we don't double-open
-                self.file_path = None;
+                self.platform.clear_startup_file();
                 // Initialize display map for the active tab (needed for scroll_anchor restore)
                 if let Some(active_tab_id) = self.active_tab_id()
                     && let Some(active_index) = self.editor_tab_index(active_tab_id)
@@ -600,7 +555,7 @@ impl App {
         eprintln!("[startup] load_file: {:?}", _t3.elapsed());
 
         let _t4 = std::time::Instant::now();
-        if let Ok(paths) = self.workspace_store.load_pinned_paths() {
+        if let Ok(paths) = self.workspace_services.store().load_pinned_paths() {
             self.restore_editor_pinned_paths(&paths);
         }
         eprintln!("[startup] load_pinned: {:?}", _t4.elapsed());
@@ -688,7 +643,8 @@ mod build_shell_inputs_tests {
     #[test]
     fn tabs_mode_single_doc_hides_tabs() {
         let mut app = app_with_n_docs(1);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
         let inputs = app.build_shell_inputs();
         assert!(!inputs.tabs_visible, "单文档 Tabs 模式下 tabs 应隐藏");
         assert_eq!(inputs.tabs_thickness, 0.0);
@@ -697,7 +653,8 @@ mod build_shell_inputs_tests {
     #[test]
     fn tabs_mode_multi_doc_shows_tabs() {
         let mut app = app_with_n_docs(3);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
         let inputs = app.build_shell_inputs();
         assert!(inputs.tabs_visible, "多文档 Tabs 模式下 tabs 应可见");
         assert!(inputs.tabs_thickness > 0.0);
@@ -706,7 +663,8 @@ mod build_shell_inputs_tests {
     #[test]
     fn sidebar_mode_never_shows_tabs() {
         let mut app = app_with_n_docs(3);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         let inputs = app.build_shell_inputs();
         assert!(!inputs.tabs_visible, "Sidebar 模式下 tabs 应始终隐藏");
     }
@@ -714,15 +672,17 @@ mod build_shell_inputs_tests {
     #[test]
     fn editor_left_margin_clears_gutter_in_sidebar_mode() {
         let mut app = app_with_n_docs(1);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         app.ui_shell.set_sidebar_pinned(true);
-        app.ui_shell.set_sidebar_width(220.0);
+        app.ui_shell.set_sidebar_width_logical(220.0);
         app.ui_shell.set_sidebar_visibility(Visibility::Pinned);
 
         let line_count = 1000; // 4 位数 gutter，宽度可观
         let lm = app.editor_left_margin(line_count);
-        let gutter_w = app.settings.gutter_width(line_count) * app.ui_metrics().dpi;
-        let sidebar_offset = app.ui_shell.sidebar_editor_left_offset();
+        let gutter_w =
+            app.editor_runtime.settings().gutter_width(line_count) * app.ui_metrics().dpi;
+        let sidebar_offset = app.ui_shell.sidebar_editor_left_offset(app.ui_metrics().dpi);
         // gutter 左边界必须不小于 sidebar 右边界
         assert!(
             lm - gutter_w >= sidebar_offset,
@@ -736,7 +696,8 @@ mod build_shell_inputs_tests {
     #[test]
     fn sidebar_pinned_reserves_left_space() {
         let mut app = app_with_n_docs(2);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         app.ui_shell.set_sidebar_pinned(true);
         let inputs = app.build_shell_inputs();
         assert!(inputs.sidebar_visible, "pinned sidebar 应可见");
@@ -746,7 +707,8 @@ mod build_shell_inputs_tests {
     #[test]
     fn sidebar_not_pinned_no_space_reserved() {
         let mut app = app_with_n_docs(2);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         app.ui_shell.set_sidebar_pinned(false);
         app.ui_shell.set_sidebar_visibility(Visibility::Hidden);
         let inputs = app.build_shell_inputs();
@@ -757,15 +719,14 @@ mod build_shell_inputs_tests {
     #[test]
     fn status_bar_present_when_enabled() {
         let mut app = app_with_n_docs(1);
-        {
-            let s = &mut app.settings;
-            s.view_mode = ui::view_mode::ViewMode::Tabs;
-            s.show_status_bar = true;
-        }
+        app.editor_runtime.edit_settings(|settings| {
+            settings.set_view_mode(ui::view_mode::ViewMode::Tabs);
+            settings.set_show_status_bar(true);
+        });
         let inputs = app.build_shell_inputs();
         assert!(inputs.status_thickness > 0.0, "status bar 有厚度");
 
-        app.settings.show_status_bar = false;
+        app.editor_runtime.edit_settings(|settings| settings.show_status_bar = false);
         let inputs2 = app.build_shell_inputs();
         assert_eq!(inputs2.status_thickness, 0.0, "关闭时无厚度");
     }
@@ -773,7 +734,8 @@ mod build_shell_inputs_tests {
     #[test]
     fn scrollbar_always_present() {
         let mut app = app_with_n_docs(1);
-        app.settings.view_mode = ui::view_mode::ViewMode::Tabs;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Tabs);
         let inputs = app.build_shell_inputs();
         assert!(inputs.scrollbar_thickness > 0.0, "scrollbar 应始终有厚度");
     }
@@ -1074,7 +1036,8 @@ mod sidebar_hover_peek_tests {
         let mut app = App::new(None);
         let _ = app.new_untitled_doc();
         app.switch_workspace_for_test(0);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         app.ui_shell.set_sidebar_pinned(false);
 
         // 设置为 HoverPeek 态
@@ -1093,12 +1056,13 @@ mod sidebar_hover_peek_tests {
         let mut app = App::new(None);
         let _ = app.new_untitled_doc();
         app.switch_workspace_for_test(0);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         app.ui_shell.set_sidebar_pinned(false);
         app.ui_shell.set_sidebar_visibility(Visibility::HoverPeek);
 
         // current_width 返回 cfg.width（非零），但 editor_left_offset 为 0（浮层不占位）
-        let hover_width = app.ui_shell.sidebar_current_width();
+        let hover_width = app.ui_shell.sidebar_current_width(app.ui_metrics().dpi);
         assert!(hover_width > 0.0, "HoverPeek 时 current_width 应 > 0（浮层面板宽度）");
 
         let inputs = app.build_shell_inputs();
@@ -1113,7 +1077,8 @@ mod sidebar_hover_peek_tests {
         let mut app = App::new(None);
         let _ = app.new_untitled_doc();
         app.switch_workspace_for_test(0);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         app.ui_shell.set_sidebar_pinned(false);
         app.ui_shell.set_sidebar_visibility(Visibility::Hidden);
 
@@ -1127,7 +1092,8 @@ mod sidebar_hover_peek_tests {
         let mut app = App::new(None);
         let _ = app.new_untitled_doc();
         app.switch_workspace_for_test(0);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         app.ui_shell.set_sidebar_pinned(true);
         app.ui_shell.set_sidebar_visibility(Visibility::Pinned);
 

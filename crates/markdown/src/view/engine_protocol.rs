@@ -1,6 +1,22 @@
 use super::*;
 
 impl<S: BlockSource> BlockViewEngine<S> {
+    pub fn headings(&self) -> &[HeadingEntry] {
+        self.document_layout.headings()
+    }
+
+    pub fn current_heading_index(&self, scroll_y: f32) -> Option<usize> {
+        self.document_layout.current_heading_index(scroll_y)
+    }
+
+    pub fn scroll_to_heading(&mut self, index: usize) {
+        self.document_layout.scroll_to_heading(index);
+    }
+
+    pub fn scroll(&mut self, delta: f32, viewport_height: f32) -> bool {
+        self.document_layout.scroll(delta, viewport_height)
+    }
+
     /// 编辑干预：Enter/Backspace/Tab/InsertText 的 markdown 感知行为。委派到
     /// [`crate::augmenter`]（2026-07-06 方案阶段 2b/2c 抽出）。
     pub fn augment_edit(

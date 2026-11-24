@@ -5,6 +5,7 @@
 
 use ui::core::widget::{ControlAction, TextPayload, WidgetAction, WidgetId};
 use ui::editor_header::{EditorHeaderInput, EditorHeaderWidget};
+use ui::editor_toolbar::EditorToolbarAction;
 use ui::editor_toolbar::{EditorToolbarInput, EditorToolbarWidget};
 use ui::location_picker::{LocationPickerInput, LocationPickerWidget};
 use ui::popup_menu::{OverflowEntry, PopupMenu, PopupMenuAction, PopupMenuWidget, PopupOutcome};
@@ -309,16 +310,17 @@ impl EditorPaneChrome {
         {
             let local_event = translate_event(event, self.rects.toolbar.x, self.rects.toolbar.y);
             let action = self.toolbar.on_event(&local_event, context);
-            if matches!(
-                action,
-                Some(WidgetAction::Control(ControlAction::Activated {
-                    id: ui::editor_toolbar::EDITOR_TOOLBAR_OVERFLOW_ID,
-                }))
-            ) {
-                self.open_toolbar_overflow();
-                return Some(WidgetAction::Consumed);
-            }
-            return action;
+            return match action {
+                Some(WidgetAction::EditorToolbar(EditorToolbarAction::OverflowOpened)) => {
+                    self.open_toolbar_overflow();
+                    Some(WidgetAction::Consumed)
+                }
+                Some(WidgetAction::EditorToolbar(EditorToolbarAction::Dismissed)) => {
+                    self.close_toolbar_overflow();
+                    Some(WidgetAction::Consumed)
+                }
+                action => action,
+            };
         }
         None
     }
@@ -491,7 +493,7 @@ impl EditorPaneChrome {
             self.dpi,
         );
         for (item, command) in menu.items.iter_mut().zip(&hidden_commands) {
-            item.enabled = command.enabled;
+            item.set_enabled(command.enabled);
         }
         let command_keys =
             hidden_commands.iter().map(|command| command.command_key.clone()).collect::<Vec<_>>();
@@ -500,7 +502,7 @@ impl EditorPaneChrome {
                 && self.toolbar_overflow_command_keys == command_keys
                 && current_menu.menu().items.len() == hidden_commands.len()
                 && current_menu.menu().items.iter().zip(&hidden_commands).all(|(item, command)| {
-                    item.label == command.label && item.enabled == command.enabled
+                    item.label() == command.label && item.is_selectable() == command.enabled
                 })
         });
         if menu_unchanged {
@@ -525,10 +527,7 @@ impl EditorPaneChrome {
             )))) => {
                 let command_key = self.toolbar_overflow_command_keys.get(index)?.clone();
                 self.close_toolbar_overflow();
-                Some(WidgetAction::Control(ControlAction::TextCommitted {
-                    id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
-                    value: TextPayload::Plain(command_key),
-                }))
+                Some(WidgetAction::EditorToolbar(EditorToolbarAction::CommandInvoked(command_key)))
             }
             Some(WidgetAction::Popup(PopupOutcome::Dismiss)) => {
                 self.close_toolbar_overflow();
@@ -1186,10 +1185,9 @@ mod tests {
 
         assert_eq!(
             action,
-            Some(WidgetAction::Control(ControlAction::TextCommitted {
-                id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
-                value: TextPayload::Plain("canvas_zoom_out".to_owned()),
-            }))
+            Some(WidgetAction::EditorToolbar(EditorToolbarAction::CommandInvoked(
+                "canvas_zoom_out".to_owned()
+            )))
         );
         assert!(!chrome.has_open_popup());
     }
@@ -1275,10 +1273,9 @@ mod tests {
 
         assert_eq!(
             selected,
-            Some(WidgetAction::Control(ControlAction::TextCommitted {
-                id: ui::editor_toolbar::EDITOR_TOOLBAR_COMMAND_ID,
-                value: TextPayload::Plain("canvas_fit".to_owned()),
-            }))
+            Some(WidgetAction::EditorToolbar(EditorToolbarAction::CommandInvoked(
+                "canvas_fit".to_owned()
+            )))
         );
     }
 

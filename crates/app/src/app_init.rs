@@ -4,11 +4,14 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::app::App;
+use crate::app::{App, PlatformState, SettingsUiState, WorkspaceServices};
 use crate::product_paths::ProductPaths;
 use crate::ui_shell::UiShell;
-use appkit_core::file_history::FileHistory;
-use appkit_shell::editor_runtime::{EditorRuntime, EditorRuntimeConfig, EditorRuntimeError};
+use appkit_shell::editor_runtime::{
+    EditorRuntime, EditorRuntimeConfig, EditorRuntimeError, PluginPointerPolicy,
+    PointerClickFocusLoss, SourcePointerPolicy,
+};
+#[cfg(test)]
 use appkit_shell::editor_tab_set::EditorTabSet;
 use appkit_shell::view_route::{ViewPathMatcher, ViewRouteRule, ViewRouteTable};
 
@@ -138,24 +141,32 @@ fn product_editor_plugins() -> (ui::plugin::PluginRegistry, ViewRouteTable) {
     (registry, routes)
 }
 
+#[cfg(test)]
 pub(crate) fn build_product_workspace() -> EditorTabSet {
     let (registry, routes) = product_editor_plugins();
     EditorTabSet::with_plugins(registry, routes)
 }
 
 pub(crate) fn build_product_editor_runtime(
-    settings: &ui::settings::Settings,
-    theme: &ui::Theme,
+    settings: ui::settings::Settings,
+    theme: ui::Theme,
     snapshots_directory: &std::path::Path,
 ) -> Result<EditorRuntime, EditorRuntimeError> {
     let (plugin_registry, view_routes) = product_editor_plugins();
-    EditorRuntime::new(EditorRuntimeConfig {
+    let mut runtime = EditorRuntime::new(EditorRuntimeConfig {
         plugin_registry,
         view_routes,
-        initial_settings: settings.clone(),
-        initial_theme: theme.clone(),
+        initial_settings: settings,
+        initial_theme: theme,
         snapshots_directory: snapshots_directory.to_owned(),
-    })
+    })?;
+    runtime.configure_pointer_clicks(
+        ui::core::widget::PointerClickTiming::WholeMilliseconds,
+        PointerClickFocusLoss::Preserve,
+    );
+    runtime.configure_plugin_pointer(PluginPointerPolicy::VisualCaret);
+    runtime.configure_source_pointer(SourcePointerPolicy::VisualRows);
+    Ok(runtime)
 }
 
 #[cfg(test)]
@@ -213,11 +224,27 @@ impl App {
 
     fn new_with_startup_mode(file_path: Option<PathBuf>, startup_mode: AppStartupMode) -> Self {
         let startup_started_at = std::time::Instant::now();
-        let _t0 = startup_started_at;
-
         let home_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
         let paths = ProductPaths::textora(&home_dir);
+        Self::new_with_product_paths(file_path, startup_mode, paths, startup_started_at)
+    }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_test_home(home_dir: &std::path::Path) -> Self {
+        Self::new_with_product_paths(
+            None,
+            AppStartupMode::TestReady,
+            ProductPaths::textora(home_dir),
+            std::time::Instant::now(),
+        )
+    }
+
+    fn new_with_product_paths(
+        file_path: Option<PathBuf>,
+        startup_mode: AppStartupMode,
+        paths: ProductPaths,
+        startup_started_at: std::time::Instant,
+    ) -> Self {
         // Load persisted settings from settings.toml (before FontSystem/worker creation
         // so that font shaping uses persisted settings rather than defaults).
         let persisted = match crate::settings_io::load(&paths.settings_file) {
@@ -249,12 +276,7 @@ impl App {
         // scale factor is known.  We store None here and spawn the worker
         // after scale setup in init_window.
 
-        let workspace_store = appkit_core::tab_set::store::WorkspaceStore::new(
-            paths.workspace_file.clone(),
-            paths.pinned_paths_file.clone(),
-            paths.snapshots_dir.clone(),
-        );
-        let file_history = FileHistory::load(&paths.history_file).unwrap_or_default();
+        let workspace_services = WorkspaceServices::new(&paths);
 
         let (theme_registry, theme_load_report) = load_user_themes(&paths.theme_dir);
         for diagnostic in &theme_load_report.source_diagnostics {
@@ -263,18 +285,11 @@ impl App {
         for error in &theme_load_report.registry_errors {
             eprintln!("[theme] {error}");
         }
-        let active_theme_pair = ui::theme::ActiveThemePair::default();
-        let current_theme = {
-            let mode = settings.theme_mode;
-            ui::Theme::resolve(
-                mode,
-                winit::window::Theme::Dark,
-                &active_theme_pair,
-                &theme_registry,
-            )
-        };
+        let settings_ui = SettingsUiState::new(theme_registry);
+        let current_theme =
+            settings_ui.resolve_theme(settings.theme_mode, winit::window::Theme::Dark);
         let mut editor_runtime =
-            build_product_editor_runtime(&settings, &current_theme, &paths.snapshots_dir)
+            build_product_editor_runtime(settings, current_theme, &paths.snapshots_dir)
                 .expect("textora editor runtime must be constructible");
         if let Some(font_system) = ready_font_system {
             editor_runtime.set_shared_font_system(font_system);
@@ -285,41 +300,17 @@ impl App {
             eprintln!("[startup] could not start GPU preparation: {error}");
         }
         let mut app = Self {
-            file_path,
             paths,
-            settings,
-            settings_persistence: crate::app::SettingsPersistenceState::Saved,
-            current_theme,
-            theme_registry,
-            active_theme_pair,
+            settings_ui,
             product: crate::textora_product::TextoraProduct::new(),
             action_pump: appkit_shell::EventPump::default(),
             editor_runtime,
-            accessibility_adapter: None,
-            popup_tab_id_snapshot: Vec::new(),
-            workspace_store,
+            workspace_services,
             ui_shell: UiShell::new(),
-            file_history,
-            library_file_monitor: None,
-            file_safety_notices: Vec::new(),
-            pending_close_after_save: HashSet::new(),
-            pending_quit_after_save: false,
-            running: false,
-            needs_redraw: true,
-            sidebar_animating: false,
-            tab_scroll: appkit_shell::smooth_scroll::SmoothScroll::new(),
-            mouse: crate::mouse::MouseState::new(),
-            last_scroll_time: std::time::Instant::now(),
-            last_cursor_visible: true,
-            event_loop_proxy: None,
-            preedit_advance_px: 0.0,
-            startup_started_at,
-            startup_font_preparation,
+            platform: PlatformState::new(file_path, startup_started_at, startup_font_preparation),
         };
-        // Apply persisted sidebar width (logical pixels, will be scaled by DPI later)
-        app.ui_shell.set_sidebar_width(persisted.sidebar_width);
-        app.ui_shell.sidebar_clamp_width(1.0); // Clamp to valid range [160, 400] at default DPI
-        eprintln!("[startup] App::new total: {:?}", _t0.elapsed());
+        app.ui_shell.set_sidebar_width_logical(persisted.sidebar_width);
+        eprintln!("[startup] App::new total: {:?}", startup_started_at.elapsed());
         app
     }
 
@@ -329,7 +320,7 @@ impl App {
         }
 
         let wait_started_at = std::time::Instant::now();
-        let font_system = match self.startup_font_preparation.take() {
+        let font_system = match self.platform.take_font_preparation() {
             Some(preparation) => match preparation.join() {
                 Ok(font_system) => font_system,
                 Err(_) => {
@@ -582,7 +573,7 @@ mod settings_tests {
     #[test]
     fn startup_timestamp_is_initialized() {
         let app = App::new(None);
-        assert!(app.startup_started_at.elapsed() < std::time::Duration::from_secs(60));
+        assert!(app.platform.startup_elapsed() < std::time::Duration::from_secs(60));
     }
 
     #[test]
@@ -590,7 +581,7 @@ mod settings_tests {
         let app = App::new_for_launch(None);
 
         assert!(app.editor_runtime.shared_font_system().is_none());
-        assert!(app.startup_font_preparation.is_some());
+        assert!(app.platform.has_font_preparation());
     }
 
     #[test]
@@ -598,7 +589,7 @@ mod settings_tests {
         let app = App::new(None);
 
         assert!(app.editor_runtime.shared_font_system().is_some());
-        assert!(app.startup_font_preparation.is_none());
+        assert!(!app.platform.has_font_preparation());
     }
 
     #[test]
@@ -610,8 +601,8 @@ mod settings_tests {
     #[test]
     fn init_display_map_uses_instance_font_size() {
         let mut app = App::new(None);
-        app.settings.font_size = 31.0;
-        app.settings.line_height = 44.0;
+        app.editor_runtime.edit_settings(|settings| settings.font_size = 31.0);
+        app.editor_runtime.edit_settings(|settings| settings.line_height = 44.0);
         let dv = DocumentFixture::new(vec!["sentinel".into()], 10, 10.0);
         app.push_entry_for_test(dv, Box::new(EditorPlugin::new()));
 
@@ -648,34 +639,9 @@ mod product_paths_tests {
     use super::*;
     use crate::product_paths::ProductPaths;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
-
-    struct HomeGuard {
-        previous: Option<String>,
-    }
-
-    impl HomeGuard {
-        fn set(home: &std::path::Path) -> Self {
-            let previous = std::env::var("HOME").ok();
-            unsafe { std::env::set_var("HOME", home) };
-            Self { previous }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(home) => unsafe { std::env::set_var("HOME", home) },
-                None => unsafe { std::env::remove_var("HOME") },
-            }
-        }
-    }
 
     #[test]
     fn app_init_uses_product_paths_for_config_dir() {
-        let _lock = HOME_LOCK.lock().unwrap();
         let temp_home = tempfile::tempdir().unwrap();
         let config_dir = temp_home.path().join(".edit+");
         std::fs::create_dir_all(&config_dir).unwrap();
@@ -697,16 +663,18 @@ excluded_dirs = []
         )
         .unwrap();
 
-        let _home_guard = HomeGuard::set(temp_home.path());
-        let app = App::new(None);
+        let app = App::new_with_test_home(temp_home.path());
 
         let expected_paths = ProductPaths::textora(temp_home.path());
         assert_eq!(app.paths, expected_paths);
 
-        assert_eq!(app.file_history.entries.len(), 1);
-        assert_eq!(app.file_history.entries[0].file_path, PathBuf::from("/tmp/seeded.md"));
+        assert_eq!(app.workspace_services.history().entries.len(), 1);
+        assert_eq!(
+            app.workspace_services.history().entries[0].file_path,
+            PathBuf::from("/tmp/seeded.md")
+        );
 
-        let workspace = app.workspace_store.load_workspace().unwrap();
+        let workspace = app.workspace_services.store().load_workspace().unwrap();
         assert!(workspace.is_some());
     }
 }

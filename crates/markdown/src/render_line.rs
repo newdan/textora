@@ -1,17 +1,5 @@
 use super::*;
 
-pub(in crate::render) fn render_line_with_offset(
-    line: &LaidOutLine,
-    style: &MarkdownStyle,
-    dl: &mut DrawList,
-    scroll_y: f32,
-    ox: f32,
-    oy: f32,
-    shaper: Option<&mut shaping::Shaper>,
-) {
-    render_line_with_embedded(line, style, dl, scroll_y, ox, oy, shaper, None);
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn render_line_with_embedded(
     line: &LaidOutLine,
@@ -20,7 +8,7 @@ pub(in crate::render) fn render_line_with_embedded(
     scroll_y: f32,
     ox: f32,
     oy: f32,
-    mut shaper: Option<&mut shaping::Shaper>,
+    shaper: Option<&mut shaping::Shaper>,
     embedded_images: Option<&EmbeddedRegistry>,
 ) {
     let image_ascent = line
@@ -34,7 +22,6 @@ pub(in crate::render) fn render_line_with_embedded(
         .fold(line.font_size, f32::max);
     let ly = line.rect.y - scroll_y + oy + image_ascent - line.font_size;
     let base_color = line.color_override.unwrap_or(style.text_color);
-    let font_size = line.font_size;
     let line_x = line.rect.x + ox;
 
     let font_family = if line.is_code {
@@ -43,8 +30,29 @@ pub(in crate::render) fn render_line_with_embedded(
         style.body_font_family.first().cloned()
     };
 
-    // Fast path: no inline styles at all
+    let paint = LinePaint { line, style, line_x, ly, base_color, font_family };
     if line.styles.is_empty() {
+        paint.draw_plain(dl, shaper);
+    } else if line.style_segments.is_empty() {
+        paint.draw_unpositioned_styles(dl, shaper, embedded_images);
+    } else {
+        paint.draw_positioned_styles(dl, shaper, embedded_images);
+    }
+}
+
+struct LinePaint<'a> {
+    line: &'a LaidOutLine,
+    style: &'a MarkdownStyle,
+    line_x: f32,
+    ly: f32,
+    base_color: [f32; 4],
+    font_family: Option<String>,
+}
+
+impl LinePaint<'_> {
+    fn draw_plain(self, dl: &mut DrawList, mut shaper: Option<&mut shaping::Shaper>) {
+        let Self { line, line_x, ly, base_color, font_family, .. } = self;
+        let font_size = line.font_size;
         if !line.highlight_spans.is_empty() {
             // Syntax-highlighted code line: render per-span with highlight colors
             // Use actual HarfBuzz shaped widths to advance cursor (not estimated widths)
@@ -132,13 +140,17 @@ pub(in crate::render) fn render_line_with_embedded(
                 s,
             );
         }
-        return;
     }
 
-    let text_len = line.text.len();
-
-    // If no precomputed style_segments, fall back to estimated positions
-    if line.style_segments.is_empty() {
+    fn draw_unpositioned_styles(
+        self,
+        dl: &mut DrawList,
+        mut shaper: Option<&mut shaping::Shaper>,
+        embedded_images: Option<&EmbeddedRegistry>,
+    ) {
+        let Self { line, style, line_x, ly, base_color, font_family } = self;
+        let font_size = line.font_size;
+        let text_len = line.text.len();
         // Draw inline code backgrounds
         for span in &line.styles {
             if span.start >= text_len {
@@ -294,116 +306,132 @@ pub(in crate::render) fn render_line_with_embedded(
                 );
             }
         }
-        return;
     }
 
-    // Use precomputed style_segments for precise positioning
-    let segments = &line.style_segments;
+    fn draw_positioned_styles(
+        self,
+        dl: &mut DrawList,
+        mut shaper: Option<&mut shaping::Shaper>,
+        embedded_images: Option<&EmbeddedRegistry>,
+    ) {
+        let Self { line, style, line_x, ly, base_color, font_family } = self;
+        let font_size = line.font_size;
+        let text_len = line.text.len();
+        // Use precomputed style_segments for precise positioning
+        let segments = &line.style_segments;
 
-    // 1) Draw inline code backgrounds (behind text)
-    for seg in segments {
-        if matches!(seg.style, InlineStyle::InlineCode) {
-            let seg_end = (seg.start + seg.len).min(text_len);
-            let padding = inline_code_background_padding(&line.text, seg.start, seg_end, font_size);
-            let rect = inline_code_background_rect(
-                line_x + seg.x_offset,
-                ly,
-                seg.width,
-                font_size,
-                padding,
-            );
-            draw_inline_code_bg(style, dl, rect);
-        }
-    }
-
-    // 2) Render text in segment order: gap, styled, gap, styled, tail
-    let mut last_end = 0usize;
-
-    for seg in segments {
-        if seg.start >= text_len {
-            continue;
-        }
-        // Render unstyled gap before this segment
-        if seg.start > last_end {
-            let gap_x = end_x_for_offset(segments, line_x, last_end, text_len);
-            draw_line_segment(
-                line,
-                last_end..seg.start,
-                None,
-                [gap_x, ly + font_size],
-                base_color,
-                font_family.as_deref(),
-                dl,
-                shaper.as_deref_mut(),
-            );
-        }
-        // Render styled segment
-        let seg_end = (seg.start + seg.len).min(text_len);
-        if seg.start < text_len {
-            let color = style_for_span(&seg.style, base_color, style);
-            let x = line_x + seg.x_offset;
-            let math_image = matches!(seg.style, InlineStyle::Math)
-                .then(|| {
-                    line.styles
-                        .iter()
-                        .find(|span| span.start == seg.start && span.len == seg.len)
-                        .and_then(|span| {
-                            embedded_images.and_then(|images| images.image_for(&span.source_range))
-                        })
-                })
-                .flatten();
-            if let Some(entry) = math_image {
-                dl.image(
-                    entry.image.clone(),
-                    Rect::new(
-                        x,
-                        ly + font_size - entry.baseline,
-                        entry.image.width() as f32,
-                        entry.image.height() as f32,
-                    ),
+        // 1) Draw inline code backgrounds (behind text)
+        for seg in segments {
+            if matches!(seg.style, InlineStyle::InlineCode) {
+                let seg_end = (seg.start + seg.len).min(text_len);
+                let padding =
+                    inline_code_background_padding(&line.text, seg.start, seg_end, font_size);
+                let rect = inline_code_background_rect(
+                    line_x + seg.x_offset,
+                    ly,
+                    seg.width,
+                    font_size,
+                    padding,
                 );
-            } else {
+                draw_inline_code_bg(style, dl, rect);
+            }
+        }
+
+        // 2) Render text in segment order: gap, styled, gap, styled, tail
+        let mut last_end = 0usize;
+
+        for seg in segments {
+            if seg.start >= text_len {
+                continue;
+            }
+            // Render unstyled gap before this segment
+            if seg.start > last_end {
+                let gap_x = end_x_for_offset(segments, line_x, last_end, text_len);
                 draw_line_segment(
                     line,
-                    seg.start..seg_end,
-                    Some(&seg.style),
-                    [x, ly + font_size],
-                    color,
+                    last_end..seg.start,
+                    None,
+                    [gap_x, ly + font_size],
+                    base_color,
                     font_family.as_deref(),
                     dl,
                     shaper.as_deref_mut(),
                 );
             }
-            let mut seg_w = seg.width;
-            if is_italic(&seg.style) {
-                seg_w += font_size * ITALIC_SHEAR;
+            // Render styled segment
+            let seg_end = (seg.start + seg.len).min(text_len);
+            if seg.start < text_len {
+                let color = style_for_span(&seg.style, base_color, style);
+                let x = line_x + seg.x_offset;
+                let math_image = matches!(seg.style, InlineStyle::Math)
+                    .then(|| {
+                        line.styles
+                            .iter()
+                            .find(|span| span.start == seg.start && span.len == seg.len)
+                            .and_then(|span| {
+                                embedded_images
+                                    .and_then(|images| images.image_for(&span.source_range))
+                            })
+                    })
+                    .flatten();
+                if let Some(entry) = math_image {
+                    dl.image(
+                        entry.image.clone(),
+                        Rect::new(
+                            x,
+                            ly + font_size - entry.baseline,
+                            entry.image.width() as f32,
+                            entry.image.height() as f32,
+                        ),
+                    );
+                } else {
+                    draw_line_segment(
+                        line,
+                        seg.start..seg_end,
+                        Some(&seg.style),
+                        [x, ly + font_size],
+                        color,
+                        font_family.as_deref(),
+                        dl,
+                        shaper.as_deref_mut(),
+                    );
+                }
+                let mut seg_w = seg.width;
+                if is_italic(&seg.style) {
+                    seg_w += font_size * ITALIC_SHEAR;
+                }
+                if is_underlined(&seg.style) {
+                    dl.fill(Rect::new(x, ly + font_size + 2.0, seg_w, 1.0), color);
+                }
+                if is_strikethrough(&seg.style) {
+                    dl.fill(
+                        Rect::new(
+                            x,
+                            ly + font_size * 0.55,
+                            seg_w,
+                            strikethrough_thickness(font_size),
+                        ),
+                        color,
+                    );
+                }
             }
-            if is_underlined(&seg.style) {
-                dl.fill(Rect::new(x, ly + font_size + 2.0, seg_w, 1.0), color);
-            }
-            if is_strikethrough(&seg.style) {
-                dl.fill(
-                    Rect::new(x, ly + font_size * 0.55, seg_w, strikethrough_thickness(font_size)),
-                    color,
-                );
-            }
+            last_end = seg_end;
         }
-        last_end = seg_end;
-    }
 
-    // Render remaining unstyled tail after last segment
-    if last_end < text_len {
-        let tail_x = end_x_for_offset(segments, line_x, last_end, text_len);
-        draw_line_segment(
-            line,
-            last_end..text_len,
-            None,
-            [tail_x, ly + font_size],
-            base_color,
-            font_family.as_deref(),
-            dl,
-            shaper,
-        );
+        // Render remaining unstyled tail after last segment
+        if last_end < text_len {
+            let tail_x = end_x_for_offset(segments, line_x, last_end, text_len);
+            draw_line_segment(
+                line,
+                last_end..text_len,
+                None,
+                [tail_x, ly + font_size],
+                base_color,
+                font_family.as_deref(),
+                dl,
+                shaper,
+            );
+        }
     }
 }
 

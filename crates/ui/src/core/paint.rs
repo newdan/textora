@@ -125,6 +125,15 @@ impl DrawList {
         Self { cmds: Vec::new(), offset: (0.0, 0.0) }
     }
 
+    /// Apply a relative translation to every command emitted in the callback.
+    pub fn with_offset<R>(&mut self, x: f32, y: f32, draw: impl FnOnce(&mut Self) -> R) -> R {
+        let parent = self.offset;
+        self.offset = (parent.0 + x, parent.1 + y);
+        let result = draw(self);
+        self.offset = parent;
+        result
+    }
+
     pub fn fill(&mut self, rect: Rect, color: [f32; 4]) {
         self.fill_rounded(rect, color, 0.0);
     }

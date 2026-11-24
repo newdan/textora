@@ -1,124 +1,21 @@
-//! Command dispatch: menu actions, keyboard commands, sidebar actions.
-//! Methods on `impl App`, extracted from app.rs.
+//! Product action routing and effect application.
+
+pub(crate) mod chrome;
+pub(crate) mod commands;
+pub(crate) mod editor;
+pub(crate) mod mouse;
+pub(crate) mod search;
+mod settings;
+pub(crate) mod tabs;
+pub(crate) mod viewport;
+pub(crate) mod wysiwyg;
 
 use crate::actions::AppAction;
 use crate::app::App;
 use crate::app_effect::AppEffect;
 use crate::dispatch::chrome::{ChromeDispatchAction, SettingsDispatchAction, TabScrollDirection};
 use crate::dispatch::viewport::ViewportDispatchAction;
-use crate::sync_settings_types::SyncSettingsAction;
-use appkit_core::tab_set::types::TabId;
 use appkit_shell::DrainStart;
-use appkit_shell::canvas_viewport::CanvasViewportAction;
-use textora_sync::{DeviceId, LoopbackEndpoint, RemoteDeviceSpec, StaticSyncAddress};
-
-const PREVIEW_TOP_PAD_LOGICAL: f32 = 16.0;
-const PREVIEW_HORIZONTAL_PAD_LOGICAL: f32 = 20.0;
-const MAX_READING_WIDTH_LOGICAL: f32 = 800.0;
-const MIN_PLUGIN_VIEWPORT_PX: f32 = 100.0;
-const MIN_CANVAS_PINCH_ZOOM_FACTOR: f32 = 0.01;
-const SYNC_INVALID_ENDPOINT_NOTICE: &str = "Syncthing 地址无效";
-const SYNC_INVALID_API_KEY_NOTICE: &str = "API Key 无效";
-const SYNC_INVALID_REMOTE_DEVICE_NOTICE: &str = "远端设备信息无效";
-const SYNC_INVALID_REMOTE_ADDRESS_NOTICE: &str = "远端设备地址无效";
-const SYNC_REMOTE_NAME_REQUIRED_NOTICE: &str = "远端设备名称不能为空";
-const SYNC_LIBRARY_NOT_FOUND_NOTICE: &str = "资料库状态已更新，请重试";
-const SYNC_PENDING_FOLDER_NOT_FOUND_NOTICE: &str = "待接收资料库不存在";
-
-fn parse_sync_endpoint(candidate: &str) -> Result<LoopbackEndpoint, &'static str> {
-    LoopbackEndpoint::parse(candidate.trim()).map_err(|_| SYNC_INVALID_ENDPOINT_NOTICE)
-}
-
-fn parse_sync_remote_device(
-    device_id: String,
-    name: String,
-    raw_addresses: String,
-) -> Result<RemoteDeviceSpec, &'static str> {
-    let device_id = DeviceId::parse(device_id.trim().to_owned())
-        .map_err(|_| SYNC_INVALID_REMOTE_DEVICE_NOTICE)?;
-    let name = name.trim().to_owned();
-    if name.is_empty() {
-        return Err(SYNC_REMOTE_NAME_REQUIRED_NOTICE);
-    }
-
-    let mut addresses = Vec::new();
-    for address in raw_addresses.split(',').map(str::trim).filter(|value| !value.is_empty()) {
-        if address == textora_sync::SYNCTHING_DYNAMIC_ADDRESS {
-            continue;
-        }
-        addresses.push(
-            StaticSyncAddress::parse(address.to_owned())
-                .map_err(|_| SYNC_INVALID_REMOTE_ADDRESS_NOTICE)?,
-        );
-    }
-
-    Ok(RemoteDeviceSpec { device_id, name, addresses })
-}
-
-fn sync_controller_error_notice(
-    error: &crate::sync_controller::SyncControllerError,
-) -> &'static str {
-    match error {
-        crate::sync_controller::SyncControllerError::InvalidApiKey => SYNC_INVALID_API_KEY_NOTICE,
-        crate::sync_controller::SyncControllerError::WorkerUnavailable => "同步服务暂不可用",
-    }
-}
-
-fn take_top(rect: &mut ui::core::geom::Rect, thickness: f32) {
-    let clamped = thickness.max(0.0).min(rect.h);
-    rect.y += clamped;
-    rect.h = (rect.h - clamped).max(0.0);
-}
-
-fn take_bottom(rect: &mut ui::core::geom::Rect, thickness: f32) {
-    let clamped = thickness.max(0.0).min(rect.h);
-    rect.h = (rect.h - clamped).max(0.0);
-}
-
-fn take_left(rect: &mut ui::core::geom::Rect, thickness: f32) {
-    let clamped = thickness.max(0.0).min(rect.w);
-    rect.x += clamped;
-    rect.w = (rect.w - clamped).max(0.0);
-}
-
-fn take_right(rect: &mut ui::core::geom::Rect, thickness: f32) {
-    let clamped = thickness.max(0.0).min(rect.w);
-    rect.w = (rect.w - clamped).max(0.0);
-}
-
-fn projected_editor_rect(
-    screen_w: f32,
-    screen_h: f32,
-    inputs: &crate::ui_shell::ShellInputs,
-    inspector_panel_thickness: f32,
-) -> ui::core::geom::Rect {
-    let mut rect = ui::core::geom::Rect::new(0.0, 0.0, screen_w, screen_h);
-
-    if !inputs.sidebar_visible {
-        take_top(&mut rect, ui::title_bar::title_bar_height(inputs.metrics.dpi));
-    }
-
-    if inputs.tabs_visible {
-        take_top(&mut rect, inputs.tabs_thickness);
-    }
-    if inputs.sidebar_visible && inputs.sidebar_thickness > 0.0 {
-        take_left(&mut rect, inputs.sidebar_thickness);
-    }
-    if inputs.sidebar_visible {
-        take_top(&mut rect, ui::title_bar::title_bar_height(inputs.metrics.dpi));
-    }
-    if inputs.toc_visible {
-        take_left(&mut rect, inputs.toc_thickness);
-    }
-    if inputs.search_visible {
-        take_top(&mut rect, inputs.search_thickness);
-    }
-    take_bottom(&mut rect, inputs.status_thickness);
-    take_right(&mut rect, inspector_panel_thickness);
-    take_right(&mut rect, inputs.scrollbar_thickness);
-
-    rect
-}
 
 impl App {
     pub(crate) fn execute_commands(
@@ -168,7 +65,7 @@ impl App {
         let widget_action = self.ui_shell.forward_key(
             KeyCode::Char(key),
             modifiers,
-            &self.current_theme,
+            self.editor_runtime.theme(),
             self.ui_metrics().dpi,
         );
         Some(match widget_action {
@@ -265,15 +162,15 @@ impl App {
             AppAction::Settings(action) => self.dispatch_settings_view_action(action),
             AppAction::Sync(action) => self.dispatch_sync_settings_action(action),
             AppAction::UpdateMousePos(x, y) => {
-                self.mouse.pos = (x, y);
+                self.platform.mouse_mut().pos = (x, y);
                 AppEffect::NONE
             }
             AppAction::HandleScroll(delta) => self.dispatch_wheel_scroll(delta),
-            AppAction::EditorMouseInput { state, px, py, hit } => {
-                self.dispatch_editor_mouse_input(state, px, py, hit)
+            AppAction::EditorMouseInput { state, px, py } => {
+                self.dispatch_editor_mouse_input(state, px, py)
             }
-            AppAction::EditorCursorMoved { px, py, hit } => {
-                self.dispatch_editor_cursor_moved(px, py, hit)
+            AppAction::EditorCursorMoved { px, py, use_editor_cursor } => {
+                self.dispatch_editor_cursor_moved(px, py, use_editor_cursor)
             }
             AppAction::SwitchTab(id) => self.dispatch_tab_switch(id),
             AppAction::CloseTab(id) => self.try_close_entry_with_prompt(id),
@@ -429,313 +326,6 @@ impl App {
         }
         self.dispatch_semantic_edit(ui::plugin::SemanticEditCommand::TableStructure(command))
     }
-
-    pub(crate) fn dispatch_settings_view_action(
-        &mut self,
-        action: ui::settings_view::SettingsViewAction,
-    ) -> AppEffect {
-        let effect = match action {
-            ui::settings_view::SettingsViewAction::SetThemeMode(mode) => {
-                self.dispatch_settings_action(SettingsDispatchAction::SetThemeMode(mode))
-            }
-            ui::settings_view::SettingsViewAction::SetFontFamily(family) => {
-                self.dispatch_settings_action(SettingsDispatchAction::SetFontFamily(family))
-            }
-            ui::settings_view::SettingsViewAction::SetFontSize(size) => {
-                self.dispatch_settings_action(SettingsDispatchAction::SetFontSize(size))
-            }
-            ui::settings_view::SettingsViewAction::SetLineHeightRatio(ratio) => {
-                self.dispatch_settings_action(SettingsDispatchAction::SetLineHeightRatio(ratio))
-            }
-            ui::settings_view::SettingsViewAction::SetWordWrap(enabled) => {
-                self.dispatch_settings_action(SettingsDispatchAction::SetWordWrap(enabled))
-            }
-            ui::settings_view::SettingsViewAction::SetMarkdownFirstLineIndent(enabled) => self
-                .dispatch_settings_action(SettingsDispatchAction::SetMarkdownFirstLineIndent(
-                    enabled,
-                )),
-            ui::settings_view::SettingsViewAction::SetTextSpacingMode(mode) => {
-                self.dispatch_settings_action(SettingsDispatchAction::SetTextSpacingMode(mode))
-            }
-            ui::settings_view::SettingsViewAction::SetShowLineNumbers(enabled) => {
-                self.dispatch_settings_action(SettingsDispatchAction::SetShowLineNumbers(enabled))
-            }
-            ui::settings_view::SettingsViewAction::SetTabWidth(width) => {
-                self.dispatch_settings_action(SettingsDispatchAction::SetTabWidth(width))
-            }
-            ui::settings_view::SettingsViewAction::SetViewMode(mode) => {
-                self.dispatch_settings_action(SettingsDispatchAction::SetViewMode(mode))
-            }
-            ui::settings_view::SettingsViewAction::SetShowStatusBar(enabled) => {
-                self.dispatch_settings_action(SettingsDispatchAction::SetShowStatusBar(enabled))
-            }
-            ui::settings_view::SettingsViewAction::RetryPersistence => AppEffect::PERSIST_SETTINGS,
-        };
-        self.refresh_settings_overlay();
-        effect
-    }
-
-    fn dispatch_sync_settings_action(&mut self, action: SyncSettingsAction) -> AppEffect {
-        self.dispatch_sync_settings_action_with_folder_picker(action, &mut || {
-            rfd::FileDialog::new().pick_folder()
-        })
-    }
-
-    fn dispatch_sync_settings_action_with_folder_picker(
-        &mut self,
-        action: SyncSettingsAction,
-        pick_folder: &mut dyn FnMut() -> Option<std::path::PathBuf>,
-    ) -> AppEffect {
-        match action {
-            SyncSettingsAction::TestConnection { endpoint, api_key } => {
-                let endpoint = match parse_sync_endpoint(&endpoint) {
-                    Ok(endpoint) => endpoint,
-                    Err(message) => return self.report_sync_settings_error(message),
-                };
-                let api_key = api_key.expose().to_owned();
-                let result = self
-                    .sync_controller_mut()
-                    .map(|controller| controller.test_connection(endpoint, api_key))
-                    .unwrap_or(Err(crate::sync_controller::SyncControllerError::WorkerUnavailable));
-                self.finish_sync_controller_action(result)
-            }
-            SyncSettingsAction::ConfigureConnection { endpoint, api_key } => {
-                let endpoint = match parse_sync_endpoint(&endpoint) {
-                    Ok(endpoint) => endpoint,
-                    Err(message) => return self.report_sync_settings_error(message),
-                };
-                let api_key = api_key.expose().to_owned();
-                let result = self
-                    .sync_controller_mut()
-                    .map(|controller| controller.configure_connection(endpoint, api_key))
-                    .unwrap_or(Err(crate::sync_controller::SyncControllerError::WorkerUnavailable));
-                self.finish_sync_controller_action(result)
-            }
-            SyncSettingsAction::PublishLibrary {
-                remote_device_id,
-                remote_name,
-                remote_addresses,
-            } => {
-                let Some(root) = pick_folder() else {
-                    return AppEffect::NONE;
-                };
-                let remote = match parse_sync_remote_device(
-                    remote_device_id,
-                    remote_name,
-                    remote_addresses.join(","),
-                ) {
-                    Ok(remote) => remote,
-                    Err(message) => return self.report_sync_settings_error(message),
-                };
-                let result = self
-                    .sync_controller_mut()
-                    .map(|controller| controller.publish_library(root, remote))
-                    .unwrap_or(Err(crate::sync_controller::SyncControllerError::WorkerUnavailable));
-                self.finish_sync_controller_action(result)
-            }
-            SyncSettingsAction::AcceptRemoteLibrary { pending_index } => {
-                let folder_id = self
-                    .sync_controller()
-                    .and_then(|controller| {
-                        controller.snapshot().pending_folders.get(pending_index).cloned()
-                    })
-                    .map(|pending| pending.folder_id);
-                let Some(folder_id) = folder_id else {
-                    return self.report_sync_settings_error(SYNC_PENDING_FOLDER_NOT_FOUND_NOTICE);
-                };
-                let Some(empty_root) = pick_folder() else {
-                    return AppEffect::NONE;
-                };
-                let result = self
-                    .sync_controller_mut()
-                    .map(|controller| controller.accept_remote_library(folder_id, empty_root))
-                    .unwrap_or(Err(crate::sync_controller::SyncControllerError::WorkerUnavailable));
-                self.finish_sync_controller_action(result)
-            }
-            SyncSettingsAction::ScanLibrary { library_index } => self
-                .dispatch_library_controller_action(library_index, |controller, library_id| {
-                    controller.scan_library(library_id)
-                }),
-            SyncSettingsAction::SetLibraryPaused { library_index, paused } => self
-                .dispatch_library_controller_action(
-                    library_index,
-                    move |controller, library_id| controller.pause_library(library_id, paused),
-                ),
-            SyncSettingsAction::RepairLibrary { library_index } => self
-                .dispatch_library_controller_action(library_index, |controller, library_id| {
-                    controller.repair_library(library_id)
-                }),
-            SyncSettingsAction::RemoveLibraryMapping { library_index } => self
-                .dispatch_library_controller_action(library_index, |controller, library_id| {
-                    controller.remove_library_mapping(library_id)
-                }),
-            SyncSettingsAction::UnregisterLibrary { library_index } => self
-                .dispatch_library_controller_action(library_index, |controller, library_id| {
-                    controller.unregister_library(library_id)
-                }),
-        }
-    }
-
-    fn dispatch_library_controller_action<F>(
-        &mut self,
-        library_index: usize,
-        operation: F,
-    ) -> AppEffect
-    where
-        F: FnOnce(
-            &mut crate::sync_controller::SyncController,
-            String,
-        ) -> Result<
-            crate::sync_controller::RequestId,
-            crate::sync_controller::SyncControllerError,
-        >,
-    {
-        let Some(library_id) = self
-            .sync_controller()
-            .and_then(|controller| controller.snapshot().libraries.get(library_index))
-            .map(|library| library.library_id.clone())
-        else {
-            return self.report_sync_settings_error(SYNC_LIBRARY_NOT_FOUND_NOTICE);
-        };
-        let result = self
-            .sync_controller_mut()
-            .map(|controller| operation(controller, library_id))
-            .unwrap_or(Err(crate::sync_controller::SyncControllerError::WorkerUnavailable));
-        self.finish_sync_controller_action(result)
-    }
-
-    fn finish_sync_controller_action(
-        &mut self,
-        result: Result<
-            crate::sync_controller::RequestId,
-            crate::sync_controller::SyncControllerError,
-        >,
-    ) -> AppEffect {
-        match result {
-            Ok(_) => AppEffect::REDRAW,
-            Err(error) => self.report_sync_settings_error(sync_controller_error_notice(&error)),
-        }
-    }
-
-    fn report_sync_settings_error(&mut self, message: &'static str) -> AppEffect {
-        if let Some(controller) = self.sync_controller_mut() {
-            controller.push_local_error(message.to_owned());
-        } else {
-            eprintln!("[sync] {message}");
-        }
-        AppEffect::REDRAW
-    }
-
-    pub(crate) fn dispatch_tab_switch(&mut self, id: TabId) -> AppEffect {
-        let Some(workspace_effect) = self.switch_editor_tab(id) else {
-            return AppEffect::NONE;
-        };
-
-        let cancel_effect = self.cancel_canvas_drag();
-        cancel_effect.merge(self.apply_workspace_effect(workspace_effect))
-    }
-
-    fn dispatch_canvas_scrollbar_action(
-        &mut self,
-        axis: ui::canvas::CanvasAxis,
-        action: ui::scrollbar::ScrollbarAction,
-    ) -> AppEffect {
-        use ui::scrollbar::ScrollbarAction;
-
-        let viewport_action = match action {
-            ScrollbarAction::DragTo(position) => {
-                CanvasViewportAction::SetAxisPosition { axis, position: position as f32 }
-            }
-            ScrollbarAction::PageUp => CanvasViewportAction::Page { axis, direction: -1.0 },
-            ScrollbarAction::PageDown => CanvasViewportAction::Page { axis, direction: 1.0 },
-            ScrollbarAction::StartDrag
-            | ScrollbarAction::EndDrag
-            | ScrollbarAction::HoverChanged(_) => return self.canvas_viewport_redraw_effect(),
-        };
-
-        self.dispatch_canvas_viewport_action(viewport_action)
-    }
-
-    fn dispatch_canvas_pinch(
-        &mut self,
-        delta: f64,
-        screen_anchor: ui::canvas::CanvasPoint,
-    ) -> AppEffect {
-        if !delta.is_finite() {
-            return AppEffect::NONE;
-        }
-
-        let factor = 1.0 + delta as f32;
-        if !factor.is_finite() {
-            return AppEffect::NONE;
-        }
-
-        self.dispatch_canvas_viewport_action(CanvasViewportAction::ZoomBy {
-            factor: factor.max(MIN_CANVAS_PINCH_ZOOM_FACTOR),
-            screen_anchor,
-        })
-    }
-
-    fn canvas_viewport_redraw_effect(&self) -> AppEffect {
-        if self.active_canvas_viewport_has_snapshot() { AppEffect::REDRAW } else { AppEffect::NONE }
-    }
-
-    fn dispatch_canvas_viewport_action(&mut self, action: CanvasViewportAction) -> AppEffect {
-        self.apply_canvas_viewport_action(action)
-    }
-
-    fn active_canvas_viewport_has_snapshot(&self) -> bool {
-        self.active_is_canvas() && self.active_has_canvas_viewport_snapshot()
-    }
-
-    /// Rebuild the theme from system theme and settings mode.
-    /// Handle sidebar keyboard actions (TogglePin, Escape).
-    /// Compute the plugin render bounds (the same Rect + viewport dimensions
-    /// used by the main render pass). Used for the WYSIWYG two-phase hit-test
-    /// inter-phase layout refresh mini-render.
-    pub(crate) fn plugin_render_bounds(&self) -> ui::core::geom::Rect {
-        let metrics = self.ui_metrics();
-        let dpi = metrics.dpi;
-        let editor_r = self.plugin_editor_rect();
-        let toc_off = self.toc_left_offset();
-        let content_top = self.content_top_offset();
-
-        let is_canvas = self.active_is_canvas();
-        if is_canvas {
-            let offset_x = editor_r.x;
-            let offset_y = content_top;
-            let viewport_w = editor_r.w;
-            let viewport_h = (editor_r.h - (content_top - editor_r.y)).max(MIN_PLUGIN_VIEWPORT_PX);
-            return ui::core::geom::Rect::new(offset_x, offset_y, viewport_w, viewport_h);
-        }
-
-        let preview_top_pad = PREVIEW_TOP_PAD_LOGICAL * dpi;
-        let preview_pad = PREVIEW_HORIZONTAL_PAD_LOGICAL * dpi;
-        let reading_base_x = toc_off + preview_pad;
-        let physical_w = (editor_r.w - reading_base_x - preview_pad).max(MIN_PLUGIN_VIEWPORT_PX);
-        let max_reading_width = MAX_READING_WIDTH_LOGICAL * dpi;
-        let viewport_w = physical_w.min(max_reading_width);
-        let viewport_h = (editor_r.h - preview_top_pad).max(MIN_PLUGIN_VIEWPORT_PX);
-        let offset_x = editor_r.x + reading_base_x + (physical_w - viewport_w) * 0.5;
-        let offset_y = content_top + preview_top_pad;
-
-        ui::core::geom::Rect::new(offset_x, offset_y, viewport_w, viewport_h)
-    }
-
-    fn plugin_editor_rect(&self) -> ui::core::geom::Rect {
-        let cached = self.ui_shell.editor_rect();
-        if cached.w > 0.0 && cached.h > 0.0 && !self.ui_shell.dock_is_dirty() {
-            return cached;
-        }
-
-        let inputs = self.build_shell_inputs();
-        projected_editor_rect(
-            self.screen_width(),
-            self.screen_height(),
-            &inputs,
-            self.ui_shell.inspector_panel_thickness(),
-        )
-    }
 }
 
 #[cfg(test)]
@@ -745,7 +335,7 @@ impl App {
         let metrics = self.ui_metrics();
         let dpi = metrics.dpi;
         let preview_top_pad = 16.0 * dpi;
-        let line_count = self.active_document_line_count();
+        let line_count = self.active_tab_session().map_or(0, |tab| tab.document().line_count());
         let gutter_left_margin = self.editor_left_margin(line_count);
         let content_top = self.content_top_offset();
         (gutter_left_margin, content_top + preview_top_pad)
@@ -766,6 +356,7 @@ pub(crate) mod canvas_drag_test_support {
     #[derive(Default)]
     pub(crate) struct CanvasDragState {
         pub(crate) requests: Vec<CanvasDragRequest>,
+        cancelled_sources: Vec<String>,
     }
 
     struct CanvasDragPlugin {
@@ -839,9 +430,13 @@ pub(crate) mod canvas_drag_test_support {
         fn handle_canvas_drag(
             &mut self,
             request: CanvasDragRequest,
-            _doc: &dyn textora_core::document::DocView,
+            doc: &dyn textora_core::document::DocView,
         ) -> CanvasDragResponse {
-            self.state.borrow_mut().requests.push(request);
+            let mut state = self.state.borrow_mut();
+            if request.phase == ui::plugin::CanvasDragPhase::Cancel {
+                state.cancelled_sources.push(doc.doc_line_text(0).into_owned());
+            }
+            state.requests.push(request);
             CanvasDragResponse::Ignore
         }
     }
@@ -858,14 +453,11 @@ pub(crate) mod canvas_drag_test_support {
     }
 
     pub(crate) fn start_canvas_drag(app: &mut App) {
+        app.prepare_editor_pointer_frame_for_test();
         let bounds = app.plugin_render_bounds();
-        let _ = app.dispatch_editor_mouse_input(
-            ElementState::Pressed,
-            bounds.x + 4.0,
-            bounds.y + 4.0,
-            None,
-        );
-        let _ = app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, None);
+        let _ =
+            app.dispatch_editor_mouse_input(ElementState::Pressed, bounds.x + 4.0, bounds.y + 4.0);
+        let _ = app.dispatch_editor_cursor_moved(bounds.x + 20.0, bounds.y + 20.0, false);
     }
 
     pub(crate) fn cancel_request_count(state: &CanvasDragState) -> usize {
@@ -874,6 +466,10 @@ pub(crate) mod canvas_drag_test_support {
             .iter()
             .filter(|request| request.phase == ui::plugin::CanvasDragPhase::Cancel)
             .count()
+    }
+
+    pub(crate) fn cancelled_sources(state: &CanvasDragState) -> &[String] {
+        &state.cancelled_sources
     }
 
     pub(crate) fn document_texts(app: &App) -> Vec<String> {
@@ -889,6 +485,7 @@ mod tests {
     use super::canvas_drag_test_support::{
         app_with_canvas_drag_tabs, cancel_request_count, document_texts, start_canvas_drag,
     };
+    use super::viewport::{MIN_PLUGIN_VIEWPORT_PX, projected_editor_rect};
     use super::*;
     use crate::document_fixture::DocumentFixture;
 
@@ -912,7 +509,7 @@ mod tests {
         let inputs = app.build_shell_inputs();
         app.ui_shell.update_frame(
             ui::core::Screen::new(800.0, 600.0),
-            &app.current_theme,
+            app.editor_runtime.theme(),
             &mut ui::core::NoopMeasure,
             &inputs,
         );
@@ -930,7 +527,7 @@ mod tests {
             );
             let action = app.ui_shell.forward_ime(
                 ui::core::Event::ImeCommit("新内容".to_owned()),
-                &app.current_theme,
+                app.editor_runtime.theme(),
                 app.ui_metrics().dpi,
             );
             let expected = if replace {
@@ -948,43 +545,6 @@ mod tests {
         let mut app = app_with_focused_search(false);
         app.ui_shell.focus_editor();
         assert!(app.route_search_menu_action(crate::native_menu::MenuAction::Paste).is_none());
-    }
-
-    fn has_direct_sync_controller_field_access(compact_source: &str) -> bool {
-        let sync_controller_field = ["self.sync_", "controller"].concat();
-
-        compact_source.match_indices(&sync_controller_field).any(|(index, _)| {
-            let suffix = &compact_source[index + sync_controller_field.len()..];
-            !suffix.starts_with("()") && !suffix.starts_with("_mut()")
-        })
-    }
-
-    #[test]
-    fn dispatch_routes_sync_controller_access_through_app_accessors() {
-        let production_source = include_str!("app_dispatch.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("dispatch production source should precede tests");
-        let compact_production_source = production_source.split_whitespace().collect::<String>();
-
-        assert!(
-            !has_direct_sync_controller_field_access(&compact_production_source),
-            "dispatch must use App sync-controller accessors"
-        );
-    }
-
-    #[test]
-    fn sync_controller_boundary_rejects_fields_without_rejecting_accessors() {
-        let sync_controller_field = ["self.sync_", "controller"].concat();
-
-        assert!(has_direct_sync_controller_field_access(&format!(
-            "{sync_controller_field}.as_ref()"
-        )));
-        assert!(has_direct_sync_controller_field_access(&format!("{sync_controller_field}=None;")));
-        assert!(!has_direct_sync_controller_field_access(&format!("{sync_controller_field}()")));
-        assert!(!has_direct_sync_controller_field_access(&format!(
-            "{sync_controller_field}_mut()"
-        )));
     }
 
     #[cfg(feature = "markdown")]
@@ -1639,7 +1199,7 @@ mod tests {
 
         assert!(
             bounds.w > MIN_PLUGIN_VIEWPORT_PX
-                && bounds.x > app.ui_shell.sidebar_editor_left_offset(),
+                && bounds.x > app.ui_shell.sidebar_editor_left_offset(app.ui_metrics().dpi),
             "initial WYSIWYG render bounds should use current screen width before shell layout, got {bounds:?}"
         );
     }
@@ -1647,7 +1207,8 @@ mod tests {
     #[test]
     fn wysiwyg_plugin_bounds_account_for_sidebar_during_first_shell_frame() {
         let mut app = App::new(None);
-        app.settings.view_mode = ui::view_mode::ViewMode::Sidebar;
+        app.editor_runtime
+            .edit_settings(|settings| settings.view_mode = ui::view_mode::ViewMode::Sidebar);
         let doc = DocumentFixture::new(vec!["hello world".to_string()], 80, 10.0);
         app.push_entry_for_test(doc, Box::new(WysiwygBoundsPlugin));
         app.switch_workspace_for_test(0);
@@ -1666,7 +1227,7 @@ mod tests {
         let bounds = app.plugin_render_bounds();
 
         assert!(
-            bounds.x > app.ui_shell.sidebar_editor_left_offset(),
+            bounds.x > app.ui_shell.sidebar_editor_left_offset(app.ui_metrics().dpi),
             "initial WYSIWYG render bounds should reserve the pinned sidebar, got {bounds:?}"
         );
     }
@@ -1681,124 +1242,11 @@ mod tests {
         assert_eq!(app.active_editor_index(), Some(1));
         assert!(effect.redraw);
         assert_eq!(cancel_request_count(&state.borrow()), 1);
+        assert_eq!(canvas_drag_test_support::cancelled_sources(&state.borrow()), ["abc"]);
         assert_eq!(document_texts(&app), ["abc", "def"]);
 
         let _ = app.dispatch_tab_switch(app.editor_tab_id_at(0).unwrap());
 
         assert_eq!(cancel_request_count(&state.borrow()), 1);
-    }
-
-    #[test]
-    fn settings_actions_apply_values_and_return_required_effects() {
-        let mut app = App::new(None);
-
-        assert!(
-            app.dispatch_settings_view_action(ui::settings_view::SettingsViewAction::SetFontSize(
-                18.0,
-            ))
-            .reshape
-        );
-        assert_eq!(app.settings.font_size, 18.0);
-
-        assert!(
-            app.dispatch_settings_view_action(ui::settings_view::SettingsViewAction::SetThemeMode(
-                ui::settings::ThemeMode::Light,
-            ),)
-                .redraw
-        );
-        assert_eq!(app.settings.theme_mode, ui::settings::ThemeMode::Light);
-
-        assert!(
-            app.dispatch_settings_view_action(ui::settings_view::SettingsViewAction::SetViewMode(
-                ui::view_mode::ViewMode::Tabs,
-            ))
-            .sync_window_chrome
-        );
-        assert_eq!(app.settings.view_mode, ui::view_mode::ViewMode::Tabs);
-    }
-
-    #[test]
-    fn sync_settings_action_reaches_existing_controller_validation() {
-        let mut app = App::new(None);
-        let sync_action = SyncSettingsAction::TestConnection {
-            endpoint: "https://example.com".to_owned(),
-            api_key: ui::core::widget::SensitiveText::new("secret".to_owned()),
-        };
-        let debug = format!("{sync_action:?}");
-        assert!(debug.contains("<redacted>"));
-        assert!(!debug.contains("secret"));
-
-        let effect = app.reduce_action(AppAction::Sync(sync_action), None);
-        assert!(effect.redraw);
-    }
-
-    #[test]
-    fn publish_library_prompts_for_folder_before_validating_remote_fields() {
-        let mut app = App::new(None);
-        let mut folder_picker_call_count = 0;
-
-        let effect = app.dispatch_sync_settings_action_with_folder_picker(
-            SyncSettingsAction::PublishLibrary {
-                remote_device_id: String::new(),
-                remote_name: String::new(),
-                remote_addresses: Vec::new(),
-            },
-            &mut || {
-                folder_picker_call_count += 1;
-                None
-            },
-        );
-
-        assert_eq!(folder_picker_call_count, 1);
-        assert_eq!(effect, AppEffect::NONE);
-    }
-
-    #[test]
-    fn sidebar_settings_action_opens_modal_settings_view() {
-        let mut app = App::new(None);
-
-        let effect = app.reduce_action(AppAction::OpenSidebarSettingsMenu, None);
-
-        assert!(effect.redraw);
-        assert_eq!(app.ui_shell.overlays_count(), 1);
-        assert!(app.ui_shell.active_overlay_is_modal());
-    }
-
-    #[test]
-    fn sync_remote_input_parser_accepts_static_addresses_and_dynamic_placeholder() {
-        let remote = parse_sync_remote_device(
-            "ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG".to_owned(),
-            "远端设备".to_owned(),
-            " tcp://sync.example.com:22000, dynamic ".to_owned(),
-        )
-        .expect("valid sync remote input should parse");
-
-        assert_eq!(
-            remote.device_id.as_str(),
-            "ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG"
-        );
-        assert_eq!(remote.name, "远端设备");
-        assert_eq!(remote.addresses.len(), 1);
-        assert_eq!(remote.addresses[0].as_str(), "tcp://sync.example.com:22000");
-    }
-
-    #[test]
-    fn sync_remote_input_parser_rejects_invalid_device_or_address() {
-        assert!(
-            parse_sync_remote_device(
-                "invalid".to_owned(),
-                "远端设备".to_owned(),
-                "dynamic".to_owned(),
-            )
-            .is_err()
-        );
-        assert!(
-            parse_sync_remote_device(
-                "ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG".to_owned(),
-                "远端设备".to_owned(),
-                "https://sync.example.com".to_owned(),
-            )
-            .is_err()
-        );
     }
 }

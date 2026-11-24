@@ -74,8 +74,8 @@ fn replacement_preedit_keeps_the_configured_body_font() {
             .engine
             .replacement_preedit
             .as_ref()
-            .expect("selection replacement must exercise the IME preview engine");
-        assert_eq!(composition.engine.base_font_family, font_family);
+            .expect("selection replacement must exercise the IME preview layout");
+        assert_eq!(composition.layout.base_font_family, font_family);
     }
 }
 

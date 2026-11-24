@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use appkit_core::tab_set::types::TabId;
 use appkit_shell::editor_runtime::{
-    DocumentTextEditError, DocumentTextReplacement, EditorNotification, EditorOutcome,
-    EditorRuntime, OpenDisposition, PreparedDocumentSave,
+    CloseConfirmation, DocumentTextEditError, DocumentTextReplacement, EditorNotification,
+    EditorOutcome, EditorRuntime, OpenDisposition, PreparedDocumentSave,
 };
 use appkit_shell::prepared_tab::PreparedTab;
 use appkit_shell::tab_runtime::DocumentEditingAccess;
@@ -33,6 +33,7 @@ const TRASH_SAVE_STALE_MESSAGE: &str = "笔记在保存完成前发生变化，�
 const MOVE_SAVE_FAILURE_MESSAGE: &str = "笔记保存失败，因此未移动";
 const MOVE_SAVE_STALE_MESSAGE: &str = "笔记在保存完成前发生变化，因此未移动";
 const TITLE_SAVE_FAILURE_MESSAGE: &str = "笔记保存失败，因此未更新标题和文件名";
+const TAB_WORKFLOW_IN_PROGRESS: &str = "此文档有正在处理的操作，请完成后重试";
 
 #[derive(Clone, Copy)]
 pub(super) struct DocumentSelection {
@@ -70,11 +71,6 @@ pub(super) enum DocumentCommand {
         tab_id: TabId,
         saved_path: Option<std::path::PathBuf>,
     },
-    CompleteExternalSaveAs {
-        request: AutoSaveRequest,
-        save_succeeded: bool,
-        saved_path: Option<std::path::PathBuf>,
-    },
     ChooseExternalSavePath {
         tab_id: TabId,
         external_file_id: ExternalFileId,
@@ -96,10 +92,6 @@ pub(super) enum DocumentCommand {
         tab_id: TabId,
         content_revision: u64,
         path: std::path::PathBuf,
-    },
-    BeginConflictRetry {
-        request: ManualSaveRequest,
-        pending: PendingConflictRetry,
     },
     SaveConflictCopy {
         identity: DocumentIdentity,
@@ -146,6 +138,14 @@ pub(super) struct PendingConflictRetry {
     pub(super) content_revision: u64,
 }
 
+pub(super) struct ConflictRetryRevision {
+    pub(super) identity: DocumentIdentity,
+    pub(super) tab_id: TabId,
+    pub(super) content_revision: u64,
+    pub(super) path: std::path::PathBuf,
+    pub(super) disk_revision: appkit_core::file_safety::DiskRevision,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PendingTrashMove {
     pub(super) note_id: NoteId,
@@ -164,6 +164,46 @@ pub(super) struct PendingTitleUpdate {
     pub(super) content_revision: u64,
 }
 
+#[derive(Default)]
+enum TabEncryption {
+    #[default]
+    Plaintext,
+    Encrypted {
+        unlocked_session: Option<Arc<textora_encryption::UnlockedNoteSession>>,
+    },
+}
+
+#[derive(Default)]
+struct TabWorkflowAttachment {
+    encryption: TabEncryption,
+    save_failure_message: Option<String>,
+    operation: PendingTabOperation,
+}
+
+#[derive(Default)]
+pub(super) enum PendingTabOperation {
+    #[default]
+    None,
+    ExternalSaveAs(PendingExternalSaveAs),
+    ConflictRetry(PendingConflictRetry),
+    MoveToTrash(PendingTrashMove),
+    RelocateNote(PendingNoteMove),
+    UpdateTitle(PendingTitleUpdate),
+}
+
+impl PendingTabOperation {
+    fn content_revision(&self) -> Option<u64> {
+        match self {
+            Self::None => None,
+            Self::ExternalSaveAs(pending) => Some(pending.content_revision),
+            Self::ConflictRetry(pending) => Some(pending.content_revision),
+            Self::MoveToTrash(pending) => Some(pending.content_revision),
+            Self::RelocateNote(pending) => Some(pending.content_revision),
+            Self::UpdateTitle(pending) => Some(pending.content_revision),
+        }
+    }
+}
+
 /// editor、文档注册表与全部文档级 pending workflow 的唯一所有者。
 pub(super) struct DocumentRuntime {
     #[cfg(not(test))]
@@ -174,42 +214,13 @@ pub(super) struct DocumentRuntime {
     document_registry: DocumentRegistry,
     #[cfg(test)]
     pub(super) document_registry: DocumentRegistry,
-    unlocked_note_sessions: HashMap<TabId, Arc<textora_encryption::UnlockedNoteSession>>,
+    tab_workflows: HashMap<TabId, TabWorkflowAttachment>,
     unlocked_workspace_note_sessions: HashMap<NoteId, Arc<textora_encryption::UnlockedNoteSession>>,
-    encrypted_note_tabs: HashSet<TabId>,
     #[cfg(not(test))]
     autosave: AutoSaveScheduler<SystemAutoSaveClock>,
     #[cfg(test)]
     pub(super) autosave: AutoSaveScheduler<SystemAutoSaveClock>,
-    #[cfg(not(test))]
-    save_failure_messages: HashMap<TabId, String>,
-    #[cfg(test)]
-    pub(super) save_failure_messages: HashMap<TabId, String>,
-    #[cfg(not(test))]
-    pending_external_save_as: HashMap<TabId, PendingExternalSaveAs>,
-    #[cfg(test)]
-    pub(super) pending_external_save_as: HashMap<TabId, PendingExternalSaveAs>,
     pending_external_file_closes: HashSet<ExternalFileId>,
-    #[cfg(not(test))]
-    pending_external_documents: HashMap<ExternalFileId, LoadedDocument>,
-    #[cfg(test)]
-    pub(super) pending_external_documents: HashMap<ExternalFileId, LoadedDocument>,
-    #[cfg(not(test))]
-    pending_conflict_retries: HashMap<TabId, PendingConflictRetry>,
-    #[cfg(test)]
-    pub(super) pending_conflict_retries: HashMap<TabId, PendingConflictRetry>,
-    #[cfg(not(test))]
-    pending_trash_moves: HashMap<TabId, PendingTrashMove>,
-    #[cfg(test)]
-    pub(super) pending_trash_moves: HashMap<TabId, PendingTrashMove>,
-    #[cfg(not(test))]
-    pending_note_moves: HashMap<TabId, PendingNoteMove>,
-    #[cfg(test)]
-    pub(super) pending_note_moves: HashMap<TabId, PendingNoteMove>,
-    #[cfg(not(test))]
-    pending_title_updates: HashMap<TabId, PendingTitleUpdate>,
-    #[cfg(test)]
-    pub(super) pending_title_updates: HashMap<TabId, PendingTitleUpdate>,
     #[cfg(not(test))]
     pending_title_seeds: HashMap<NoteId, String>,
     #[cfg(test)]
@@ -241,18 +252,10 @@ impl DocumentRuntime {
         Self {
             runtime_lru,
             document_registry: DocumentRegistry::default(),
-            unlocked_note_sessions: HashMap::new(),
+            tab_workflows: HashMap::new(),
             unlocked_workspace_note_sessions: HashMap::new(),
-            encrypted_note_tabs: HashSet::new(),
             autosave,
-            save_failure_messages: HashMap::new(),
-            pending_external_save_as: HashMap::new(),
             pending_external_file_closes: HashSet::new(),
-            pending_external_documents: HashMap::new(),
-            pending_conflict_retries: HashMap::new(),
-            pending_trash_moves: HashMap::new(),
-            pending_note_moves: HashMap::new(),
-            pending_title_updates: HashMap::new(),
             pending_title_seeds: HashMap::new(),
             pending_metadata_generations: HashMap::new(),
             pending_metadata_mutations: Vec::new(),
@@ -304,15 +307,22 @@ impl DocumentRuntime {
         self.document_registry.touch_tab(tab_id);
     }
 
-    pub(super) fn remove_tab(&mut self, tab_id: TabId) {
-        self.unregister_tab(tab_id);
+    pub(super) fn close_tab_discarding_changes(&mut self, tab_id: TabId) -> EditorOutcome {
+        let outcome = self.editor_runtime.confirm_close(tab_id, CloseConfirmation::Discard);
+        if self.editor_runtime.tab_index(tab_id).is_none() {
+            self.unregister_tab(tab_id);
+        }
+        outcome
     }
 
     pub(super) fn unlocked_note_session(
         &self,
         tab_id: TabId,
     ) -> Option<Arc<textora_encryption::UnlockedNoteSession>> {
-        self.unlocked_note_sessions.get(&tab_id).cloned()
+        match &self.tab_workflows.get(&tab_id)?.encryption {
+            TabEncryption::Encrypted { unlocked_session } => unlocked_session.clone(),
+            TabEncryption::Plaintext => None,
+        }
     }
 
     pub(super) fn cached_unlocked_workspace_note_session(
@@ -327,19 +337,50 @@ impl DocumentRuntime {
     }
 
     fn unregister_tab(&mut self, tab_id: TabId) {
+        self.autosave.cancel(tab_id);
+        self.tab_workflows.remove(&tab_id);
         if let Some(DocumentIdentity::ExternalFile(external_file_id)) =
             self.document_registry.identity_for(tab_id)
         {
             self.pending_external_file_closes.remove(&external_file_id);
         }
-        self.pending_external_save_as.remove(&tab_id);
-        self.pending_conflict_retries.remove(&tab_id);
-        self.pending_trash_moves.remove(&tab_id);
-        self.pending_note_moves.remove(&tab_id);
-        self.pending_title_updates.remove(&tab_id);
-        self.unlocked_note_sessions.remove(&tab_id);
-        self.encrypted_note_tabs.remove(&tab_id);
         self.document_registry.remove_tab(tab_id);
+    }
+
+    pub(super) fn pending_operation(&self, tab_id: TabId) -> Option<&PendingTabOperation> {
+        let operation = &self.tab_workflows.get(&tab_id)?.operation;
+        (!matches!(operation, PendingTabOperation::None)).then_some(operation)
+    }
+
+    pub(super) fn start_pending_operation(
+        &mut self,
+        tab_id: TabId,
+        operation: PendingTabOperation,
+    ) -> Result<(), &'static str> {
+        let attachment = self.tab_workflows.entry(tab_id).or_default();
+        if !matches!(attachment.operation, PendingTabOperation::None) {
+            return Err(TAB_WORKFLOW_IN_PROGRESS);
+        }
+        attachment.operation = operation;
+        Ok(())
+    }
+
+    fn take_completed_save_operation(&mut self, request: AutoSaveRequest) -> PendingTabOperation {
+        let Some(attachment) = self.tab_workflows.get_mut(&request.tab_id) else {
+            return PendingTabOperation::None;
+        };
+        if matches!(attachment.operation, PendingTabOperation::ExternalSaveAs(_))
+            || attachment.operation.content_revision() != Some(request.content_revision)
+        {
+            return PendingTabOperation::None;
+        }
+        std::mem::take(&mut attachment.operation)
+    }
+
+    fn clear_pending_operation(&mut self, tab_id: TabId) {
+        if let Some(attachment) = self.tab_workflows.get_mut(&tab_id) {
+            attachment.operation = PendingTabOperation::None;
+        }
     }
 
     pub(super) fn request_external_file_close_after_save(
@@ -380,11 +421,13 @@ impl DocumentRuntime {
     }
 
     pub(super) fn save_failure_message(&self, tab_id: TabId) -> Option<&str> {
-        self.save_failure_messages.get(&tab_id).map(String::as_str)
+        self.tab_workflows.get(&tab_id)?.save_failure_message.as_deref()
     }
 
     pub(super) fn clear_save_failure(&mut self, tab_id: TabId) {
-        self.save_failure_messages.remove(&tab_id);
+        if let Some(attachment) = self.tab_workflows.get_mut(&tab_id) {
+            attachment.save_failure_message = None;
+        }
     }
 
     pub(super) fn workspace_note_save_candidates(&self) -> Vec<WorkspaceNoteSaveCandidate> {
@@ -433,17 +476,12 @@ impl DocumentRuntime {
             })
             .collect::<Vec<_>>();
         for tab_id in note_tabs {
-            self.autosave.cancel(tab_id);
-            self.save_failure_messages.remove(&tab_id);
-            let _ = self.editor_runtime.close_for_product(tab_id);
-            self.unregister_tab(tab_id);
+            self.close_tab_discarding_changes(tab_id);
         }
         self.pending_title_seeds.clear();
         self.pending_metadata_generations.clear();
         self.pending_metadata_mutations.clear();
-        self.unlocked_note_sessions.clear();
         self.unlocked_workspace_note_sessions.clear();
-        self.encrypted_note_tabs.clear();
         self.catalog_reconciliation_pending = false;
     }
 
@@ -452,12 +490,27 @@ impl DocumentRuntime {
         origin: &notora_core::DocumentOrigin,
         tab_id: TabId,
         content_revision: u64,
-    ) {
+    ) -> Option<DocumentOutcome> {
+        let previous = self.autosave.state(tab_id);
         self.autosave.on_content_changed(origin, tab_id, content_revision);
-    }
-
-    pub(super) fn cancel_autosave(&mut self, tab_id: TabId) {
-        self.autosave.cancel(tab_id);
+        let Some(crate::autosave::AutoSaveState::Scheduled {
+            content_revision: previous_revision,
+            ..
+        }) = previous
+        else {
+            return None;
+        };
+        if previous_revision == content_revision
+            || self.pending_operation(tab_id)?.content_revision() != Some(previous_revision)
+        {
+            return None;
+        }
+        let mut outcome = DocumentOutcome::default();
+        self.handle_stale_save_operation(
+            AutoSaveRequest { tab_id, content_revision: previous_revision },
+            &mut outcome,
+        );
+        Some(outcome)
     }
 
     pub(super) fn has_in_flight_save(&self) -> bool {
@@ -474,18 +527,11 @@ impl DocumentRuntime {
 
     pub(super) fn reset_workspace_state(&mut self) {
         self.autosave.clear();
-        self.save_failure_messages.clear();
-        self.pending_external_save_as.clear();
-        self.pending_conflict_retries.clear();
-        self.pending_trash_moves.clear();
-        self.pending_note_moves.clear();
-        self.pending_title_updates.clear();
+        self.tab_workflows.clear();
         self.pending_title_seeds.clear();
         self.pending_metadata_generations.clear();
         self.pending_metadata_mutations.clear();
-        self.unlocked_note_sessions.clear();
         self.unlocked_workspace_note_sessions.clear();
-        self.encrypted_note_tabs.clear();
         self.catalog_reconciliation_pending = false;
     }
 
@@ -549,10 +595,20 @@ impl DocumentRuntime {
                 ..DocumentOutcome::default()
             };
         };
-        self.pending_trash_moves.insert(
+        if let Err(message) = self.start_pending_operation(
             tab_id,
-            PendingTrashMove { note_id, content_revision: summary.content_revision },
-        );
+            PendingTabOperation::MoveToTrash(PendingTrashMove {
+                note_id,
+                content_revision: summary.content_revision,
+            }),
+        ) {
+            return DocumentOutcome {
+                actions: vec![crate::action::NotoraAction::TrashOperationFailed(
+                    crate::action::TrashOperationFailure::Message(message.to_owned()),
+                )],
+                ..DocumentOutcome::default()
+            };
+        }
         self.autosave.request_immediate_save(&origin, tab_id, summary.content_revision);
         DocumentOutcome {
             commands: vec![DocumentCommand::ProcessDueAutosaves],
@@ -584,10 +640,15 @@ impl DocumentRuntime {
         let Some(origin) = origin else {
             return DocumentOutcome::failure("只有工作区笔记可以移动".to_owned());
         };
-        self.pending_note_moves.insert(
+        if let Err(message) = self.start_pending_operation(
             tab_id,
-            PendingNoteMove { request, content_revision: summary.content_revision },
-        );
+            PendingTabOperation::RelocateNote(PendingNoteMove {
+                request,
+                content_revision: summary.content_revision,
+            }),
+        ) {
+            return DocumentOutcome::failure(message.to_owned());
+        }
         self.autosave.request_immediate_save(&origin, tab_id, summary.content_revision);
         DocumentOutcome {
             commands: vec![DocumentCommand::ProcessDueAutosaves],
@@ -619,10 +680,15 @@ impl DocumentRuntime {
         let Some(origin) = origin else {
             return DocumentOutcome::failure("只有工作区笔记可以更新标题".to_owned());
         };
-        self.pending_title_updates.insert(
+        if let Err(message) = self.start_pending_operation(
             tab_id,
-            PendingTitleUpdate { request, content_revision: summary.content_revision },
-        );
+            PendingTabOperation::UpdateTitle(PendingTitleUpdate {
+                request,
+                content_revision: summary.content_revision,
+            }),
+        ) {
+            return DocumentOutcome::failure(message.to_owned());
+        }
         self.autosave.request_immediate_save(&origin, tab_id, summary.content_revision);
         DocumentOutcome {
             commands: vec![DocumentCommand::ProcessDueAutosaves],
@@ -688,8 +754,8 @@ impl DocumentRuntime {
         if Self::selection_matches(request, selection)
             && let Some(tab_id) = self.document_registry.tab_for(request.identity)
         {
-            self.encrypted_note_tabs.insert(tab_id);
-            self.unlocked_note_sessions.insert(tab_id, Arc::clone(&session));
+            self.tab_workflows.entry(tab_id).or_default().encryption =
+                TabEncryption::Encrypted { unlocked_session: Some(Arc::clone(&session)) };
             if let DocumentIdentity::Note(note_id) = request.identity {
                 self.unlocked_workspace_note_sessions.insert(note_id, session);
             }
@@ -765,20 +831,15 @@ impl DocumentRuntime {
         event_loop_proxy: Option<EventLoopProxy<ShellEvent>>,
     ) -> DocumentOutcome {
         let Some(summary) = self.editor_runtime.document_summary(request.tab_id) else {
-            self.autosave.cancel(request.tab_id);
-            self.save_failure_messages.remove(&request.tab_id);
             let mut outcome = DocumentOutcome::default();
             self.cancel_pending_workflows(request, &mut outcome);
+            self.unregister_tab(request.tab_id);
             return outcome;
         };
         if summary.content_revision != request.content_revision {
             self.handle_superseded_autosave(request, summary.content_revision, summary.dirty);
             let mut outcome = DocumentOutcome { needs_redraw: true, ..DocumentOutcome::default() };
-            self.cancel_pending_trash_move_into(request, TRASH_SAVE_STALE_MESSAGE, &mut outcome);
-            self.cancel_pending_note_move_into(request, MOVE_SAVE_STALE_MESSAGE, &mut outcome);
-            if let Some(pending) = self.pending_title_updates.remove(&request.tab_id) {
-                outcome.commands.push(DocumentCommand::RetryTitleUpdate(pending.request));
-            }
+            self.handle_stale_save_operation(request, &mut outcome);
             return outcome;
         }
         if !summary.dirty {
@@ -854,42 +915,41 @@ impl DocumentRuntime {
         };
         let pending =
             PendingExternalSaveAs { external_file_id, content_revision: prepared.content_revision };
+        if let Err(message) =
+            self.start_pending_operation(tab_id, PendingTabOperation::ExternalSaveAs(pending))
+        {
+            return (false, DocumentOutcome::failure(message.to_owned()));
+        }
         if let Err(message) = self.submit_prepared_save(prepared, event_loop_proxy) {
+            self.clear_pending_operation(tab_id);
             return (false, DocumentOutcome::failure(message));
         }
-        self.pending_external_save_as.insert(tab_id, pending);
         (true, DocumentOutcome::default())
     }
 
-    pub(super) fn complete_pending_external_save_as(
+    fn complete_pending_external_save_as(
         &mut self,
         request: AutoSaveRequest,
-        save_succeeded: bool,
         saved_path: Option<std::path::PathBuf>,
-    ) -> DocumentOutcome {
-        let Some(pending) = self.pending_external_save_as.get(&request.tab_id).copied() else {
-            return DocumentOutcome::default();
+    ) -> Option<DocumentCommand> {
+        let PendingTabOperation::ExternalSaveAs(pending) =
+            self.pending_operation(request.tab_id)?
+        else {
+            return None;
         };
         if pending.content_revision != request.content_revision {
-            return DocumentOutcome::default();
-        }
-        if !save_succeeded {
-            self.pending_external_save_as.remove(&request.tab_id);
-            return DocumentOutcome::default();
+            return None;
         }
         let Some(saved_path) = saved_path else {
-            self.pending_external_save_as.remove(&request.tab_id);
-            return DocumentOutcome::default();
+            self.clear_pending_operation(request.tab_id);
+            return None;
         };
-        DocumentOutcome {
-            commands: vec![DocumentCommand::CanonicalizeExternalSaveAs {
-                tab_id: request.tab_id,
-                external_file_id: pending.external_file_id,
-                content_revision: pending.content_revision,
-                saved_path,
-            }],
-            ..DocumentOutcome::default()
-        }
+        Some(DocumentCommand::CanonicalizeExternalSaveAs {
+            tab_id: request.tab_id,
+            external_file_id: pending.external_file_id,
+            content_revision: pending.content_revision,
+            saved_path,
+        })
     }
 
     pub(super) fn complete_external_save_as_canonicalization(
@@ -899,7 +959,8 @@ impl DocumentRuntime {
         content_revision: u64,
         result: Result<CanonicalExternalPath, String>,
     ) -> DocumentOutcome {
-        let Some(pending) = self.pending_external_save_as.get(&tab_id).copied() else {
+        let Some(PendingTabOperation::ExternalSaveAs(pending)) = self.pending_operation(tab_id)
+        else {
             return DocumentOutcome::default();
         };
         if pending.external_file_id != external_file_id
@@ -907,7 +968,7 @@ impl DocumentRuntime {
         {
             return DocumentOutcome::default();
         }
-        self.pending_external_save_as.remove(&tab_id);
+        self.clear_pending_operation(tab_id);
         match result {
             Ok(canonical_path) => DocumentOutcome {
                 commands: vec![DocumentCommand::ApplyExternalSaveAs {
@@ -964,18 +1025,10 @@ impl DocumentRuntime {
             return unavailable();
         };
         match session {
-            ExternalFileSession::Existing { canonical_path, external_file_id, .. } => {
-                if let Some(document) = self.pending_external_documents.remove(&external_file_id) {
-                    return self.install_loaded_preview(request, document, selection);
-                }
-                DocumentOutcome {
-                    commands: vec![DocumentCommand::LoadExternalDocument {
-                        request,
-                        canonical_path,
-                    }],
-                    ..DocumentOutcome::default()
-                }
-            }
+            ExternalFileSession::Existing { canonical_path, .. } => DocumentOutcome {
+                commands: vec![DocumentCommand::LoadExternalDocument { request, canonical_path }],
+                ..DocumentOutcome::default()
+            },
             ExternalFileSession::Untitled { kind, .. } => {
                 let (prepared, suggested_file_name) =
                     match prepare_untitled_document(&self.editor_runtime, kind) {
@@ -990,27 +1043,6 @@ impl DocumentRuntime {
                 )
             }
             ExternalFileSession::Missing { .. } => unavailable(),
-        }
-    }
-
-    pub(super) fn complete_external_file_open(
-        &mut self,
-        identity: DocumentIdentity,
-        document: LoadedDocument,
-        activate: bool,
-    ) -> DocumentOutcome {
-        if !activate {
-            return DocumentOutcome::default();
-        }
-        let DocumentIdentity::ExternalFile(external_file_id) = identity else {
-            return DocumentOutcome::default();
-        };
-        if self.document_registry.tab_for(identity).is_none() {
-            self.pending_external_documents.insert(external_file_id, document);
-        }
-        DocumentOutcome {
-            actions: vec![crate::action::NotoraAction::ExternalFileOpened(identity)],
-            ..DocumentOutcome::default()
         }
     }
 
@@ -1040,60 +1072,50 @@ impl DocumentRuntime {
 
     pub(super) fn complete_conflict_retry_revision_capture(
         &mut self,
-        identity: DocumentIdentity,
-        tab_id: TabId,
-        content_revision: u64,
-        path: std::path::PathBuf,
-        disk_revision: appkit_core::file_safety::DiskRevision,
-        request: Option<ManualSaveRequest>,
-    ) -> DocumentOutcome {
-        if self.document_registry.identity_for(tab_id) != Some(identity) {
-            return DocumentOutcome::default();
-        }
-        let Some(summary) = self.editor_runtime.document_summary(tab_id) else {
-            return DocumentOutcome::default();
-        };
-        if summary.content_revision != content_revision
-            || !self.editor_runtime.update_document_path(tab_id, path, Some(disk_revision))
-        {
-            return DocumentOutcome::default();
-        }
-        let Some(request) = request else {
-            return DocumentOutcome::default();
-        };
-        DocumentOutcome {
-            commands: vec![DocumentCommand::BeginConflictRetry {
-                request,
-                pending: PendingConflictRetry { identity, content_revision },
-            }],
-            ..DocumentOutcome::default()
-        }
-    }
-
-    pub(super) fn begin_conflict_retry(
-        &mut self,
-        request: ManualSaveRequest,
-        pending: PendingConflictRetry,
+        revision: ConflictRetryRevision,
         origin: Option<notora_core::DocumentOrigin>,
         event_loop_proxy: Option<EventLoopProxy<ShellEvent>>,
     ) -> DocumentOutcome {
-        match request {
-            ManualSaveRequest::Note { tab_id, .. } => {
-                self.pending_conflict_retries.insert(tab_id, pending);
-                self.save_manually(request, origin, event_loop_proxy)
-            }
-            ManualSaveRequest::ExistingExternalFile { tab_id } => {
-                let (submitted, outcome) =
-                    self.submit_manual_external_save(tab_id, event_loop_proxy);
-                if submitted {
-                    self.pending_conflict_retries.insert(tab_id, pending);
-                }
-                outcome
-            }
-            ManualSaveRequest::UntitledExternalFile { .. } => {
-                DocumentOutcome::failure("未命名文档没有可重试的磁盘冲突".to_owned())
-            }
+        let ConflictRetryRevision { identity, tab_id, content_revision, path, disk_revision } =
+            revision;
+        if self.document_registry.identity_for(tab_id) != Some(identity)
+            || !self.editor_runtime.document_summary(tab_id).is_some_and(|summary| {
+                summary.content_revision == content_revision
+                    && summary.path.as_deref() == Some(path.as_path())
+            })
+        {
+            return DocumentOutcome::default();
         }
+        let request = match origin {
+            Some(notora_core::DocumentOrigin::Note { .. }) => {
+                ManualSaveRequest::Note { tab_id, content_revision }
+            }
+            Some(notora_core::DocumentOrigin::ExternalFile { .. }) => {
+                ManualSaveRequest::ExistingExternalFile { tab_id }
+            }
+            Some(notora_core::DocumentOrigin::UntitledExternal { .. }) => {
+                return DocumentOutcome::failure("未命名文档没有可重试的磁盘冲突".to_owned());
+            }
+            None => return DocumentOutcome::default(),
+        };
+        let pending = PendingConflictRetry { identity, content_revision };
+        if let Err(message) =
+            self.start_pending_operation(tab_id, PendingTabOperation::ConflictRetry(pending))
+        {
+            return DocumentOutcome::failure(message.to_owned());
+        }
+        if !self.editor_runtime.update_document_path(tab_id, path, Some(disk_revision)) {
+            self.clear_pending_operation(tab_id);
+            return DocumentOutcome::default();
+        }
+        if matches!(request, ManualSaveRequest::Note { .. }) {
+            return self.save_manually(request, origin, event_loop_proxy);
+        }
+        let (submitted, outcome) = self.submit_manual_external_save(tab_id, event_loop_proxy);
+        if !submitted {
+            self.clear_pending_operation(tab_id);
+        }
+        outcome
     }
 
     pub(super) fn prepare_conflict_copy(
@@ -1104,7 +1126,7 @@ impl DocumentRuntime {
         let Some(tab_id) = self.document_registry.tab_for(identity) else {
             return DocumentOutcome::default();
         };
-        if self.encrypted_note_tabs.contains(&tab_id) {
+        if self.tab_is_encrypted(tab_id) {
             return DocumentOutcome::failure(
                 "加密笔记不能导出明文冲突副本；请重新加载或重试加密保存".to_owned(),
             );
@@ -1124,9 +1146,7 @@ impl DocumentRuntime {
     }
 
     pub(super) fn is_encrypted_note(&self, identity: DocumentIdentity) -> bool {
-        self.document_registry
-            .tab_for(identity)
-            .is_some_and(|tab_id| self.encrypted_note_tabs.contains(&tab_id))
+        self.document_registry.tab_for(identity).is_some_and(|tab_id| self.tab_is_encrypted(tab_id))
     }
 
     pub(super) fn prepare_encrypted_conflict_copy(
@@ -1138,7 +1158,7 @@ impl DocumentRuntime {
         let Some(tab_id) = self.document_registry.tab_for(identity) else {
             return DocumentOutcome::default();
         };
-        if !self.encrypted_note_tabs.contains(&tab_id) {
+        if !self.tab_is_encrypted(tab_id) {
             return DocumentOutcome::failure("当前文档不是加密笔记".to_owned());
         }
         let prepared = match self.editor_runtime.prepare_save_as(tab_id, &path) {
@@ -1176,7 +1196,7 @@ impl DocumentRuntime {
                 tab_id,
                 content_revision: summary.content_revision,
                 path,
-                session: self.unlocked_note_sessions.get(&tab_id).cloned(),
+                session: self.unlocked_note_session(tab_id),
             }],
             ..DocumentOutcome::default()
         }
@@ -1207,7 +1227,7 @@ impl DocumentRuntime {
             return DocumentOutcome::default();
         }
         self.autosave.cancel(tab_id);
-        self.save_failure_messages.remove(&tab_id);
+        self.clear_save_failure(tab_id);
         DocumentOutcome {
             actions: vec![crate::action::NotoraAction::SaveConflictResolved { identity }],
             ..DocumentOutcome::default()
@@ -1411,14 +1431,15 @@ impl DocumentRuntime {
             return;
         };
         tab.document_mut().cursor_mut().selection_anchor = None;
-        tab.document_mut().cursor_move_to_offset(tree.root.title_byte_range.end);
+        tab.document_mut().cursor_move_to_offset(tree.root().title_byte_range.end);
     }
 
     pub(super) fn drain_save_completions(&mut self) -> Vec<DocumentOutcome> {
         self.editor_runtime
             .drain_save_completions()
             .into_iter()
-            .map(|completion| {
+            .filter_map(|completion| {
+                self.editor_runtime.tab_index(completion.tab_id)?;
                 let request = AutoSaveRequest {
                     tab_id: completion.tab_id,
                     content_revision: completion.content_revision,
@@ -1433,43 +1454,16 @@ impl DocumentRuntime {
                     .then(|| self.document_registry.identity_for(request.tab_id))
                     .flatten();
                 let save_succeeded = completion.result.is_ok();
-                let completed_conflict_retry = self
-                    .pending_conflict_retries
-                    .get(&request.tab_id)
-                    .copied()
-                    .filter(|retry| retry.content_revision == request.content_revision);
-                let pending_trash_move = self
-                    .pending_trash_moves
-                    .get(&request.tab_id)
-                    .copied()
-                    .filter(|pending| pending.content_revision == request.content_revision);
-                let pending_note_move = self
-                    .pending_note_moves
-                    .get(&request.tab_id)
-                    .cloned()
-                    .filter(|pending| pending.content_revision == request.content_revision);
-                if completed_conflict_retry.is_some() {
-                    self.pending_conflict_retries.remove(&request.tab_id);
-                }
                 let saved_path =
                     completion.result.as_ref().ok().map(|revision| revision.path.clone());
                 let mut outcome = DocumentOutcome::default();
                 outcome
                     .absorb_editor_outcome(self.editor_runtime.apply_save_completion(completion));
-                outcome.commands.push(DocumentCommand::CompleteExternalSaveAs {
-                    request,
-                    save_succeeded,
-                    saved_path: saved_path.clone(),
-                });
+                outcome
+                    .commands
+                    .extend(self.complete_pending_external_save_as(request, saved_path.clone()));
                 if save_succeeded {
-                    self.finish_successful_save(
-                        request,
-                        completed_conflict_retry,
-                        pending_trash_move,
-                        pending_note_move,
-                        saved_path,
-                        &mut outcome,
-                    );
+                    self.finish_successful_save(request, saved_path, &mut outcome);
                 } else {
                     self.finish_failed_save(
                         request,
@@ -1478,7 +1472,7 @@ impl DocumentRuntime {
                         &mut outcome,
                     );
                 }
-                outcome
+                Some(outcome)
             })
             .collect()
     }
@@ -1518,7 +1512,7 @@ impl DocumentRuntime {
         request: AutoSaveRequest,
         message: String,
     ) -> DocumentOutcome {
-        self.save_failure_messages.insert(request.tab_id, message);
+        self.tab_workflows.entry(request.tab_id).or_default().save_failure_message = Some(message);
         self.autosave.on_save_failed(request);
         self.editor_runtime.request_redraw();
         DocumentOutcome { needs_redraw: true, ..DocumentOutcome::default() }
@@ -1527,42 +1521,57 @@ impl DocumentRuntime {
     fn finish_successful_save(
         &mut self,
         request: AutoSaveRequest,
-        completed_conflict_retry: Option<PendingConflictRetry>,
-        pending_trash_move: Option<PendingTrashMove>,
-        pending_note_move: Option<PendingNoteMove>,
         saved_path: Option<std::path::PathBuf>,
         outcome: &mut DocumentOutcome,
     ) {
-        self.save_failure_messages.remove(&request.tab_id);
+        self.clear_save_failure(request.tab_id);
         self.autosave.on_save_completed(request);
         outcome
             .commands
             .push(DocumentCommand::RequestCatalogReindex { tab_id: request.tab_id, saved_path });
-        if let Some(pending) = pending_trash_move {
-            if self.pending_trash_move_has_current_saved_document(request.tab_id, pending) {
-                self.pending_trash_moves.remove(&request.tab_id);
-                outcome.commands.push(DocumentCommand::ExecuteTrash(
-                    crate::action::TrashOperation::MoveToTrash { note_id: pending.note_id },
-                ));
-            } else {
-                self.cancel_pending_trash_move_into(request, TRASH_SAVE_STALE_MESSAGE, outcome);
+        self.resume_pending_after_save(request, outcome);
+    }
+
+    fn resume_pending_after_save(
+        &mut self,
+        request: AutoSaveRequest,
+        outcome: &mut DocumentOutcome,
+    ) {
+        match self.take_completed_save_operation(request) {
+            PendingTabOperation::MoveToTrash(pending) => {
+                if self.pending_trash_move_has_current_saved_document(request.tab_id, pending) {
+                    outcome.commands.push(DocumentCommand::ExecuteTrash(
+                        crate::action::TrashOperation::MoveToTrash { note_id: pending.note_id },
+                    ));
+                } else {
+                    outcome.actions.push(trash_save_failure(TRASH_SAVE_STALE_MESSAGE));
+                }
             }
-        }
-        if let Some(pending) = pending_note_move {
-            if self.pending_note_move_has_current_saved_document(request.tab_id, &pending) {
-                self.pending_note_moves.remove(&request.tab_id);
-                outcome
-                    .commands
-                    .push(DocumentCommand::ExecuteNote(NoteCommand::Move(pending.request)));
-            } else {
-                self.cancel_pending_note_move_into(request, MOVE_SAVE_STALE_MESSAGE, outcome);
+            PendingTabOperation::RelocateNote(pending) => {
+                if self.pending_note_move_has_current_saved_document(request.tab_id, &pending) {
+                    outcome
+                        .commands
+                        .push(DocumentCommand::ExecuteNote(NoteCommand::Move(pending.request)));
+                } else {
+                    outcome.actions.push(note_save_failure(MOVE_SAVE_STALE_MESSAGE));
+                }
             }
-        }
-        self.finish_pending_title_update(request, outcome);
-        if let Some(retry) = completed_conflict_retry {
-            outcome.actions.push(crate::action::NotoraAction::SaveConflictResolved {
-                identity: retry.identity,
-            });
+            PendingTabOperation::UpdateTitle(pending) => {
+                let command = if self
+                    .pending_title_update_has_current_saved_document(request.tab_id, &pending)
+                {
+                    DocumentCommand::ExecuteNote(NoteCommand::UpdateTitle(pending.request))
+                } else {
+                    DocumentCommand::RetryTitleUpdate(pending.request)
+                };
+                outcome.commands.push(command);
+            }
+            PendingTabOperation::ConflictRetry(pending) => {
+                outcome.actions.push(crate::action::NotoraAction::SaveConflictResolved {
+                    identity: pending.identity,
+                });
+            }
+            PendingTabOperation::ExternalSaveAs(_) | PendingTabOperation::None => {}
         }
     }
 
@@ -1574,7 +1583,8 @@ impl DocumentRuntime {
         outcome: &mut DocumentOutcome,
     ) {
         if let Some(message) = failure_message {
-            self.save_failure_messages.insert(request.tab_id, message);
+            self.tab_workflows.entry(request.tab_id).or_default().save_failure_message =
+                Some(message);
             self.autosave.on_save_failed(request);
             self.editor_runtime.request_redraw();
             outcome.needs_redraw = true;
@@ -1596,7 +1606,7 @@ impl DocumentRuntime {
         current_content_revision: u64,
         current_dirty: bool,
     ) {
-        self.save_failure_messages.remove(&request.tab_id);
+        self.clear_save_failure(request.tab_id);
         if current_dirty {
             self.autosave.on_save_superseded(request, current_content_revision);
         } else {
@@ -1607,51 +1617,11 @@ impl DocumentRuntime {
 
     fn finish_redundant_autosave(&mut self, request: AutoSaveRequest) -> DocumentOutcome {
         self.autosave.cancel(request.tab_id);
-        self.save_failure_messages.remove(&request.tab_id);
+        self.clear_save_failure(request.tab_id);
         self.editor_runtime.request_redraw();
         let mut outcome = DocumentOutcome { needs_redraw: true, ..DocumentOutcome::default() };
-        if let Some(pending) = self
-            .pending_trash_moves
-            .get(&request.tab_id)
-            .copied()
-            .filter(|pending| pending.content_revision == request.content_revision)
-        {
-            self.pending_trash_moves.remove(&request.tab_id);
-            outcome.commands.push(DocumentCommand::ExecuteTrash(
-                crate::action::TrashOperation::MoveToTrash { note_id: pending.note_id },
-            ));
-        }
-        if let Some(pending) = self
-            .pending_note_moves
-            .get(&request.tab_id)
-            .cloned()
-            .filter(|pending| pending.content_revision == request.content_revision)
-        {
-            self.pending_note_moves.remove(&request.tab_id);
-            outcome.commands.push(DocumentCommand::ExecuteNote(NoteCommand::Move(pending.request)));
-        }
-        self.finish_pending_title_update(request, &mut outcome);
+        self.resume_pending_after_save(request, &mut outcome);
         outcome
-    }
-
-    fn finish_pending_title_update(
-        &mut self,
-        request: AutoSaveRequest,
-        outcome: &mut DocumentOutcome,
-    ) {
-        let matching = self
-            .pending_title_updates
-            .get(&request.tab_id)
-            .is_some_and(|pending| pending.content_revision == request.content_revision);
-        if matching && let Some(pending) = self.pending_title_updates.remove(&request.tab_id) {
-            let command =
-                if self.pending_title_update_has_current_saved_document(request.tab_id, &pending) {
-                    DocumentCommand::ExecuteNote(NoteCommand::UpdateTitle(pending.request))
-                } else {
-                    DocumentCommand::RetryTitleUpdate(pending.request)
-                };
-            outcome.commands.push(command);
-        }
     }
 
     fn fail_autosave(&mut self, request: AutoSaveRequest, message: String) -> DocumentOutcome {
@@ -1665,62 +1635,36 @@ impl DocumentRuntime {
         request: AutoSaveRequest,
         outcome: &mut DocumentOutcome,
     ) {
-        self.cancel_pending_trash_move_into(request, TRASH_SAVE_FAILURE_MESSAGE, outcome);
-        self.cancel_pending_note_move_into(request, MOVE_SAVE_FAILURE_MESSAGE, outcome);
-        self.cancel_pending_title_update_into(request, TITLE_SAVE_FAILURE_MESSAGE, outcome);
+        let action = match self.take_completed_save_operation(request) {
+            PendingTabOperation::MoveToTrash(_) => trash_save_failure(TRASH_SAVE_FAILURE_MESSAGE),
+            PendingTabOperation::RelocateNote(_) => note_save_failure(MOVE_SAVE_FAILURE_MESSAGE),
+            PendingTabOperation::UpdateTitle(_) => note_save_failure(TITLE_SAVE_FAILURE_MESSAGE),
+            PendingTabOperation::ConflictRetry(_)
+            | PendingTabOperation::ExternalSaveAs(_)
+            | PendingTabOperation::None => return,
+        };
+        outcome.actions.push(action);
     }
 
-    fn cancel_pending_trash_move_into(
+    fn handle_stale_save_operation(
         &mut self,
         request: AutoSaveRequest,
-        message: &str,
         outcome: &mut DocumentOutcome,
     ) {
-        let matching = self
-            .pending_trash_moves
-            .get(&request.tab_id)
-            .is_some_and(|pending| pending.content_revision == request.content_revision);
-        if !matching {
-            return;
+        match self.take_completed_save_operation(request) {
+            PendingTabOperation::MoveToTrash(_) => {
+                outcome.actions.push(trash_save_failure(TRASH_SAVE_STALE_MESSAGE));
+            }
+            PendingTabOperation::RelocateNote(_) => {
+                outcome.actions.push(note_save_failure(MOVE_SAVE_STALE_MESSAGE));
+            }
+            PendingTabOperation::UpdateTitle(pending) => {
+                outcome.commands.push(DocumentCommand::RetryTitleUpdate(pending.request));
+            }
+            PendingTabOperation::ConflictRetry(_)
+            | PendingTabOperation::ExternalSaveAs(_)
+            | PendingTabOperation::None => {}
         }
-        self.pending_trash_moves.remove(&request.tab_id);
-        outcome.actions.push(crate::action::NotoraAction::TrashOperationFailed(
-            crate::action::TrashOperationFailure::Message(message.to_owned()),
-        ));
-    }
-
-    fn cancel_pending_note_move_into(
-        &mut self,
-        request: AutoSaveRequest,
-        message: &str,
-        outcome: &mut DocumentOutcome,
-    ) {
-        let matching = self
-            .pending_note_moves
-            .get(&request.tab_id)
-            .is_some_and(|pending| pending.content_revision == request.content_revision);
-        if !matching {
-            return;
-        }
-        self.pending_note_moves.remove(&request.tab_id);
-        outcome.actions.push(crate::action::NotoraAction::NoteCommandFailed(message.to_owned()));
-    }
-
-    fn cancel_pending_title_update_into(
-        &mut self,
-        request: AutoSaveRequest,
-        message: &str,
-        outcome: &mut DocumentOutcome,
-    ) {
-        let matching = self
-            .pending_title_updates
-            .get(&request.tab_id)
-            .is_some_and(|pending| pending.content_revision == request.content_revision);
-        if !matching {
-            return;
-        }
-        self.pending_title_updates.remove(&request.tab_id);
-        outcome.actions.push(crate::action::NotoraAction::NoteCommandFailed(message.to_owned()));
     }
 
     pub(super) fn submit_prepared_save(
@@ -1745,13 +1689,11 @@ impl DocumentRuntime {
         &self,
         tab_id: TabId,
     ) -> Result<Option<appkit_shell::editor_runtime::SavePayloadTransform>, String> {
-        if !self.encrypted_note_tabs.contains(&tab_id) {
+        if !self.tab_is_encrypted(tab_id) {
             return Ok(None);
         }
         let session = self
-            .unlocked_note_sessions
-            .get(&tab_id)
-            .cloned()
+            .unlocked_note_session(tab_id)
             .ok_or_else(|| "加密笔记缺少解锁会话，保存已取消".to_owned())?;
         Ok(Some(appkit_shell::editor_runtime::SavePayloadTransform::new(move |plaintext| {
             textora_encryption::encrypt_markdown_with_session(&session, plaintext)
@@ -1759,13 +1701,28 @@ impl DocumentRuntime {
         })))
     }
 
-    pub(super) fn encrypted_note_tabs(&self) -> &HashSet<TabId> {
-        &self.encrypted_note_tabs
+    fn tab_is_encrypted(&self, tab_id: TabId) -> bool {
+        self.tab_workflows.get(&tab_id).is_some_and(|attachment| {
+            matches!(attachment.encryption, TabEncryption::Encrypted { .. })
+        })
+    }
+
+    pub(super) fn encrypted_note_tabs(&self) -> HashSet<TabId> {
+        self.tab_workflows
+            .iter()
+            .filter_map(|(&tab_id, attachment)| {
+                matches!(attachment.encryption, TabEncryption::Encrypted { .. }).then_some(tab_id)
+            })
+            .collect()
     }
 
     #[cfg(test)]
     pub(super) fn remove_unlocked_note_session_for_test(&mut self, tab_id: TabId) {
-        self.unlocked_note_sessions.remove(&tab_id);
+        if let Some(attachment) = self.tab_workflows.get_mut(&tab_id)
+            && let TabEncryption::Encrypted { unlocked_session } = &mut attachment.encryption
+        {
+            *unlocked_session = None;
+        }
     }
 
     pub(super) fn evict_excess_runtime_tabs(&mut self) {
@@ -1789,12 +1746,19 @@ impl DocumentRuntime {
             })
             .collect::<Vec<_>>();
         for candidate in self.runtime_lru.select_evictions(&self.document_registry, &runtime_tabs) {
-            self.autosave.cancel(candidate.tab_id);
-            self.save_failure_messages.remove(&candidate.tab_id);
-            let _ = self.editor_runtime.close_for_product(candidate.tab_id);
-            self.unregister_tab(candidate.tab_id);
+            self.close_tab_discarding_changes(candidate.tab_id);
         }
     }
+}
+
+fn note_save_failure(message: &str) -> crate::action::NotoraAction {
+    crate::action::NotoraAction::NoteCommandFailed(message.to_owned())
+}
+
+fn trash_save_failure(message: &str) -> crate::action::NotoraAction {
+    crate::action::NotoraAction::TrashOperationFailed(
+        crate::action::TrashOperationFailure::Message(message.to_owned()),
+    )
 }
 
 fn single_range_replacement(
@@ -1850,7 +1814,9 @@ fn title_edit_error_message(error: DocumentTextEditError) -> String {
 pub(super) fn initial_title_from_document(kind: DocumentKind, source: &str) -> Option<String> {
     let candidate = match kind {
         DocumentKind::Markdown => document_title_projection(kind, source).title,
-        DocumentKind::Mindmap => textora_mindmap::mmf::parser::parse(source).ok()?.root.title,
+        DocumentKind::Mindmap => {
+            textora_mindmap::mmf::parser::parse(source).ok()?.root().title.clone()
+        }
         DocumentKind::Text => return None,
     };
     let trimmed_candidate = candidate.trim();

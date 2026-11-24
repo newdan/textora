@@ -22,24 +22,12 @@ fn binary_and_three_pane_editor_rect_are_product_specific() {
 }
 
 #[test]
-fn notora_app_remains_a_thin_composition_root() {
-    let app_source = include_str!("../src/app.rs");
-    let events_source = include_str!("../src/events.rs");
-    let adapter_start = events_source
-        .find("impl ApplicationHandler<ShellEvent> for NotoraApp")
-        .expect("NotoraApp should remain the winit adapter");
-    let runtime_start = events_source[adapter_start..]
-        .find("impl NotoraRuntime")
-        .map(|offset| adapter_start + offset)
-        .expect("event implementation should belong to NotoraRuntime");
-    let application_handler = &events_source[adapter_start..runtime_start];
-
-    assert!(app_source.contains("runtime: NotoraRuntime"));
-    assert!(!app_source.contains("NotoraProductEvent"));
-    assert!(!app_source.contains("impl NotoraEffectService"));
-    assert!(!application_handler.contains("match event"));
-    assert!(!application_handler.contains("WindowEvent::"));
-    assert_eq!(application_handler.matches("runtime_mut()").count(), 4);
+fn public_notora_composition_root_handles_platform_events_directly() {
+    let mut app = app();
+    let _handler: &mut dyn winit::application::ApplicationHandler<appkit_shell::ShellEvent> =
+        &mut app;
+    let source = include_str!("../src/events.rs");
+    assert!(!source.contains("self.runtime_mut()"));
 }
 
 #[test]
@@ -49,12 +37,9 @@ fn runtime_state_is_owned_by_named_components() {
     let frame_runtime_source = include_str!("../src/runtime/frame_runtime.rs");
     let action_runtime_source = include_str!("../src/runtime/action_runtime.rs");
     let persistence_runtime_source = include_str!("../src/runtime/persistence_runtime.rs");
-    let product_coordinator_source = include_str!("../src/app/product_event_coordinator.rs");
-    let deadline_coordinator_source = include_str!("../src/app/deadline_coordinator.rs");
     let effect_executor_source = include_str!("../src/effect_executor.rs");
-    let runtime_fields_start = runtime_source
-        .find("pub(crate) struct NotoraRuntime")
-        .expect("runtime struct should exist");
+    let runtime_fields_start =
+        runtime_source.find("pub struct NotoraRuntime").expect("runtime struct should exist");
     let runtime_fields_end = runtime_source[runtime_fields_start..]
         .find("\n}\n\nimpl NotoraRuntime")
         .map(|offset| runtime_fields_start + offset)
@@ -72,10 +57,11 @@ fn runtime_state_is_owned_by_named_components() {
     }
     assert!(!runtime_fields.contains("pending_"));
     assert!(!runtime_fields.contains("HashMap<"));
-    assert!(document_runtime_source.contains("pending_conflict_retries:"));
+    assert!(
+        document_runtime_source.contains("tab_workflows: HashMap<TabId, TabWorkflowAttachment>")
+    );
+    assert!(document_runtime_source.contains("operation: PendingTabOperation"));
     assert!(document_runtime_source.contains("pending_metadata_mutations:"));
-    assert!(!product_coordinator_source.contains("NotoraRuntime"));
-    assert!(!deadline_coordinator_source.contains("NotoraRuntime"));
     assert!(!runtime_source.contains("fn apply_product_event"));
     assert!(!runtime_source.contains("DocumentCommand::"));
     assert!(!runtime_source.contains("NotoraEffect::"));
@@ -105,7 +91,7 @@ fn runtime_state_is_owned_by_named_components() {
 fn product_events_use_the_shared_runtime_and_domain_completions() {
     let product_source = include_str!("../src/product.rs");
     let action_runtime_source = include_str!("../src/runtime/action_runtime.rs");
-    let coordinator_source = include_str!("../src/app/product_event_coordinator.rs");
+    let runtime_source = include_str!("../src/runtime.rs");
     let persistence_source = include_str!("../src/runtime/persistence_runtime.rs");
 
     assert!(product_source.contains("ProductEventInbox<NotoraProductEvent>"));
@@ -114,11 +100,9 @@ fn product_events_use_the_shared_runtime_and_domain_completions() {
     assert!(product_source.contains("Persistence(PersistenceCompletion)"));
     assert!(!product_source.contains("std::sync::mpsc"));
     assert!(action_runtime_source.contains("use appkit_shell::{DrainStart, EventPump}"));
-    assert!(!coordinator_source.contains("trait "));
+    assert!(runtime_source.contains("ProductHost::drain_product_events(&mut self.product)"));
+    assert!(runtime_source.contains("for event in self.product.take_events()"));
     assert!(persistence_source.contains("fn apply_completion("));
-    assert!(!coordinator_source.contains("WorkspaceCompletion::"));
-    assert!(!coordinator_source.contains("DocumentCompletion::"));
-    assert!(!coordinator_source.contains("PersistenceCompletion::"));
     assert!(!std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/event_pump.rs").exists());
 }
 

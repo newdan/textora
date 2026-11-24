@@ -70,14 +70,8 @@ mod tests {
         w.set_rect(Rect::new(220., 32., 968., 744.), &mut lc);
         assert_eq!(w.rect(), Rect::new(220., 32., 968., 744.));
         let mut dl = DrawList::new();
-        let mut pc = PaintCtx {
-            global_alpha: 1.0,
-            list: &mut dl,
-            theme: &t,
-            dpi: 1.0,
-            offset: (0.0, 0.0),
-            shaper: None,
-        };
+        let mut pc =
+            PaintCtx { global_alpha: 1.0, list: &mut dl, theme: &t, dpi: 1.0, shaper: None };
         w.paint(&mut pc);
         assert_eq!(dl.cmds.len(), 0);
     }

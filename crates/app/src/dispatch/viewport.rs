@@ -1,8 +1,70 @@
-//! Viewport dispatch: scrollbar, scroll-by, update-scroll-top, heading jump.
-//! Methods on `impl App`, extracted from app_dispatch.rs.
+//! Routes scroll and zoom actions and computes editor viewport bounds.
 
 use crate::app::App;
 use crate::app_effect::AppEffect;
+use appkit_shell::canvas_viewport::CanvasViewportAction;
+
+const PREVIEW_TOP_PAD_LOGICAL: f32 = 16.0;
+const PREVIEW_HORIZONTAL_PAD_LOGICAL: f32 = 20.0;
+const MAX_READING_WIDTH_LOGICAL: f32 = 800.0;
+pub(super) const MIN_PLUGIN_VIEWPORT_PX: f32 = 100.0;
+const MIN_CANVAS_PINCH_ZOOM_FACTOR: f32 = 0.01;
+
+fn take_top(rect: &mut ui::core::geom::Rect, thickness: f32) {
+    let clamped = thickness.max(0.0).min(rect.h);
+    rect.y += clamped;
+    rect.h = (rect.h - clamped).max(0.0);
+}
+
+fn take_bottom(rect: &mut ui::core::geom::Rect, thickness: f32) {
+    let clamped = thickness.max(0.0).min(rect.h);
+    rect.h = (rect.h - clamped).max(0.0);
+}
+
+fn take_left(rect: &mut ui::core::geom::Rect, thickness: f32) {
+    let clamped = thickness.max(0.0).min(rect.w);
+    rect.x += clamped;
+    rect.w = (rect.w - clamped).max(0.0);
+}
+
+fn take_right(rect: &mut ui::core::geom::Rect, thickness: f32) {
+    let clamped = thickness.max(0.0).min(rect.w);
+    rect.w = (rect.w - clamped).max(0.0);
+}
+
+pub(super) fn projected_editor_rect(
+    screen_w: f32,
+    screen_h: f32,
+    inputs: &crate::ui_shell::ShellInputs,
+    inspector_panel_thickness: f32,
+) -> ui::core::geom::Rect {
+    let mut rect = ui::core::geom::Rect::new(0.0, 0.0, screen_w, screen_h);
+
+    if !inputs.sidebar_visible {
+        take_top(&mut rect, ui::title_bar::title_bar_height(inputs.metrics.dpi));
+    }
+
+    if inputs.tabs_visible {
+        take_top(&mut rect, inputs.tabs_thickness);
+    }
+    if inputs.sidebar_visible && inputs.sidebar_thickness > 0.0 {
+        take_left(&mut rect, inputs.sidebar_thickness);
+    }
+    if inputs.sidebar_visible {
+        take_top(&mut rect, ui::title_bar::title_bar_height(inputs.metrics.dpi));
+    }
+    if inputs.toc_visible {
+        take_left(&mut rect, inputs.toc_thickness);
+    }
+    if inputs.search_visible {
+        take_top(&mut rect, inputs.search_thickness);
+    }
+    take_bottom(&mut rect, inputs.status_thickness);
+    take_right(&mut rect, inspector_panel_thickness);
+    take_right(&mut rect, inputs.scrollbar_thickness);
+
+    rect
+}
 
 pub(crate) enum ViewportDispatchAction {
     Scrollbar(ui::scrollbar::ScrollbarAction),
@@ -42,7 +104,6 @@ impl App {
                     return AppEffect::NONE;
                 };
                 tab.set_scroll_top_rows(scroll_top, line_height);
-                self.last_scroll_time = std::time::Instant::now();
                 AppEffect::RESHAPE
             }
             ViewportDispatchAction::ScrollViewportBy(amount) => {
@@ -81,6 +142,102 @@ impl App {
                 }
             }
         }
+    }
+
+    pub(super) fn dispatch_canvas_scrollbar_action(
+        &mut self,
+        axis: ui::canvas::CanvasAxis,
+        action: ui::scrollbar::ScrollbarAction,
+    ) -> AppEffect {
+        use ui::scrollbar::ScrollbarAction;
+
+        let viewport_action = match action {
+            ScrollbarAction::DragTo(position) => {
+                CanvasViewportAction::SetAxisPosition { axis, position: position as f32 }
+            }
+            ScrollbarAction::PageUp => CanvasViewportAction::Page { axis, direction: -1.0 },
+            ScrollbarAction::PageDown => CanvasViewportAction::Page { axis, direction: 1.0 },
+            ScrollbarAction::StartDrag
+            | ScrollbarAction::EndDrag
+            | ScrollbarAction::HoverChanged(_) => return self.canvas_viewport_redraw_effect(),
+        };
+
+        self.apply_canvas_viewport_action(viewport_action)
+    }
+
+    pub(super) fn dispatch_canvas_pinch(
+        &mut self,
+        delta: f64,
+        screen_anchor: ui::canvas::CanvasPoint,
+    ) -> AppEffect {
+        if !delta.is_finite() {
+            return AppEffect::NONE;
+        }
+
+        let factor = 1.0 + delta as f32;
+        if !factor.is_finite() {
+            return AppEffect::NONE;
+        }
+
+        self.apply_canvas_viewport_action(CanvasViewportAction::ZoomBy {
+            factor: factor.max(MIN_CANVAS_PINCH_ZOOM_FACTOR),
+            screen_anchor,
+        })
+    }
+
+    fn canvas_viewport_redraw_effect(&self) -> AppEffect {
+        if self.active_is_canvas() && self.active_has_canvas_viewport_snapshot() {
+            AppEffect::REDRAW
+        } else {
+            AppEffect::NONE
+        }
+    }
+
+    /// Compute the plugin render bounds (the same Rect + viewport dimensions
+    /// used by the main render pass). Used for the WYSIWYG two-phase hit-test
+    /// inter-phase layout refresh mini-render.
+    pub(crate) fn plugin_render_bounds(&self) -> ui::core::geom::Rect {
+        let metrics = self.ui_metrics();
+        let dpi = metrics.dpi;
+        let editor_r = self.plugin_editor_rect();
+        let toc_off = self.toc_left_offset();
+        let content_top = self.content_top_offset();
+
+        let is_canvas = self.active_is_canvas();
+        if is_canvas {
+            let offset_x = editor_r.x;
+            let offset_y = content_top;
+            let viewport_w = editor_r.w;
+            let viewport_h = (editor_r.h - (content_top - editor_r.y)).max(MIN_PLUGIN_VIEWPORT_PX);
+            return ui::core::geom::Rect::new(offset_x, offset_y, viewport_w, viewport_h);
+        }
+
+        let preview_top_pad = PREVIEW_TOP_PAD_LOGICAL * dpi;
+        let preview_pad = PREVIEW_HORIZONTAL_PAD_LOGICAL * dpi;
+        let reading_base_x = toc_off + preview_pad;
+        let physical_w = (editor_r.w - reading_base_x - preview_pad).max(MIN_PLUGIN_VIEWPORT_PX);
+        let max_reading_width = MAX_READING_WIDTH_LOGICAL * dpi;
+        let viewport_w = physical_w.min(max_reading_width);
+        let viewport_h = (editor_r.h - preview_top_pad).max(MIN_PLUGIN_VIEWPORT_PX);
+        let offset_x = editor_r.x + reading_base_x + (physical_w - viewport_w) * 0.5;
+        let offset_y = content_top + preview_top_pad;
+
+        ui::core::geom::Rect::new(offset_x, offset_y, viewport_w, viewport_h)
+    }
+
+    fn plugin_editor_rect(&self) -> ui::core::geom::Rect {
+        let cached = self.ui_shell.editor_rect();
+        if cached.w > 0.0 && cached.h > 0.0 && !self.ui_shell.dock_is_dirty() {
+            return cached;
+        }
+
+        let inputs = self.build_shell_inputs();
+        projected_editor_rect(
+            self.screen_width(),
+            self.screen_height(),
+            &inputs,
+            self.ui_shell.inspector_panel_thickness(),
+        )
     }
 }
 

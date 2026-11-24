@@ -48,7 +48,7 @@ pub fn resolve_glyph(
     }
 
     // Cache miss: rasterize
-    let subpixel_x = subpixel_phase as f32 * 0.25;
+    let subpixel_x = render::subpixel_offset(subpixel_phase);
     let bitmap = shaper.rasterize_glyph(font_id, glyph_id, raster_font_size, (subpixel_x, 0.0))?;
     if bitmap.width == 0 || bitmap.height == 0 {
         return None;

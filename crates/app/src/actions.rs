@@ -1,5 +1,4 @@
 use appkit_core::tab_set::types::TabId;
-use textora_core::types::GraphemeOffset;
 use ui::canvas::{CanvasAxis, CanvasPoint};
 use winit::event::{ElementState, MouseScrollDelta};
 use winit::window::CursorIcon;
@@ -65,14 +64,12 @@ pub(crate) enum AppAction {
         state: ElementState,
         px: f32,
         py: f32,
-        /// Pre-computed hit test result containing (grapheme_offset, doc_line_index, vis_line_index).
-        hit: Option<(GraphemeOffset, usize, usize)>,
     },
-    /// Handle cursor drag movement targeting the editor area.
+    /// Route pointer motion to the editor, preserving any cursor chosen by the window chrome.
     EditorCursorMoved {
         px: f32,
         py: f32,
-        hit: Option<(GraphemeOffset, usize, usize)>,
+        use_editor_cursor: bool,
     },
 
     // ------------------------------------------------------------------------

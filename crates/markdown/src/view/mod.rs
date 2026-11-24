@@ -348,6 +348,27 @@ pub(in crate::view) enum EngineDirty {
 /// 共享缓存/渲染/滚动/选择/搜索引擎。泛型 S 允许 MarkdownView (MarkdownDoc)
 /// 和 NovelView (NovelStructure) 共用同一套渲染管线。
 pub struct BlockViewEngine<S: BlockSource = MarkdownDoc> {
+    document_layout: BlockViewLayout<S>,
+    pub(in crate::view) replacement_preedit: Option<Box<preedit::ReplacementPreedit<S>>>,
+}
+
+impl<S: BlockSource> std::ops::Deref for BlockViewEngine<S> {
+    type Target = BlockViewLayout<S>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.document_layout
+    }
+}
+
+impl<S: BlockSource> std::ops::DerefMut for BlockViewEngine<S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.document_layout
+    }
+}
+
+/// Layout, caches, and geometry queries for one source snapshot.
+#[doc(hidden)]
+pub struct BlockViewLayout<S: BlockSource = MarkdownDoc> {
     pub(in crate::view) lazy: Option<LazyLayout<S>>,
     pub(in crate::view) dirty: EngineDirty,
     pub(in crate::view) cached_style_hash: u64,
@@ -388,7 +409,7 @@ pub struct BlockViewEngine<S: BlockSource = MarkdownDoc> {
 
     /// WYSIWYG 编辑上下文。None 表示纯预览模式 (快速路径)。
     pub edit_ctx: Option<crate::edit::EditContext>,
-    /// Full source text for WYSIWYG span expansion (materialize_line).
+    /// Full source text for WYSIWYG source projection.
     pub(in crate::view) edit_source: Option<SourceSnapshot>,
     /// Generation of the source text currently rendered by this engine.
     pub(in crate::view) source_generation: u32,
@@ -396,7 +417,6 @@ pub struct BlockViewEngine<S: BlockSource = MarkdownDoc> {
     pub cursor_visible: bool,
     /// Actual shaped advance from an editable empty line's start to the IME caret.
     pub(in crate::view) standalone_preedit_cursor_advance: Option<f32>,
-    pub(in crate::view) replacement_preedit: Option<preedit::ReplacementPreedit<S>>,
 }
 
 pub(in crate::view) fn mix_hash_value(hash: &mut u64, value: u64) {

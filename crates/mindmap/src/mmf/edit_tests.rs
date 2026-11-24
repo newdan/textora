@@ -36,8 +36,7 @@ fn assert_deletes_range(plan: EditPlan, expected_range: Range<usize>) {
 }
 
 fn node_range(tree: &Tree, title: &str) -> Range<usize> {
-    collect_nodes_dfs(&tree.root)
-        .into_iter()
+    tree.nodes()
         .find(|node| node.title == title)
         .expect("fixture must contain node")
         .subtree_source_range
@@ -48,7 +47,7 @@ fn node_range(tree: &Tree, title: &str) -> Range<usize> {
 fn toggle_collapsed_replaces_only_existing_boolean_value() {
     let source = "# Root\n## Child\n```toml node\ncollapsed = false\npriority = \"P1\"\n```\n### Grandchild\n";
     let tree = parser::parse(source).expect("fixture must parse");
-    let child = &tree.root.children[0];
+    let child = &tree.root().children[0];
     let expected_range = source.find("false").expect("boolean value")
         ..source.find("false").expect("boolean value") + "false".len();
     let EditPlan::Apply(transaction) =
@@ -68,7 +67,7 @@ fn toggle_collapsed_replaces_only_existing_boolean_value() {
 fn toggle_collapsed_replaces_true_with_false() {
     let source = "# Root\n## Child\n```toml node\ncollapsed = true\n```\n### Grandchild\n";
     let tree = parser::parse(source).expect("fixture must parse");
-    let child = &tree.root.children[0];
+    let child = &tree.root().children[0];
     let value_start = source.find("true").expect("boolean value");
     let EditPlan::Apply(transaction) =
         plan_toggle_collapsed(&tree, source, child.subtree_source_range.clone(), 8)
@@ -88,7 +87,7 @@ fn toggle_collapsed_replaces_true_with_false() {
 fn toggle_collapsed_inserts_missing_field_into_property_body() {
     let source = "# Root\n## Parent\n```toml node\npriority = \"P1\"\n```\n### Child\n";
     let tree = parser::parse(source).expect("fixture must parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let insertion_byte = source.find("```\n### Child").expect("closing fence");
     let EditPlan::Apply(transaction) =
         plan_toggle_collapsed(&tree, source, parent.subtree_source_range.clone(), 3)
@@ -108,7 +107,7 @@ fn toggle_collapsed_inserts_missing_field_into_property_body() {
 fn toggle_collapsed_inserts_minimal_property_block_after_heading() {
     let source = "# Root\n## Parent\n### Child\n";
     let tree = parser::parse(source).expect("fixture must parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let insertion_byte = source.find("## Parent").expect("parent heading") + "## Parent".len();
     let EditPlan::Apply(transaction) =
         plan_toggle_collapsed(&tree, source, parent.subtree_source_range.clone(), 4)
@@ -128,7 +127,7 @@ fn toggle_collapsed_inserts_minimal_property_block_after_heading() {
 fn toggle_collapsed_parent_without_props_does_not_use_child_property_block() {
     let source = "# Root\n## Parent\n### Child\n```toml node\ncollapsed = false\n```\n";
     let tree = parser::parse(source).expect("fixture must parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let insertion_byte = source.find("## Parent").expect("parent heading") + "## Parent".len();
     let EditPlan::Apply(transaction) =
         plan_toggle_collapsed(&tree, source, parent.subtree_source_range.clone(), 5)
@@ -143,7 +142,7 @@ fn toggle_collapsed_parent_without_props_does_not_use_child_property_block() {
 fn toggle_collapsed_preserves_crlf_when_appending_property() {
     let source = "# Root\r\n## Parent\r\n```toml node\r\npriority = \"P1\"\r\n```\r\n### Child\r\n";
     let tree = parser::parse(source).expect("fixture must parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let insertion_byte = source.find("```\r\n### Child").expect("closing fence");
     let EditPlan::Apply(transaction) =
         plan_toggle_collapsed(&tree, source, parent.subtree_source_range.clone(), 6)
@@ -159,10 +158,10 @@ fn toggle_collapsed_consumes_root_and_plain_leaf() {
     let source = "# Root\n## Leaf\n";
     let tree = parser::parse(source).expect("fixture must parse");
     assert_eq!(
-        plan_toggle_collapsed(&tree, source, tree.root.subtree_source_range.clone(), 1),
+        plan_toggle_collapsed(&tree, source, tree.root().subtree_source_range.clone(), 1),
         EditPlan::Consume
     );
-    let leaf = &tree.root.children[0];
+    let leaf = &tree.root().children[0];
     assert_eq!(
         plan_toggle_collapsed(&tree, source, leaf.subtree_source_range.clone(), 1),
         EditPlan::Consume
@@ -173,7 +172,7 @@ fn toggle_collapsed_consumes_root_and_plain_leaf() {
 fn toggle_collapsed_consumes_leaf_with_property_block() {
     let source = "# Root\n## Leaf\n```toml node\ncollapsed = false\n```\n";
     let tree = parser::parse(source).expect("fixture must parse");
-    let leaf = &tree.root.children[0];
+    let leaf = &tree.root().children[0];
     assert_eq!(
         plan_toggle_collapsed(&tree, source, leaf.subtree_source_range.clone(), 1),
         EditPlan::Consume
@@ -338,10 +337,8 @@ fn moving_next_sibling_as_last_child_reparents_it_when_insertion_matches_source_
 #[test]
 fn moving_subtree_with_unrepresentable_descendant_level_is_consumed() {
     let source = "x\ny\nz\n";
-    let tree = Tree {
-        version: 1,
-        global_props: Default::default(),
-        root: Node {
+    let tree = Tree::new(
+        Node {
             title: "Root".into(),
             children: vec![
                 Node {
@@ -397,9 +394,11 @@ fn moving_subtree_with_unrepresentable_descendant_level_is_consumed() {
             property_source: None,
             heading_source_end: 0,
         },
-    };
-    let source_range = tree.root.children[0].subtree_source_range.clone();
-    let anchor_range = tree.root.children[1].subtree_source_range.clone();
+        Default::default(),
+        None,
+    );
+    let source_range = tree.root().children[0].subtree_source_range.clone();
+    let anchor_range = tree.root().children[1].subtree_source_range.clone();
 
     assert_eq!(
         plan_move_subtree(
@@ -422,7 +421,7 @@ fn moving_unterminated_subtree_to_document_end_excludes_inserted_separator_from_
         &tree,
         source,
         node_range(&tree, "B"),
-        tree.root.subtree_source_range.clone(),
+        tree.root().subtree_source_range.clone(),
         MoveSubtreeTarget::LastChild,
         1,
     );
@@ -460,7 +459,7 @@ fn move_subtree_rejects_the_root() {
         plan_move_subtree(
             &tree,
             source,
-            tree.root.subtree_source_range.clone(),
+            tree.root().subtree_source_range.clone(),
             node_range(&tree, "A"),
             MoveSubtreeTarget::AfterSibling,
             1,
@@ -479,7 +478,7 @@ fn move_subtree_rejects_the_root_as_a_sibling_anchor() {
             &tree,
             source,
             node_range(&tree, "A"),
-            tree.root.subtree_source_range.clone(),
+            tree.root().subtree_source_range.clone(),
             MoveSubtreeTarget::BeforeSibling,
             1,
         ),
@@ -575,7 +574,7 @@ fn move_subtree_preserves_properties_and_code_fence_notes() {
 fn selected_node_typing_replaces_only_title() {
     let source = "# Root\n## Parent\n### Child\n";
     let tree = parser::parse(source).expect("parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let request =
         request(parent.subtree_source_range.clone(), EditIntent::InsertText("Renamed".into()));
 
@@ -594,7 +593,7 @@ fn selected_node_typing_replaces_only_title() {
 fn title_text_selection_typing_replaces_only_selected_text() {
     let source = "# Root\n## Parent\n";
     let tree = parser::parse(source).expect("parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let selection = parent.title_byte_range.start + 1..parent.title_byte_range.start + 4;
     let request = request(selection.clone(), EditIntent::InsertText("X".into()));
 
@@ -613,7 +612,7 @@ fn title_text_selection_typing_replaces_only_selected_text() {
 fn title_text_selection_delete_removes_only_selected_text() {
     let source = "# Root\n## Parent\n";
     let tree = parser::parse(source).expect("parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let selection = parent.title_byte_range.start + 1..parent.title_byte_range.start + 4;
     let request = request(selection.clone(), EditIntent::DeleteBackward);
 
@@ -632,7 +631,7 @@ fn title_text_selection_delete_removes_only_selected_text() {
 fn tab_inserts_empty_child_at_child_insertion_byte() {
     let source = "# Root\n## Parent\nparent note\n### Existing\n";
     let tree = parser::parse(source).expect("parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let request = request_at(parent.title_byte_range.end, EditIntent::Indent);
 
     assert_transaction_inserts(
@@ -646,7 +645,7 @@ fn tab_inserts_empty_child_at_child_insertion_byte() {
 fn leaf_body_new_child_inserts_at_subtree_end_and_places_caret_in_empty_title() {
     let source = "# Root\n## Leaf\nleaf body\n";
     let tree = parser::parse(source).expect("parse");
-    let leaf = &tree.root.children[0];
+    let leaf = &tree.root().children[0];
     let request = request_at(leaf.title_byte_range.end, EditIntent::Indent);
 
     assert_eq!(leaf.child_insertion_byte, leaf.subtree_source_range.end);
@@ -669,7 +668,7 @@ fn leaf_body_new_child_inserts_at_subtree_end_and_places_caret_in_empty_title() 
 fn demote_changes_current_subtree_markers_as_one_transaction() {
     let source = "# Root\n## First\n## Second\n### Leaf\n";
     let tree = parser::parse(source).expect("parse");
-    let second = &tree.root.children[1];
+    let second = &tree.root().children[1];
     let request = request_at(second.title_byte_range.start, EditIntent::DemoteObject);
 
     let EditPlan::Apply(transaction) = plan_mindmap_edit(&tree, source, &request) else {
@@ -699,7 +698,7 @@ fn demote_changes_current_subtree_markers_as_one_transaction() {
 fn promotion_updates_selected_subtree_range_after_all_marker_removals() {
     let source = "# Root\n## Parent\n### Leaf\n";
     let tree = parser::parse(source).expect("parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let request = request(parent.subtree_source_range.clone(), EditIntent::PromoteObject);
 
     let EditPlan::Apply(transaction) = plan_mindmap_edit(&tree, source, &request) else {
@@ -731,7 +730,7 @@ fn promotion_updates_selected_subtree_range_after_all_marker_removals() {
 fn selected_parent_delete_removes_whole_subtree() {
     let source = "# Root\n## Parent\n### Child\n## Next\n";
     let tree = parser::parse(source).expect("parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let request = request(parent.subtree_source_range.clone(), EditIntent::DeleteForward);
 
     assert_deletes_range(
@@ -744,8 +743,8 @@ fn selected_parent_delete_removes_whole_subtree() {
 fn deleting_a_selected_subtree_selects_the_previous_visible_dfs_node() {
     let source = "# Root\n## Previous\n### Previous child\n## Deleted\n### Descendant\n## Next\n";
     let tree = parser::parse(source).expect("parse");
-    let deleted = &tree.root.children[1];
-    let previous = &tree.root.children[0].children[0];
+    let deleted = &tree.root().children[1];
+    let previous = &tree.root().children[0].children[0];
     let request = request(deleted.subtree_source_range.clone(), EditIntent::DeleteBackward);
 
     let EditPlan::Apply(transaction) = plan_mindmap_edit(&tree, source, &request) else {
@@ -764,7 +763,7 @@ fn deleting_a_selected_subtree_selects_the_previous_visible_dfs_node() {
 fn deleting_the_first_child_selects_its_parent_object() {
     let source = "# Root\n## Deleted\n### Descendant\n## Next\n";
     let tree = parser::parse(source).expect("parse");
-    let deleted = &tree.root.children[0];
+    let deleted = &tree.root().children[0];
     let request = request(deleted.subtree_source_range.clone(), EditIntent::DeleteForward);
 
     let EditPlan::Apply(transaction) = plan_mindmap_edit(&tree, source, &request) else {
@@ -773,8 +772,8 @@ fn deleting_the_first_child_selects_its_parent_object() {
     assert_eq!(
         transaction.selection_after,
         EditSelection::Range {
-            anchor: tree.root.subtree_source_range.start,
-            cursor: tree.root.subtree_source_range.end - deleted.subtree_source_range.len(),
+            anchor: tree.root().subtree_source_range.start,
+            cursor: tree.root().subtree_source_range.end - deleted.subtree_source_range.len(),
         }
     );
 }
@@ -783,7 +782,7 @@ fn deleting_the_first_child_selects_its_parent_object() {
 fn root_cannot_be_deleted_or_releveled() {
     let source = "# Root\n## Child\n";
     let tree = parser::parse(source).expect("parse");
-    let selection = tree.root.subtree_source_range.clone();
+    let selection = tree.root().subtree_source_range.clone();
 
     for intent in [
         EditIntent::DeleteBackward,
@@ -802,7 +801,7 @@ fn root_cannot_be_deleted_or_releveled() {
 fn first_sibling_cannot_be_demoted() {
     let source = "# Root\n## First\n## Second\n";
     let tree = parser::parse(source).expect("parse");
-    let first = &tree.root.children[0];
+    let first = &tree.root().children[0];
 
     assert_eq!(
         plan_mindmap_edit(
@@ -818,7 +817,7 @@ fn first_sibling_cannot_be_demoted() {
 fn title_editing_deletion_stays_within_title() {
     let source = "# Root\n## Parent\n";
     let tree = parser::parse(source).expect("parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
 
     assert_eq!(
         plan_mindmap_edit(
@@ -842,7 +841,7 @@ fn title_editing_deletion_stays_within_title() {
 fn title_backspace_deletes_one_extended_grapheme_cluster() {
     let source = "# Root\n## Cafe\u{301}\n";
     let tree = parser::parse(source).expect("parse");
-    let child = &tree.root.children[0];
+    let child = &tree.root().children[0];
     let request = request_at(child.title_byte_range.end, EditIntent::DeleteBackward);
 
     assert_eq!(
@@ -860,7 +859,7 @@ fn title_backspace_deletes_one_extended_grapheme_cluster() {
 fn title_delete_deletes_one_zwj_grapheme_cluster() {
     let source = "# Root\n## \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}x\n";
     let tree = parser::parse(source).expect("parse");
-    let child = &tree.root.children[0];
+    let child = &tree.root().children[0];
     let request = request_at(child.title_byte_range.start, EditIntent::DeleteForward);
 
     assert_eq!(
@@ -880,7 +879,7 @@ fn title_delete_deletes_one_zwj_grapheme_cluster() {
 fn enter_inserts_empty_sibling_with_document_line_ending() {
     let source = "# Root\r\n## Parent\r\n";
     let tree = parser::parse(source).expect("parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
     let request = request_at(parent.title_byte_range.end, EditIntent::InsertParagraphBreak);
 
     assert_transaction_inserts(
@@ -894,7 +893,7 @@ fn enter_inserts_empty_sibling_with_document_line_ending() {
 fn selected_node_enter_moves_caret_to_title_end_without_writing() {
     let source = "# Root\n## Parent\n";
     let tree = parser::parse(source).expect("parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
 
     assert_eq!(
         plan_mindmap_edit(
@@ -910,7 +909,7 @@ fn selected_node_enter_moves_caret_to_title_end_without_writing() {
 fn title_editing_select_object_selects_current_subtree_without_writing() {
     let source = "# Root\n## Parent\n### Child\n";
     let tree = parser::parse(source).expect("parse");
-    let parent = &tree.root.children[0];
+    let parent = &tree.root().children[0];
 
     assert_eq!(
         plan_mindmap_edit(

@@ -292,6 +292,7 @@ fn changing_navigation_scope_invalidates_the_previous_card_selection() {
         selection_generation: request.selection_generation,
         metadata: NoteEditorMetadata {
             note_id,
+            starred: false,
             created_at: SystemTime::UNIX_EPOCH,
             modified_at: SystemTime::UNIX_EPOCH,
             encryption: notora_core::NoteEncryption::Unencrypted,
@@ -614,6 +615,7 @@ fn encrypted_note_unlock_is_inline_and_closes_on_completion_or_document_selectio
         title: "秘密笔记".to_owned(),
         metadata: NoteEditorMetadata {
             note_id,
+            starred: false,
             created_at: SystemTime::UNIX_EPOCH,
             modified_at: SystemTime::UNIX_EPOCH,
             encryption: notora_core::NoteEncryption::Encrypted,
@@ -670,6 +672,7 @@ fn encrypted_note_unlock_rejects_five_character_password() {
         title: "秘密笔记".to_owned(),
         metadata: NoteEditorMetadata {
             note_id,
+            starred: false,
             created_at: SystemTime::UNIX_EPOCH,
             modified_at: SystemTime::UNIX_EPOCH,
             encryption: notora_core::NoteEncryption::Encrypted,

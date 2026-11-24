@@ -54,37 +54,68 @@ pub enum PopupMenuAction {
     NewDocument(crate::sidebar::types::NewDocumentKind),
 }
 
-/// A single item in a popup menu.
-#[derive(Debug, Clone)]
-pub struct PopupMenuItem {
-    pub label: String,
-    pub is_active: bool,
-    pub is_separator: bool,
-    pub enabled: bool,
-    pub action: PopupMenuAction,
+/// A separator has geometry but no label or command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PopupMenuItem {
+    Command { label: String, is_active: bool, enabled: bool, action: PopupMenuAction },
+    Separator,
 }
 
 impl PopupMenuItem {
     pub fn action(label: impl Into<String>, action: PopupMenuAction) -> Self {
-        Self { label: label.into(), is_active: false, is_separator: false, enabled: true, action }
+        Self::Command { label: label.into(), is_active: false, enabled: true, action }
     }
 
-    pub fn separator(action: PopupMenuAction) -> Self {
-        Self { label: String::new(), is_active: false, is_separator: true, enabled: false, action }
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Command { label, .. } => label,
+            Self::Separator => "",
+        }
     }
 
-    pub fn with_active(mut self, is_active: bool) -> Self {
-        self.is_active = is_active;
+    pub fn command(&self) -> Option<&PopupMenuAction> {
+        match self {
+            Self::Command { action, .. } => Some(action),
+            Self::Separator => None,
+        }
+    }
+
+    pub fn is_separator(&self) -> bool {
+        matches!(self, Self::Separator)
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Command { is_active: true, .. })
+    }
+
+    pub fn set_active(&mut self, active: bool) {
+        if let Self::Command { is_active, .. } = self {
+            *is_active = active;
+        }
+    }
+
+    pub fn with_active(mut self, active: bool) -> Self {
+        self.set_active(active);
         self
+    }
+
+    pub fn set_enabled(&mut self, enable: bool) {
+        if let Self::Command { enabled, .. } = self {
+            *enabled = enable;
+        }
     }
 
     pub fn with_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
+        self.set_enabled(enabled);
         self
     }
 
-    pub(crate) fn is_selectable(&self) -> bool {
-        self.enabled && !self.is_separator
+    pub fn is_selectable(&self) -> bool {
+        matches!(self, Self::Command { enabled: true, .. })
+    }
+
+    pub(crate) fn selected_action(&self) -> Option<&PopupMenuAction> {
+        self.command().filter(|_| self.is_selectable())
     }
 }
 
@@ -218,10 +249,7 @@ impl PopupMenu {
                 "全部关闭",
                 PopupMenuAction::Context { action: ContextMenuAction::CloseAll, tab_index },
             ),
-            PopupMenuItem::separator(PopupMenuAction::Context {
-                action: ContextMenuAction::CloseAll,
-                tab_index,
-            }),
+            PopupMenuItem::Separator,
             PopupMenuItem::action(
                 "复制路径",
                 PopupMenuAction::Context { action: ContextMenuAction::CopyPath, tab_index },
@@ -243,7 +271,7 @@ impl PopupMenu {
         let mut top_px = pad_y;
         let mut item_rects = Vec::with_capacity(items.len());
         for item in &items {
-            let h = if item.is_separator { sep_h } else { item_h };
+            let h = if item.is_separator() { sep_h } else { item_h };
             item_rects.push(Rect::new(menu_left + pad_x, top_px, item_w, h));
             top_px += h;
         }
@@ -324,8 +352,10 @@ impl PopupMenu {
     /// Hit-test in px coordinates.
     pub fn hit_test_px(&self, px: f32, py: f32) -> Option<&PopupMenuAction> {
         for (i, rect) in self.item_rects.iter().enumerate() {
-            if rect.contains(px, py) && self.items[i].is_selectable() {
-                return Some(&self.items[i].action);
+            if rect.contains(px, py)
+                && let Some(action) = self.items[i].selected_action()
+            {
+                return Some(action);
             }
         }
         None
@@ -354,7 +384,7 @@ impl PopupMenu {
             let font_size = crate::constants::BODY_FONT_SIZE * dpi;
             let pad_x = r.x + 8.0 * dpi;
 
-            if item.is_separator {
+            if item.is_separator() {
                 let sep_y = r.y + r.h * 0.5;
                 ctx.list.fill(
                     Rect::new(pad_x, sep_y, r.w - (pad_x - r.x) * 2.0, 1.0),
@@ -364,7 +394,7 @@ impl PopupMenu {
             }
 
             // Hover highlight (rounded)
-            if item.enabled && Some(i) == hovered {
+            if item.is_selectable() && Some(i) == hovered {
                 let hr = r.shrink(1.0 * dpi, 1.0 * dpi, 1.0 * dpi, 1.0 * dpi);
                 if hr.w > 0.0 && hr.h > 0.0 {
                     ctx.list.fill_rounded(hr, hover_color, radius);
@@ -376,14 +406,14 @@ impl PopupMenu {
                 let check_x = r.x + 8.0 * dpi;
                 let label_x = check_x + font_size * 0.9;
                 let y_baseline = r.y + r.h * 0.5 + font_size * 0.35;
-                if item.is_active
+                if item.is_active()
                     && let Some(ref mut shaper) = ctx.shaper
                 {
                     ctx.list.text_shaped(
                         check_x,
                         y_baseline,
                         font_size,
-                        if item.enabled {
+                        if item.is_selectable() {
                             ctx.theme.palette.text_main
                         } else {
                             ctx.theme.palette.text_muted
@@ -397,18 +427,18 @@ impl PopupMenu {
                         label_x,
                         y_baseline,
                         font_size,
-                        if item.enabled {
+                        if item.is_selectable() {
                             ctx.theme.palette.text_main
                         } else {
                             ctx.theme.palette.text_muted
                         },
-                        &item.label,
+                        item.label(),
                         shaper,
                     );
                 };
             } else {
                 // Tab-bar/context menu: background highlight for active items, no checkmark
-                if item.is_active && Some(i) != hovered {
+                if item.is_active() && Some(i) != hovered {
                     let hr = r.shrink(1.0 * dpi, 1.0 * dpi, 1.0 * dpi, 1.0 * dpi);
                     if hr.w > 0.0 && hr.h > 0.0 {
                         ctx.list.fill_rounded(hr, ctx.theme.palette.sidebar_active_bg, radius);
@@ -420,12 +450,12 @@ impl PopupMenu {
                         pad_x,
                         y_baseline,
                         font_size,
-                        if item.enabled {
+                        if item.is_selectable() {
                             ctx.theme.palette.text_main
                         } else {
                             ctx.theme.palette.text_muted
                         },
-                        &item.label,
+                        item.label(),
                         shaper,
                     );
                 };
@@ -444,7 +474,7 @@ mod tests {
             items: vec![
                 PopupMenuItem::action("可用", PopupMenuAction::ToggleLineNumbers),
                 PopupMenuItem::action("禁用", PopupMenuAction::ToggleWordWrap).with_enabled(false),
-                PopupMenuItem::separator(PopupMenuAction::ToggleStatusBar),
+                PopupMenuItem::Separator,
             ],
             item_rects: vec![
                 Rect::new(0.0, 0.0, 100.0, 20.0),
@@ -514,11 +544,11 @@ mod tests {
             PopupMenu::table_structure_px(&entries, 52, 7, (600.0, 400.0), (400.0, 20.0), 1.0);
 
         assert_eq!(menu.items.len(), commands.len());
-        assert!(!menu.items[2].enabled);
-        assert!(!menu.items[5].enabled);
+        assert!(!menu.items[2].is_selectable());
+        assert!(!menu.items[5].is_selectable());
         assert_eq!(
-            menu.items[7].action,
-            PopupMenuAction::TableStructure {
+            menu.items[7].command().expect("table action"),
+            &PopupMenuAction::TableStructure {
                 command: crate::plugin::TableStructureCommand::SetColumnAlignment(
                     crate::plugin::TableColumnAlignment::Left,
                 ),

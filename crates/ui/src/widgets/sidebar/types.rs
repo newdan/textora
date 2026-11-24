@@ -14,12 +14,21 @@ const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 100.0;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidebarConfig {
     pub pinned: bool,
+    /// Preferred width in logical pixels. Retains the existing serialized key.
     pub width: f32,
 }
 
 impl SidebarConfig {
-    pub fn new_default(dpi_scale: f32) -> Self {
-        Self { pinned: true, width: 220.0 * dpi_scale }
+    pub const DEFAULT_WIDTH_LOGICAL: f32 = 220.0;
+    const MIN_WIDTH_LOGICAL: f32 = 160.0;
+    const MAX_WIDTH_LOGICAL: f32 = 400.0;
+
+    pub fn new_default() -> Self {
+        Self { pinned: true, width: Self::DEFAULT_WIDTH_LOGICAL }
+    }
+
+    pub fn width_px(&self, dpi: f32) -> f32 {
+        self.width * dpi
     }
 
     /// Preserve temporary hover expansion while adapting a pinned sidebar to the window.
@@ -32,16 +41,18 @@ impl SidebarConfig {
         if !self.pinned {
             return current;
         }
-        if window_width >= self.width + MINIMUM_EDITOR_WIDTH_LOGICAL * dpi_scale {
+        if window_width >= self.width_px(dpi_scale) + MINIMUM_EDITOR_WIDTH_LOGICAL * dpi_scale {
             return Visibility::Pinned;
         }
         if current == Visibility::Pinned { Visibility::Hidden } else { current }
     }
 
-    pub fn clamp_width(&mut self, dpi_scale: f32) {
-        let lo = 160.0 * dpi_scale;
-        let hi = 400.0 * dpi_scale;
-        self.width = self.width.clamp(lo, hi);
+    pub fn clamp_width(&mut self) {
+        self.width = if self.width.is_finite() {
+            self.width.clamp(Self::MIN_WIDTH_LOGICAL, Self::MAX_WIDTH_LOGICAL)
+        } else {
+            Self::DEFAULT_WIDTH_LOGICAL
+        };
     }
 }
 

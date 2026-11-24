@@ -432,7 +432,7 @@ pub(crate) fn layout_text_block(
         let marker = marker.as_ref();
         let marker_source_range =
             marker.map(|marker| marker_source_range_for_projected_line(&projected, marker));
-        let materialized_spans = if let Some(source_text) = ctx.source_text {
+        let mut materialized_styles = if let Some(source_text) = ctx.source_text {
             crate::edit::materialized_spans_for_projected_line(
                 &base_projection,
                 &projected,
@@ -441,17 +441,8 @@ pub(crate) fn layout_text_block(
                 ctx.edit_ctx,
             )
         } else {
-            crate::edit::materialize_line(raw, line_styles, "", None).spans
+            line_styles.to_vec()
         };
-        let mut materialized_styles: Vec<StyleSpan> = materialized_spans
-            .iter()
-            .map(|span| StyleSpan {
-                start: span.start,
-                len: span.len,
-                style: span.style.clone(),
-                source_range: span.source_range.clone(),
-            })
-            .collect();
         if let Some(marker) = marker {
             projected = materialize_marker_for_projected_line(
                 projected,
