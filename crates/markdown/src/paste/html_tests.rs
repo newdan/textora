@@ -41,8 +41,8 @@ fn highlight_only_spans_are_not_semantic_markup() {
 
 #[test]
 fn malformed_html_remains_parseable_and_preserves_text() {
-    let conversion = parse_html("<p>one<strong>two<p>three", None)
-        .expect("html5ever recovers malformed fragments");
+    let conversion =
+        parse_html("<p>one<strong>two<p>three", None).expect("parser recovers malformed fragments");
     assert_eq!(write_markdown(&conversion.document), "one**two**\n\nthree");
 }
 
@@ -763,4 +763,38 @@ fn empty_semantic_nodes_do_not_mark_plain_visible_text_as_semantic() {
 
     let effective_break = parse_html("a<br>b", None).expect("effective break fixture");
     assert_eq!(effective_break.semantic_markup, SemanticMarkup::Present);
+}
+
+#[test]
+fn unwraps_clipboard_html_body_shell_and_decodes_rich_entities() {
+    let html = "<html><body><!--StartFragment--><p><strong>Hi &mdash; &ldquo;test&rdquo; &#x1F600; &#151;</strong></p><!--EndFragment--></body></html>";
+    let conversion = parse_html(html, None).expect("browser clipboard fragment should parse");
+    assert_eq!(write_markdown(&conversion.document), "**Hi — “test” 😀 —**");
+}
+
+#[test]
+fn preserves_query_parameters_while_decoding_explicit_amp_entities_in_links() {
+    let html = r#"<a href="https://example.com/?a=1&copy=2&reg=3&amp;b=4">link</a>"#;
+    let conversion = parse_html(html, None).expect("link URL with query parameters should parse");
+    assert_eq!(
+        write_markdown(&conversion.document),
+        "[link](https://example.com/?a=1&copy=2&reg=3&b=4)"
+    );
+}
+
+#[test]
+fn recovers_unclosed_list_items_and_table_cells_and_rows() {
+    let html = "<table><tr><td>A<td>B<tr><td>C</table><ul><li>one<li>two</ul>";
+    let conversion = parse_html(html, None).expect("unclosed table and list should recover");
+    assert_eq!(
+        write_markdown(&conversion.document),
+        "| A | B |\n| --- | --- |\n| C |  |\n\n- one\n- two"
+    );
+}
+
+#[test]
+fn repeated_unclosed_paragraphs_do_not_exhaust_nesting_depth() {
+    let html = "<p>item".repeat(MAX_HTML_NESTING_DEPTH + 44);
+    let conversion = parse_html(&html, None).expect("implicit paragraph close must bound depth");
+    assert_eq!(conversion.document.blocks().len(), MAX_HTML_NESTING_DEPTH + 44);
 }

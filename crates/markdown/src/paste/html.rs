@@ -1,7 +1,6 @@
-use ego_tree::NodeRef;
-use scraper::{ElementRef, Html, Node};
 use url::Url;
 
+use super::html_dom::{ElementRef, HtmlFragment, NodeRef};
 use super::{
     HeadingLevel, InlineSemantic, ListKind, RichBlock, RichDocument, RichInline, VisibleSegment,
 };
@@ -102,42 +101,27 @@ pub(crate) fn parse_html(
     source_url: Option<&str>,
 ) -> Result<HtmlConversion, HtmlPasteError> {
     let normalized_html = normalize_malformed_fragment(html)?;
-    let fragment = Html::parse_fragment(&normalized_html);
-    let root = fragment.root_element();
-    ensure_dom_depth_within_limit(*root)?;
+    let fragment = HtmlFragment::parse(&normalized_html, MAX_HTML_NESTING_DEPTH)?;
+    let root = fragment.root();
     let base_url = source_url.and_then(|source| Url::parse(source).ok());
-    let blocks = parse_block_children(*root, base_url.as_ref());
+    let blocks = parse_block_children(root, base_url.as_ref());
     let document = RichDocument::new(blocks);
     let semantic_markup = document_semantic_markup(&document);
     Ok(HtmlConversion { document, semantic_markup })
 }
 
-fn ensure_dom_depth_within_limit(root: NodeRef<'_, Node>) -> Result<(), HtmlPasteError> {
-    let mut pending_nodes = vec![(root, 0_usize)];
-    while let Some((node, depth)) = pending_nodes.pop() {
-        if depth > MAX_HTML_NESTING_DEPTH {
-            return Err(HtmlPasteError::NestingDepthExceeded);
-        }
-        pending_nodes.extend(node.children().map(|child| {
-            let child_depth = depth + usize::from(child.value().is_element());
-            (child, child_depth)
-        }));
-    }
-    Ok(())
-}
-
-fn parse_block_children(node: NodeRef<'_, Node>, base_url: Option<&Url>) -> Vec<RichBlock> {
+fn parse_block_children(node: NodeRef<'_>, base_url: Option<&Url>) -> Vec<RichBlock> {
     parse_block_nodes(node.children(), base_url)
 }
 
 fn parse_block_nodes<'a>(
-    nodes: impl IntoIterator<Item = NodeRef<'a, Node>>,
+    nodes: impl IntoIterator<Item = NodeRef<'a>>,
     base_url: Option<&Url>,
 ) -> Vec<RichBlock> {
     let mut blocks = Vec::new();
     let mut inline_run = Vec::new();
     for child in nodes {
-        if ElementRef::wrap(child).is_some_and(element_is_hidden) {
+        if child.as_element().is_some_and(element_is_hidden) {
             continue;
         }
         if is_block_node(child) {
@@ -152,7 +136,7 @@ fn parse_block_nodes<'a>(
 }
 
 fn flush_inline_run(
-    inline_run: &mut Vec<NodeRef<'_, Node>>,
+    inline_run: &mut Vec<NodeRef<'_>>,
     blocks: &mut Vec<RichBlock>,
     base_url: Option<&Url>,
 ) {
@@ -165,14 +149,14 @@ fn flush_inline_run(
     blocks.push(RichBlock::Paragraph(content));
 }
 
-fn parse_block_node(node: NodeRef<'_, Node>, base_url: Option<&Url>) -> Vec<RichBlock> {
-    let Some(element) = ElementRef::wrap(node) else {
+fn parse_block_node(node: NodeRef<'_>, base_url: Option<&Url>) -> Vec<RichBlock> {
+    let Some(element) = node.as_element() else {
         return paragraph_for_inline_node(node, base_url);
     };
     if element_is_hidden(element) {
         return Vec::new();
     }
-    let blocks = match element.value().name() {
+    let blocks = match element.name() {
         "h1" => heading(element, HeadingLevel::H1, base_url),
         "h2" => heading(element, HeadingLevel::H2, base_url),
         "h3" => heading(element, HeadingLevel::H3, base_url),
@@ -192,41 +176,41 @@ fn parse_block_node(node: NodeRef<'_, Node>, base_url: Option<&Url>) -> Vec<Rich
 }
 
 fn heading(element: ElementRef<'_>, level: HeadingLevel, base_url: Option<&Url>) -> Vec<RichBlock> {
-    let mut content = parse_inline_children(*element, base_url);
+    let mut content = parse_inline_children(element.as_node(), base_url);
     normalize_flow_content(&mut content);
     vec![RichBlock::Heading { level, content }]
 }
 
 fn paragraph_for_element(element: ElementRef<'_>, base_url: Option<&Url>) -> Vec<RichBlock> {
-    let mut content = parse_inline_children(*element, base_url);
+    let mut content = parse_inline_children(element.as_node(), base_url);
     normalize_flow_content(&mut content);
     if inline_content_is_empty(&content) { Vec::new() } else { vec![RichBlock::Paragraph(content)] }
 }
 
-fn paragraph_for_inline_node(node: NodeRef<'_, Node>, base_url: Option<&Url>) -> Vec<RichBlock> {
+fn paragraph_for_inline_node(node: NodeRef<'_>, base_url: Option<&Url>) -> Vec<RichBlock> {
     let mut content = parse_inline_node(node, base_url);
     normalize_flow_content(&mut content);
     if inline_content_is_empty(&content) { Vec::new() } else { vec![RichBlock::Paragraph(content)] }
 }
 
-fn parse_inline_children(node: NodeRef<'_, Node>, base_url: Option<&Url>) -> Vec<RichInline> {
+fn parse_inline_children(node: NodeRef<'_>, base_url: Option<&Url>) -> Vec<RichInline> {
     node.children().flat_map(|child| parse_inline_node(child, base_url)).collect()
 }
 
-fn parse_inline_node(node: NodeRef<'_, Node>, base_url: Option<&Url>) -> Vec<RichInline> {
-    if let Node::Text(text) = node.value() {
+fn parse_inline_node(node: NodeRef<'_>, base_url: Option<&Url>) -> Vec<RichInline> {
+    if let Some(text) = node.as_text() {
         return vec![RichInline::Text(collapse_html_whitespace(text))];
     }
-    let Some(element) = ElementRef::wrap(node) else {
+    let Some(element) = node.as_element() else {
         return Vec::new();
     };
     if element_is_hidden(element) {
         return Vec::new();
     }
-    match element.value().name() {
+    match element.name() {
         "br" => vec![RichInline::LineBreak],
         "code" => {
-            let code = vec![RichInline::InlineCode(visible_text(*element))];
+            let code = vec![RichInline::InlineCode(visible_text(element.as_node()))];
             apply_inline_semantics(element, code)
         }
         "a" => parse_link(element, base_url),
@@ -236,7 +220,7 @@ fn parse_inline_node(node: NodeRef<'_, Node>, base_url: Option<&Url>) -> Vec<Ric
 }
 
 fn parse_styled_inline(element: ElementRef<'_>, base_url: Option<&Url>) -> Vec<RichInline> {
-    let children = parse_inline_children(*element, base_url);
+    let children = parse_inline_children(element.as_node(), base_url);
     apply_inline_semantics(element, children)
 }
 
@@ -327,7 +311,7 @@ fn wrap_inline(semantic: InlineSemantic, children: Vec<RichInline>) -> RichInlin
 }
 
 fn parse_link(element: ElementRef<'_>, base_url: Option<&Url>) -> Vec<RichInline> {
-    let children = parse_inline_children(*element, base_url);
+    let children = parse_inline_children(element.as_node(), base_url);
     let children = apply_inline_semantics(element, children);
     let Some(destination) = element.attr("href").and_then(|raw| resolve_destination(raw, base_url))
     else {
@@ -362,10 +346,10 @@ fn parse_list(element: ElementRef<'_>, kind: ListKind, base_url: Option<&Url>) -
     let mut pending_non_items = Vec::new();
     let mut emitted_items = 0_u64;
     for child in element.children() {
-        if ElementRef::wrap(child).is_some_and(element_is_hidden) {
+        if child.as_element().is_some_and(element_is_hidden) {
             continue;
         }
-        if ElementRef::wrap(child).is_some_and(|child| child.value().name() == "li") {
+        if let Some(item) = child.as_element().filter(|child| child.name() == "li") {
             flush_list_non_items(
                 &mut pending_non_items,
                 &mut items,
@@ -374,7 +358,6 @@ fn parse_list(element: ElementRef<'_>, kind: ListKind, base_url: Option<&Url>) -
                 &mut emitted_items,
                 base_url,
             );
-            let item = ElementRef::wrap(child).expect("list item element was checked");
             let item_blocks = parse_block_children(child, base_url);
             items.push(apply_element_semantics_to_blocks(item, item_blocks));
             continue;
@@ -394,7 +377,7 @@ fn parse_list(element: ElementRef<'_>, kind: ListKind, base_url: Option<&Url>) -
 }
 
 fn flush_list_non_items<'a>(
-    pending: &mut Vec<NodeRef<'a, Node>>,
+    pending: &mut Vec<NodeRef<'a>>,
     items: &mut Vec<Vec<RichBlock>>,
     blocks: &mut Vec<RichBlock>,
     kind: ListKind,
@@ -434,11 +417,10 @@ fn ordered_list_kind(element: ElementRef<'_>) -> ListKind {
 }
 
 fn parse_code_block(element: ElementRef<'_>) -> RichBlock {
-    let code = element
-        .child_elements()
-        .find(|child| child.value().name() == "code" && !element_is_hidden(*child));
+    let code =
+        element.child_elements().find(|child| child.name() == "code" && !element_is_hidden(*child));
     let language = code.and_then(code_language);
-    let text = visible_text(*element);
+    let text = visible_text(element.as_node());
     RichBlock::CodeBlock { language, text }
 }
 
@@ -478,7 +460,7 @@ fn parse_table_captions(
         if element_is_hidden(child) {
             continue;
         }
-        match child.value().name() {
+        match child.name() {
             "tr" | "thead" | "tbody" | "tfoot" => encountered_rows = true,
             "caption" => {
                 let caption_blocks = paragraph_for_element(child, base_url);
@@ -498,14 +480,14 @@ fn parse_table_captions(
 fn collect_table_rows(element: ElementRef<'_>) -> Vec<TableRowSource<'_>> {
     element
         .child_elements()
-        .flat_map(|child| match child.value().name() {
+        .flat_map(|child| match child.name() {
             _ if element_is_hidden(child) => Vec::new(),
             "tr" => vec![TableRowSource { element: child, group_semantics: Vec::new() }],
             "thead" | "tbody" | "tfoot" => {
                 let group_semantics = inline_semantics(child);
                 child
                     .child_elements()
-                    .filter(|row| row.value().name() == "tr" && !element_is_hidden(*row))
+                    .filter(|row| row.name() == "tr" && !element_is_hidden(*row))
                     .map(|row| TableRowSource {
                         element: row,
                         group_semantics: group_semantics.clone(),
@@ -521,7 +503,7 @@ fn parse_table_row(row: TableRowSource<'_>, base_url: Option<&Url>) -> Vec<Vec<R
     let row_semantics = inline_semantics(row.element);
     row.element
         .child_elements()
-        .filter(|cell| matches!(cell.value().name(), "th" | "td") && !element_is_hidden(*cell))
+        .filter(|cell| matches!(cell.name(), "th" | "td") && !element_is_hidden(*cell))
         .map(|cell| {
             let content = parse_table_cell_content(cell, base_url);
             let semantics = canonical_table_cell_semantics(
@@ -535,7 +517,7 @@ fn parse_table_row(row: TableRowSource<'_>, base_url: Option<&Url>) -> Vec<Vec<R
 }
 
 fn parse_table_cell_content(element: ElementRef<'_>, base_url: Option<&Url>) -> Vec<RichInline> {
-    let blocks = parse_block_children(*element, base_url);
+    let blocks = parse_block_children(element.as_node(), base_url);
     let mut content = Vec::new();
     for block in blocks {
         let block_content = table_block_content(block);
@@ -645,7 +627,7 @@ fn apply_semantics_to_cells(cells: &mut [Vec<RichInline>], semantics: &[InlineSe
 
 fn inline_semantics(element: ElementRef<'_>) -> Vec<InlineSemantic> {
     let mut semantics = Vec::new();
-    match element.value().name() {
+    match element.name() {
         "strong" | "b" => semantics.push(InlineSemantic::Strong),
         "em" | "i" => semantics.push(InlineSemantic::Emphasis),
         "s" | "strike" | "del" => semantics.push(InlineSemantic::Strikethrough),
@@ -703,7 +685,7 @@ fn resolve_destination(raw: &str, base_url: Option<&Url>) -> Option<Url> {
 
 fn element_is_hidden(element: ElementRef<'_>) -> bool {
     if matches!(
-        element.value().name(),
+        element.name(),
         "head" | "title" | "script" | "style" | "template" | "iframe" | "noembed" | "noframes"
     ) {
         return true;
@@ -779,22 +761,22 @@ fn first_css_token(value: &str) -> &str {
     value.split_ascii_whitespace().next().unwrap_or_default()
 }
 
-fn visible_text(node: NodeRef<'_, Node>) -> String {
+fn visible_text(node: NodeRef<'_>) -> String {
     let mut output = String::new();
     append_visible_text(node, &mut output);
     output
 }
 
-fn append_visible_text(node: NodeRef<'_, Node>, output: &mut String) {
-    if let Node::Text(text) = node.value() {
+fn append_visible_text(node: NodeRef<'_>, output: &mut String) {
+    if let Some(text) = node.as_text() {
         output.push_str(text);
         return;
     }
-    if let Some(element) = ElementRef::wrap(node) {
+    if let Some(element) = node.as_element() {
         if element_is_hidden(element) {
             return;
         }
-        if element.value().name() == "br" {
+        if element.name() == "br" {
             output.push('\n');
             return;
         }
@@ -808,11 +790,11 @@ fn nonempty_attribute(element: ElementRef<'_>, name: &str) -> Option<String> {
     element.attr(name).map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
 }
 
-fn is_block_node(node: NodeRef<'_, Node>) -> bool {
-    let Some(element) = ElementRef::wrap(node) else {
+fn is_block_node(node: NodeRef<'_>) -> bool {
+    let Some(element) = node.as_element() else {
         return false;
     };
-    known_block_tag(element.value().name()) || node.children().any(is_block_node)
+    known_block_tag(element.name()) || node.children().any(is_block_node)
 }
 
 fn known_block_tag(name: &str) -> bool {

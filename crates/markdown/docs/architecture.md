@@ -9,7 +9,7 @@
 ### 上游依赖（`textora-markdown` 依赖谁）
 - 工作区内部：`core`（`DocView` / `DocViewMut` / 语法高亮 / Unicode UCD）、`ui`（`DrawList`、`Theme`、`Settings`、`ViewPlugin` 等纯 UI 抽象）、`render`（`GlyphVertex`）、`shaping`（HarfBuzz 文本塑形与度量）、`stdext`。
 - 外部解析与排版使用 `pulldown-cmark`（CommonMark + GFM 解析）、`unicode-width`、`regex`、`toml`、`encoding_rs`、`url`。字素分割统一使用 `textora_core::unicode`。
-- **Feature 隔离**：默认开启 `rich-markdown`（包含 `ratex-*` 数学公式、`mermaid-rs-renderer`、`resvg`、`scraper`/`ego-tree` HTML 解析）。关闭时，`embedded` 切换为 `embedded_lite.rs`，HTML 粘贴与公式/图表渲染降级为纯文本或不可用。
+- **Feature 隔离**：默认开启 `rich-markdown`（包含 `ratex-*` 数学公式、`mermaid-rs-renderer`、`resvg`、内置轻量 HTML 片段解析器）。关闭时，`embedded` 切换为 `embedded_lite.rs`，HTML 粘贴与公式/图表渲染降级为纯文本或不可用。
 
 ### 绝对边界（由 `scripts/check_architecture.sh` 强制）
 - `textora-ui`、`textora-appkit-core`、`textora-appkit-shell`、`notora-core` **禁止**依赖 `textora-markdown`。
