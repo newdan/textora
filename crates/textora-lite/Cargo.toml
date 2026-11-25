@@ -1,0 +1,16 @@
+[package]
+name = "textora_lite"
+version = "0.1.0"
+publish = false
+build = "../app/build.rs"
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+textora-app = { path = "../app", default-features = false }
+
+[build-dependencies]
+cc = "1"

@@ -32,6 +32,14 @@ check_forbidden_dependency notora-app \
   textora-app textora-sync
 check_forbidden_dependency textora-markdown textora-mindmap
 check_forbidden_dependency textora-mindmap textora-markdown
+check_forbidden_dependency textora_lite textora-markdown textora-mindmap textora-sync
+
+lite_features="$(cargo tree -p textora_lite --edges features --prefix none)"
+if grep -Ex 'textora-appkit-shell feature "rich-clipboard"|clipboard-rs feature "image"' \
+  <<< "$lite_features" >/dev/null; then
+  echo "textora_lite must use the plain-text clipboard" >&2
+  exit 1
+fi
 
 check_forbidden_source_tokens() {
   local source_dir="$1"
@@ -55,6 +63,7 @@ local_notora_product="Notora""Product"
 local_note_id="Note""Id"
 local_navigation_scope="Navigation""Scope"
 local_edit_snapshot=".edit""+"
+local_textora_snapshot='".textora"'
 local_notora_snapshot=".notora"
 check_forbidden_source_tokens crates/appkit-shell \
   UiShell \
@@ -66,6 +75,7 @@ check_forbidden_source_tokens crates/appkit-shell \
   "$local_note_id" \
   "$local_navigation_scope" \
   "$local_edit_snapshot" \
+  "$local_textora_snapshot" \
   "$local_notora_snapshot"
 
 check_forbidden_source_tokens crates/appkit-core \
@@ -74,6 +84,7 @@ check_forbidden_source_tokens crates/appkit-core \
   "$local_note_id" \
   "$local_navigation_scope" \
   "$local_edit_snapshot" \
+  "$local_textora_snapshot" \
   "$local_notora_snapshot"
 
 check_forbidden_source_tokens crates/ui \

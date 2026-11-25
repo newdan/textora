@@ -225,6 +225,7 @@ fn dispatch_mouse(app: &mut App, ev: Event) -> (Vec<AppAction>, bool, Option<Cur
         }
         let consumed = widget_action_consumes_editor_fallthrough(&action);
         let cursor_hint = ctx.cursor_hint;
+        #[cfg(feature = "sync")]
         if let Some(sync_action) = app.take_pending_sync_settings_action() {
             actions.push(AppAction::Sync(sync_action));
         }
@@ -900,7 +901,9 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::document_fixture::DocumentFixture;
+    #[cfg(feature = "sync")]
     use crate::sync_settings_types::SyncSettingsInput;
+    #[cfg(feature = "sync")]
     use crate::textora_settings_overlay::TextoraSettingsOverlay;
     use crate::workspace_tab_factory::ProductPreparedTab;
     use crate::workspace_tab_factory::ViewportDimensions;
@@ -1214,6 +1217,7 @@ mod tests {
             .expect("绘制后的编辑区应提供光标")
     }
 
+    #[cfg(feature = "sync")]
     fn click_labeled_overlay_control(app: &mut App, label: &str) -> Vec<AppAction> {
         const LABEL_HIT_INSET_LOGICAL: f32 = 1.0;
         const LABEL_BASELINE_TO_CENTER_RATIO: f32 = 0.5;
@@ -1240,6 +1244,7 @@ mod tests {
         handle_mouse_input_left(app, ElementState::Released, px, py)
     }
 
+    #[cfg(feature = "sync")]
     fn prepare_textora_settings_overlay(app: &mut App) {
         let theme = ui::theme::test_theme();
         let mut measure = ui::core::NoopMeasure;
@@ -1829,6 +1834,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sync")]
     fn sync_settings_action_is_extracted_after_product_overlay_dispatch() {
         let mut app = App::new(None);
         prepare_textora_settings_overlay(&mut app);

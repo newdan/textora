@@ -177,10 +177,17 @@ fn snapshot_dirty_state_from_runtime(
     }
 }
 
-fn persisted_runtime_tab(tab: &EditorTabSnapshot, snapshots_dir: &Path) -> PersistedTab {
+fn persisted_runtime_tab(
+    tab: &EditorTabSnapshot,
+    snapshots_dir: &Path,
+    edition: crate::Edition,
+) -> PersistedTab {
     let dirty_state = snapshot_dirty_state_from_runtime(tab, snapshots_dir);
-    let active_plugin = (tab.default_plugin_name.as_deref() != Some(tab.plugin_name.as_str()))
-        .then(|| tab.plugin_name.clone());
+    let active_plugin = match edition {
+        crate::Edition::Lite if tab.path.is_some() => None,
+        _ => (tab.default_plugin_name.as_deref() != Some(tab.plugin_name.as_str()))
+            .then(|| tab.plugin_name.clone()),
+    };
 
     PersistedTab {
         file_path: tab.path.clone(),
@@ -279,6 +286,7 @@ pub(crate) fn snapshot_runtime_workspace(
     sidebar_pinned: bool,
     sidebar_width: Option<f32>,
     snapshots_dir: &Path,
+    edition: crate::Edition,
 ) -> PersistedWorkspace {
     PersistedWorkspace {
         version: WORKSPACE_VERSION,
@@ -286,7 +294,7 @@ pub(crate) fn snapshot_runtime_workspace(
         entries: snapshot
             .tabs
             .iter()
-            .map(|tab| persisted_runtime_tab(tab, snapshots_dir))
+            .map(|tab| persisted_runtime_tab(tab, snapshots_dir, edition))
             .collect(),
         sidebar_pinned,
         sidebar_width,
@@ -451,6 +459,7 @@ pub(crate) fn restore_workspace_for_test(
         ui::Settings::new(),
         ui::theme::test_theme(),
         snapshots_dir,
+        crate::Edition::Standard,
     )
     .expect("test editor runtime should initialize");
     restore_workspace(&mut runtime, snapshot, dimensions, 16.0, snapshots_dir)

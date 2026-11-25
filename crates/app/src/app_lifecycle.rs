@@ -28,7 +28,6 @@ use ui::core::overlay::OverlayAction;
 use ui::core::widget::{KeyCode, Modifiers, WidgetAction};
 
 const FALLBACK_LOCAL_DEVICE_SHORT_ID: &str = "local";
-const ACCESSIBILITY_WINDOW_NAME: &str = "textora";
 
 fn report_lifecycle_error(message: std::fmt::Arguments<'_>) {
     use std::io::Write;
@@ -384,7 +383,7 @@ impl App {
     }
 
     fn publish_accessibility_tree(&mut self) {
-        let tree = self.ui_shell.accessibility_tree(ACCESSIBILITY_WINDOW_NAME);
+        let tree = self.ui_shell.accessibility_tree(self.product.edition().name());
         if tree.validate().is_err() {
             return;
         }
@@ -420,6 +419,7 @@ impl App {
 
                 let mut actions = Vec::new();
                 crate::events::translate_widget_action(&widget_action, self, &mut actions);
+                #[cfg(feature = "sync")]
                 if let Some(sync_action) = self.take_pending_sync_settings_action() {
                     actions.push(AppAction::Sync(sync_action));
                 }
@@ -466,7 +466,7 @@ impl App {
             let paths: Vec<&std::path::Path> =
                 summaries.iter().filter_map(|summary| summary.path.as_deref()).collect();
             let workspace_root = compute_workspace_root(&paths);
-            self.set_native_menu(NativeMenu::build_loading());
+            self.set_native_menu(NativeMenu::build_loading(self.product.edition()));
             spawn_recent_file_loader(
                 self.product.event_sender(),
                 self.workspace_services.history().clone(),
@@ -836,15 +836,14 @@ impl App {
     }
 
     fn local_device_short_id(&self) -> String {
-        let Some(controller) = self.sync_controller() else {
-            return FALLBACK_LOCAL_DEVICE_SHORT_ID.to_owned();
-        };
-        match &controller.snapshot().connection {
-            crate::sync_controller::SyncConnectionState::Connected { instance } => {
-                instance.device_id.as_str().chars().take(6).collect()
-            }
-            _ => FALLBACK_LOCAL_DEVICE_SHORT_ID.to_owned(),
+        #[cfg(feature = "sync")]
+        if let Some(controller) = self.sync_controller()
+            && let crate::sync_controller::SyncConnectionState::Connected { instance } =
+                &controller.snapshot().connection
+        {
+            return instance.device_id.as_str().chars().take(6).collect();
         }
+        FALLBACK_LOCAL_DEVICE_SHORT_ID.to_owned()
     }
 
     fn drain_file_safety_results(&mut self) {
@@ -1535,6 +1534,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sync")]
     fn product_wake_requests_redraw_once_per_queued_sync_completion() {
         let mut app = App::new(None);
         app.platform.clear_redraw();

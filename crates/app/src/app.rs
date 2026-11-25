@@ -71,10 +71,12 @@ impl App {
         self.product.set_native_menu(native_menu);
     }
 
+    #[cfg(feature = "sync")]
     pub(crate) fn sync_controller(&self) -> Option<&crate::sync_controller::SyncController> {
         self.product.sync_controller()
     }
 
+    #[cfg(feature = "sync")]
     pub(crate) fn sync_controller_mut(
         &mut self,
     ) -> Option<&mut crate::sync_controller::SyncController> {
@@ -405,6 +407,7 @@ mod background_startup_boundary_tests {
 
 #[cfg(test)]
 impl App {
+    #[cfg(feature = "sync")]
     pub(crate) fn set_sync_controller(
         &mut self,
         controller: crate::sync_controller::SyncController,

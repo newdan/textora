@@ -213,7 +213,10 @@ impl App {
         &mut self,
         kind: ui::sidebar::NewDocumentKind,
     ) -> AppEffect {
-        if kind == ui::sidebar::NewDocumentKind::EncryptedMarkdown {
+        if kind == ui::sidebar::NewDocumentKind::EncryptedMarkdown
+            || (self.product.edition() == crate::Edition::Lite
+                && kind != ui::sidebar::NewDocumentKind::Text)
+        {
             return AppEffect::NONE;
         }
         let viewport = self.viewport_dimensions(self.screen_height());

@@ -924,6 +924,7 @@ impl App {
                 self.ui_shell.set_toc_input(toc_input);
             }
 
+            #[cfg(feature = "sync")]
             self.refresh_sync_settings_overlay();
 
             let mut measure = appkit_shell::measure_adapter::MeasureFromShaper(shaper);

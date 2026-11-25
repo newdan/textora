@@ -35,5 +35,10 @@ fn main() {
         .expect("Windows resource compiler must be available to embed the app icon");
     assert!(status.success(), "Windows resource compiler failed to embed the app icon");
 
-    println!("cargo:rustc-link-arg-bin=textora={}", compiled_resource.display());
+    let binary = match env::var("CARGO_PKG_NAME").as_deref() {
+        Ok("textora-app") => "textora",
+        Ok("textora_lite") => "textora_lite",
+        _ => unreachable!("only the Textora applications use this build script"),
+    };
+    println!("cargo:rustc-link-arg-bin={binary}={}", compiled_resource.display());
 }

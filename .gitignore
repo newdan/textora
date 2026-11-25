@@ -33,6 +33,7 @@
 # Local agent artifacts: screenshots, edit buffers, runtime logs
 /.screenshots/
 /.edit+/
+/.textora/
 /debug.log
 
 # Local design tools and snapshots

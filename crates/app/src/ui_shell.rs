@@ -111,6 +111,7 @@ pub struct UiShell {
     scrollbar_scroll_top: f64,
     /// Phase 7：Sidebar 状态持久化（每帧重建 widget 时保持配置）。
     sidebar_config: ui::sidebar::SidebarConfig,
+    plain_text_only: bool,
     detached_sidebar: Option<ui::sidebar::SidebarInteraction>,
     dragging_sidebar: bool,
     sidebar_animating: bool,
@@ -178,6 +179,7 @@ impl UiShell {
             scrollbar_total_display_rows: 0,
             scrollbar_scroll_top: 0.0,
             sidebar_config: ui::sidebar::SidebarConfig::new_default(),
+            plain_text_only: false,
             detached_sidebar: Some(ui::sidebar::SidebarInteraction::new(
                 &ui::sidebar::SidebarConfig::new_default(),
             )),
@@ -387,6 +389,10 @@ impl UiShell {
     /// Phase 9：sidebar config 只读引用。
     pub fn sidebar_cfg(&self) -> &ui::sidebar::SidebarConfig {
         &self.sidebar_config
+    }
+
+    pub(crate) fn set_plain_text_only(&mut self, plain_text_only: bool) {
+        self.plain_text_only = plain_text_only;
     }
 
     pub fn sidebar_pinned(&self) -> bool {
@@ -987,6 +993,7 @@ impl UiShell {
         if inputs.sidebar_visible && inputs.sidebar_thickness > 0.0 && self.frames_rendered > 0 {
             let t = inputs.sidebar_thickness;
             let mut sw = SidebarWidget::new(self.sidebar_config.clone(), inputs.metrics);
+            sw.set_plain_text_only(self.plain_text_only);
             let sidebar_input = self.sidebar_widget_input(screen, inputs);
             sw.set_input(sidebar_input);
             *sw.interaction_mut() =

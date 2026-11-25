@@ -62,7 +62,7 @@ fn prepare_semantic_markdown_paste(clipboard: &mut dyn DocumentClipboard) -> Opt
 
 #[cfg(not(feature = "markdown"))]
 fn prepare_semantic_markdown_paste(clipboard: &mut dyn DocumentClipboard) -> Option<String> {
-    clipboard.read_snapshot()?.plain_text.and_then(normalize_document_paste)
+    clipboard.read_plain_text().and_then(normalize_document_paste)
 }
 
 #[cfg(test)]
@@ -161,7 +161,7 @@ mod tests {
 
     #[cfg(not(feature = "markdown"))]
     #[test]
-    fn semantic_preference_falls_back_to_snapshot_plain_text_without_markdown() {
+    fn semantic_preference_reads_only_plain_text_without_markdown() {
         let mut clipboard =
             TestDocumentClipboard::with_html("<p><strong>rich</strong></p>", "plain");
         let text = prepare_document_paste(
@@ -171,8 +171,8 @@ mod tests {
         );
 
         assert_eq!(text.as_deref(), Some("plain"));
-        assert_eq!(clipboard.plain_reads, 0);
-        assert_eq!(clipboard.snapshot_reads, 1);
+        assert_eq!(clipboard.plain_reads, 1);
+        assert_eq!(clipboard.snapshot_reads, 0);
     }
 
     #[test]

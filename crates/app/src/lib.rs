@@ -62,25 +62,35 @@ mod cli;
 pub(crate) mod dispatch;
 #[cfg(test)]
 mod document_fixture;
+mod edition;
 mod editor_host;
 #[cfg(test)]
 mod external_change_tests;
 mod input_mapper;
+mod launch;
 mod library_file_monitor;
+#[cfg(feature = "sync")]
 mod library_registry;
 #[cfg(target_os = "macos")]
 mod macos_open_documents;
 mod mouse;
 mod product_paths;
 pub(crate) mod settings_io;
+#[cfg(feature = "sync")]
 mod sync_connection_store;
+#[cfg(feature = "sync")]
 mod sync_controller;
+#[cfg(feature = "sync")]
 mod sync_secret_store;
+#[cfg(feature = "sync")]
 mod sync_settings_page;
+#[cfg(feature = "sync")]
 mod sync_settings_types;
+#[cfg(feature = "sync")]
 mod sync_view_model;
 pub(crate) mod sys;
 mod textora_product;
+#[cfg(feature = "sync")]
 mod textora_settings_overlay;
 pub(crate) mod theme_loader;
 
@@ -100,6 +110,8 @@ pub use app::App;
 pub use app_event::AppEvent;
 pub use appkit_shell::gpu::{GpuError, headless_init};
 pub use cli::{CliArgs, parse_args};
+pub use edition::Edition;
+pub use launch::launch;
 #[cfg(target_os = "macos")]
 pub use macos_open_documents::install_macos_open_document_handler;
 pub use textora_product::OpenDocumentSender;

@@ -51,18 +51,7 @@ impl App {
     }
 
     pub(crate) fn open_settings_overlay(&mut self) -> AppEffect {
-        let sync_input = self
-            .sync_controller_mut()
-            .map(|controller| {
-                let notices = controller.drain_notices();
-                crate::sync_view_model::build_sync_settings_input(controller.snapshot(), &notices)
-            })
-            .unwrap_or_else(crate::sync_view_model::empty_sync_settings_input);
-        let overlay = crate::textora_settings_overlay::TextoraSettingsOverlay::new(
-            self.settings_view_input(),
-            sync_input,
-        );
-        let frame = ui::modal_frame::ModalFrame::new("设置", Box::new(overlay));
+        let frame = ui::modal_frame::ModalFrame::new("设置", self.settings_widget());
         self.ui_shell.clear_overlays();
         self.ui_shell.push_overlay_with_policy(
             Box::new(frame),
@@ -73,6 +62,31 @@ impl App {
         AppEffect::REDRAW
     }
 
+    fn settings_widget(&mut self) -> Box<dyn ui::core::Widget> {
+        let input = self.settings_view_input();
+        #[cfg(feature = "sync")]
+        if self.product.edition() == crate::Edition::Standard {
+            let sync_input = self
+                .sync_controller_mut()
+                .map(|controller| {
+                    let notices = controller.drain_notices();
+                    crate::sync_view_model::build_sync_settings_input(
+                        controller.snapshot(),
+                        &notices,
+                    )
+                })
+                .unwrap_or_else(crate::sync_view_model::empty_sync_settings_input);
+            return Box::new(crate::textora_settings_overlay::TextoraSettingsOverlay::new(
+                input, sync_input,
+            ));
+        }
+
+        let mut view = ui::settings_view::SettingsView::new(input);
+        view.set_markdown_controls_visible(self.product.edition().supports_markdown_views());
+        Box::new(view)
+    }
+
+    #[cfg(feature = "sync")]
     pub(crate) fn take_pending_sync_settings_action(
         &mut self,
     ) -> Option<crate::sync_settings_types::SyncSettingsAction> {
@@ -89,15 +103,20 @@ impl App {
         else {
             return;
         };
-        let Some(overlay) = frame
-            .content_as_any_mut()
-            .downcast_mut::<crate::textora_settings_overlay::TextoraSettingsOverlay>(
-        ) else {
-            return;
-        };
-        overlay.set_settings_input(input);
+        let content = frame.content_as_any_mut();
+        if let Some(view) = content.downcast_mut::<ui::settings_view::SettingsView>() {
+            view.set_input(input);
+        } else {
+            #[cfg(feature = "sync")]
+            if let Some(overlay) =
+                content.downcast_mut::<crate::textora_settings_overlay::TextoraSettingsOverlay>()
+            {
+                overlay.set_settings_input(input);
+            }
+        }
     }
 
+    #[cfg(feature = "sync")]
     pub(crate) fn refresh_sync_settings_overlay(&mut self) {
         let settings_overlay_is_active = self
             .ui_shell
@@ -194,6 +213,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sync")]
     fn pending_sync_action_requires_an_active_textora_settings_modal() {
         let mut app = App::new(None);
         assert_eq!(app.take_pending_sync_settings_action(), None);
@@ -213,6 +233,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sync")]
     fn opening_preferences_creates_one_modal_settings_overlay() {
         let mut app = App::new(None);
         let _ = app.open_settings_overlay();

@@ -3,22 +3,36 @@
 use std::sync::Mutex;
 
 use clipboard_rs::{Clipboard, ClipboardContext, ContentFormat};
+#[cfg(feature = "rich-clipboard")]
 use url::Url;
 
+#[cfg(feature = "rich-clipboard")]
 const MARKDOWN_FORMAT_ALIASES: &[&str] =
     &["text/markdown", "public.markdown", "net.daringfireball.markdown"];
+#[cfg(feature = "rich-clipboard")]
 const HTML_FORMAT_ALIASES: &[&str] = &["HTML Format", "public.html", "text/html"];
+#[cfg(feature = "rich-clipboard")]
 const RTF_FORMAT_ALIASES: &[&str] = &["Rich Text Format", "public.rtf", "text/rtf"];
 const PLAIN_TEXT_FORMAT_ALIASES: &[&str] = &["text/plain;charset=utf-8", "text/plain"];
+#[cfg(feature = "rich-clipboard")]
 const SOURCE_URL_FORMAT_ALIASES: &[&str] = &["public.url", "text/x-moz-url", "SourceURL"];
+#[cfg(feature = "rich-clipboard")]
 const MOZILLA_SOURCE_URL_FORMAT: &str = "text/x-moz-url";
+#[cfg(feature = "rich-clipboard")]
 const UTF16_LE_BOM: &[u8] = &[0xff, 0xfe];
+#[cfg(feature = "rich-clipboard")]
 const UTF16_ASCII_PREFIX_PAIRS: usize = 3;
+#[cfg(feature = "rich-clipboard")]
 const CF_HTML_START_FRAGMENT_MARKER: &str = "<!--StartFragment-->";
+#[cfg(feature = "rich-clipboard")]
 const CF_HTML_END_FRAGMENT_MARKER: &str = "<!--EndFragment-->";
+#[cfg(feature = "rich-clipboard")]
 const CF_HTML_START_FRAGMENT_HEADER: &str = "StartFragment:";
+#[cfg(feature = "rich-clipboard")]
 const CF_HTML_END_FRAGMENT_HEADER: &str = "EndFragment:";
+#[cfg(feature = "rich-clipboard")]
 const CF_HTML_SOURCE_URL_HEADER: &str = "SourceURL:";
+#[cfg(feature = "rich-clipboard")]
 const STABLE_SNAPSHOT_OBSERVATION_LIMIT: usize = 4;
 
 static SYSTEM_CLIPBOARD_CONTEXT: Mutex<Option<ClipboardContext>> = Mutex::new(None);
@@ -60,12 +74,19 @@ impl DocumentClipboard for SystemClipboard {
         try_read_text()
     }
 
+    #[cfg(feature = "rich-clipboard")]
     fn read_snapshot(&mut self) -> Option<ClipboardSnapshot> {
         with_system_clipboard(|context| {
             let representations = ClipboardContextRepresentations { context };
             snapshot_from(&representations)
         })
         .flatten()
+    }
+
+    #[cfg(not(feature = "rich-clipboard"))]
+    fn read_snapshot(&mut self) -> Option<ClipboardSnapshot> {
+        let plain_text = self.read_plain_text()?;
+        Some(ClipboardSnapshot { plain_text: Some(plain_text), ..ClipboardSnapshot::default() })
     }
 }
 
@@ -117,7 +138,9 @@ fn with_reusable_clipboard_context<C, T, E>(
 trait ClipboardRepresentations {
     fn available_formats(&self) -> Result<Vec<String>, ClipboardReadError>;
     fn plain_text(&self) -> ClipboardRead<String>;
+    #[cfg(feature = "rich-clipboard")]
     fn html_text(&self) -> ClipboardRead<String>;
+    #[cfg(feature = "rich-clipboard")]
     fn rtf_bytes(&self) -> ClipboardRead<Vec<u8>>;
     fn custom_bytes(&self, format: &str) -> ClipboardRead<Vec<u8>>;
 }
@@ -133,6 +156,7 @@ struct ClipboardContextRepresentations<'a> {
     context: &'a clipboard_rs::ClipboardContext,
 }
 
+#[cfg(feature = "rich-clipboard")]
 #[derive(PartialEq, Eq)]
 struct ClipboardObservation {
     format_names: Vec<String>,
@@ -151,6 +175,7 @@ impl ClipboardRepresentations for ClipboardContextRepresentations<'_> {
         self.context.get_text().map(Some).map_err(|_| ClipboardReadError::Backend)
     }
 
+    #[cfg(feature = "rich-clipboard")]
     fn html_text(&self) -> ClipboardRead<String> {
         if !self.context.has(ContentFormat::Html) {
             return Ok(None);
@@ -158,6 +183,7 @@ impl ClipboardRepresentations for ClipboardContextRepresentations<'_> {
         self.context.get_html().map(Some).map_err(|_| ClipboardReadError::Backend)
     }
 
+    #[cfg(feature = "rich-clipboard")]
     fn rtf_bytes(&self) -> ClipboardRead<Vec<u8>> {
         if !self.context.has(ContentFormat::Rtf) {
             return Ok(None);
@@ -173,6 +199,7 @@ impl ClipboardRepresentations for ClipboardContextRepresentations<'_> {
     }
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn snapshot_from(source: &impl ClipboardRepresentations) -> Option<ClipboardSnapshot> {
     // clipboard-rs cannot lock the external owner. Two identical complete
     // observations reject any change that is visible within the fixed budget.
@@ -189,6 +216,7 @@ fn snapshot_from(source: &impl ClipboardRepresentations) -> Option<ClipboardSnap
     None
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn read_snapshot_observation(
     source: &impl ClipboardRepresentations,
 ) -> Result<ClipboardObservation, ClipboardReadError> {
@@ -200,6 +228,7 @@ fn read_snapshot_observation(
     Ok(ClipboardObservation { format_names, snapshot })
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn snapshot_from_available_formats(
     source: &impl ClipboardRepresentations,
     available_formats: &[String],
@@ -230,6 +259,7 @@ fn snapshot_from_available_formats(
     Ok(snapshot_has_content(&snapshot).then_some(snapshot))
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn custom_string(
     source: &impl ClipboardRepresentations,
     available_formats: &[String],
@@ -249,6 +279,7 @@ fn custom_string(
     Ok(None)
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn custom_bytes(
     source: &impl ClipboardRepresentations,
     available_formats: &[String],
@@ -274,6 +305,7 @@ fn matching_formats<'a>(available_formats: &'a [String], aliases: &[&str]) -> Ve
         .collect()
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn plain_text_from(
     source: &impl ClipboardRepresentations,
     available_formats: &[String],
@@ -297,6 +329,7 @@ fn best_effort_plain_text_from(source: &impl ClipboardRepresentations) -> Option
     source.plain_text().ok().flatten().filter(|text| !text.is_empty())
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn source_url_from(
     source: &impl ClipboardRepresentations,
     available_formats: &[String],
@@ -314,6 +347,7 @@ fn source_url_from(
     Ok(None)
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn decode_source_url(format: &str, bytes: Vec<u8>) -> Option<String> {
     if format.eq_ignore_ascii_case(MOZILLA_SOURCE_URL_FORMAT) && looks_like_utf16_le(&bytes) {
         return decode_utf16_le(&bytes);
@@ -321,6 +355,7 @@ fn decode_source_url(format: &str, bytes: Vec<u8>) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn looks_like_utf16_le(bytes: &[u8]) -> bool {
     if bytes.starts_with(UTF16_LE_BOM) {
         return true;
@@ -330,6 +365,7 @@ fn looks_like_utf16_le(bytes: &[u8]) -> bool {
         .all(|_| prefix_pairs.next().is_some_and(|pair| pair[0].is_ascii_graphic() && pair[1] == 0))
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn decode_utf16_le(bytes: &[u8]) -> Option<String> {
     let encoded_text = bytes.strip_prefix(UTF16_LE_BOM).unwrap_or(bytes);
     let mut code_unit_bytes = encoded_text.chunks_exact(2);
@@ -341,24 +377,29 @@ fn decode_utf16_le(bytes: &[u8]) -> Option<String> {
     String::from_utf16(&code_units).ok()
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn non_empty_string(value: Option<String>) -> Option<String> {
     value.filter(|text| !text.is_empty())
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn non_empty_bytes(value: Option<Vec<u8>>) -> Option<Vec<u8>> {
     value.filter(|bytes| !bytes.is_empty())
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn first_line(value: String) -> Option<String> {
     let text_before_terminator = value.split('\0').next()?;
     non_empty_string(text_before_terminator.lines().next().map(str::to_owned))
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn valid_source_url(candidate: String) -> Option<String> {
     let parsed = Url::parse(&candidate).ok()?;
     (matches!(parsed.scheme(), "http" | "https") && parsed.has_host()).then_some(candidate)
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn snapshot_has_content(snapshot: &ClipboardSnapshot) -> bool {
     snapshot.markdown_text.is_some()
         || snapshot.html_text.is_some()
@@ -367,6 +408,7 @@ fn snapshot_has_content(snapshot: &ClipboardSnapshot) -> bool {
         || snapshot.source_url.is_some()
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn extract_cf_html_fragment(html: &str) -> &str {
     if let Some(fragment) = marker_fragment(html) {
         return fragment;
@@ -375,6 +417,7 @@ fn extract_cf_html_fragment(html: &str) -> &str {
     numeric_offset_fragment(html).unwrap_or(html)
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn marker_fragment(html: &str) -> Option<&str> {
     let fragment_start =
         html.find(CF_HTML_START_FRAGMENT_MARKER)? + CF_HTML_START_FRAGMENT_MARKER.len();
@@ -382,16 +425,19 @@ fn marker_fragment(html: &str) -> Option<&str> {
     html.get(fragment_start..fragment_end)
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn numeric_offset_fragment(html: &str) -> Option<&str> {
     let fragment_start = cf_html_offset(html, CF_HTML_START_FRAGMENT_HEADER)?;
     let fragment_end = cf_html_offset(html, CF_HTML_END_FRAGMENT_HEADER)?;
     (fragment_start < fragment_end).then(|| html.get(fragment_start..fragment_end)).flatten()
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn cf_html_offset(html: &str, header: &str) -> Option<usize> {
     html.lines().find_map(|line| line.strip_prefix(header)?.trim().parse::<usize>().ok())
 }
 
+#[cfg(feature = "rich-clipboard")]
 fn extract_cf_html_source_url(html: &str) -> Option<String> {
     html.lines()
         .find_map(|line| line.strip_prefix(CF_HTML_SOURCE_URL_HEADER))
@@ -403,7 +449,7 @@ fn extract_cf_html_source_url(html: &str) -> Option<String> {
 #[cfg(test)]
 mod normalize_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rich-clipboard"))]
 mod tests {
     use std::cell::Cell;
     use std::collections::BTreeMap;

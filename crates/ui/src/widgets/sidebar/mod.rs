@@ -192,6 +192,10 @@ impl SidebarWidget {
         &mut self.cfg
     }
 
+    pub fn set_plain_text_only(&mut self, plain_text_only: bool) {
+        self.state.plain_text_only = plain_text_only;
+    }
+
     pub fn editor_left_offset(&self) -> f32 {
         self.state.editor_left_offset(&self.cfg, &self.metrics)
     }
@@ -667,7 +671,7 @@ impl Widget for SidebarWidget {
                     WidgetAction::Control(ControlAction::Activated {
                         id: NEW_DOCUMENT_BUTTON_ID,
                     }) => Some(WidgetAction::Sidebar(SidebarAction::NewDocument(
-                        NewDocumentKind::Markdown,
+                        self.state.default_document_kind(),
                     ))),
                     WidgetAction::Control(ControlAction::Activated {
                         id: NEW_DOCUMENT_MENU_BUTTON_ID,

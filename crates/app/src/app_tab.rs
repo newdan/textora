@@ -405,6 +405,7 @@ impl App {
             sidebar_pinned,
             Some(sidebar_width),
             snapshots_directory,
+            self.product.edition(),
         );
         if let Err(e) = self.workspace_services.store().save_workspace(&snap) {
             eprintln!("[workspace] save_workspace error: {}", e);
@@ -518,7 +519,10 @@ impl App {
             .iter()
             .map(|e| e.file_path.clone())
             .collect();
-        self.set_native_menu(crate::native_menu::NativeMenu::build(&recent));
+        self.set_native_menu(crate::native_menu::NativeMenu::build(
+            &recent,
+            self.product.edition(),
+        ));
     }
 }
 

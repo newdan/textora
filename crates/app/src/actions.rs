@@ -5,6 +5,7 @@ use winit::window::CursorIcon;
 use winit::window::ResizeDirection;
 
 use crate::menu_handler::AppCommand;
+#[cfg(feature = "sync")]
 use crate::sync_settings_types::SyncSettingsAction;
 use ui::popup_menu::{ContextMenuAction, PopupMenu};
 use ui::scrollbar::ScrollbarAction;
@@ -44,6 +45,7 @@ pub(crate) enum AppAction {
     /// Apply a validated action emitted by the SettingsView widget.
     Settings(ui::settings_view::SettingsViewAction),
     /// Apply an action emitted by Textora's product-owned Sync settings page.
+    #[cfg(feature = "sync")]
     Sync(SyncSettingsAction),
     /// Run a Markdown table structure operation from its clicked cell context.
     TableStructureEdit {

@@ -66,14 +66,25 @@ cargo lite
 
 The binary is written to `target/lite/textora`. Math and HTML tags remain visible as source text, while `mermaid` fences render as ordinary code blocks.
 
+Build the plain-text edition:
+
+```bash
+cargo textora-lite
+```
+
+The binary is written to `target/lite/textora_lite`. It includes plain-text editing and copy and paste, syntax highlighting, workspaces, and appearance settings. Markdown and mind-map files open as plain text. The build excludes sync and the Markdown, mind-map, and reading views.
+
+`textora` and `textora_lite` share settings, themes, and workspace state under `~/.textora`. On startup, the app migrates an existing `~/.edit+` directory if the new directory is absent.
+
 Build macOS release bundles:
 
 ```bash
 ./scripts/bundle-mac.sh
+./scripts/bundle-textora-lite-mac.sh
 ./scripts/bundle-notora-mac.sh
 ```
 
-The default app bundle paths are `target/textora.app` and `target/notora.app`.
+The default app bundle paths are `target/textora.app`, `target/textora_lite.app`, and `target/notora.app`. The Lite bundle uses the compact 512-pixel icon.
 
 ### Verify
 

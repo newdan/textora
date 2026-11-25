@@ -94,6 +94,7 @@ pub struct SettingsView {
     input: SettingsViewInput,
     active_category: SettingsCategory,
     category_navigation_visible: bool,
+    markdown_controls_visible: bool,
     category_buttons: Vec<(SettingsCategory, Button)>,
     category_rects: Vec<Rect>,
     event_router: ChildEventRouter<SettingsChildTarget>,
@@ -118,6 +119,7 @@ impl SettingsView {
             input,
             active_category,
             category_navigation_visible: true,
+            markdown_controls_visible: true,
             category_buttons: Vec::new(),
             category_rects: Vec::new(),
             event_router: ChildEventRouter::default(),
@@ -150,6 +152,11 @@ impl SettingsView {
 
     pub fn active_category(&self) -> SettingsCategory {
         self.active_category
+    }
+
+    pub fn set_markdown_controls_visible(&mut self, visible: bool) {
+        self.markdown_controls_visible = visible;
+        self.form_needs_layout = true;
     }
 
     pub fn set_category_navigation_visible(&mut self, visible: bool) {
@@ -345,19 +352,20 @@ impl SettingsView {
     }
 
     fn build_editor_sections(&self) -> Vec<FormSection> {
+        let mut rows = vec![
+            self.font_family_row(),
+            self.font_size_row(),
+            self.line_height_ratio_row(),
+            self.word_wrap_row(),
+        ];
+        if self.markdown_controls_visible {
+            rows.push(self.markdown_first_line_indent_row());
+        }
+        rows.extend([self.text_spacing_mode_row(), self.line_numbers_row(), self.tab_width_row()]);
         vec![FormSection::new(
             section_title_label("编辑器"),
             Some(section_description_label("文本输入按 Enter 应用。")),
-            vec![
-                self.font_family_row(),
-                self.font_size_row(),
-                self.line_height_ratio_row(),
-                self.word_wrap_row(),
-                self.markdown_first_line_indent_row(),
-                self.text_spacing_mode_row(),
-                self.line_numbers_row(),
-                self.tab_width_row(),
-            ],
+            rows,
             settings_section_style(),
         )]
     }

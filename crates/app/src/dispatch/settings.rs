@@ -3,21 +3,32 @@
 use crate::app::App;
 use crate::app_effect::AppEffect;
 use crate::dispatch::chrome::SettingsDispatchAction;
+#[cfg(feature = "sync")]
 use crate::sync_settings_types::SyncSettingsAction;
+#[cfg(feature = "sync")]
 use textora_sync::{DeviceId, LoopbackEndpoint, RemoteDeviceSpec, StaticSyncAddress};
 
+#[cfg(feature = "sync")]
 const SYNC_INVALID_ENDPOINT_NOTICE: &str = "Syncthing 地址无效";
+#[cfg(feature = "sync")]
 const SYNC_INVALID_API_KEY_NOTICE: &str = "API Key 无效";
+#[cfg(feature = "sync")]
 const SYNC_INVALID_REMOTE_DEVICE_NOTICE: &str = "远端设备信息无效";
+#[cfg(feature = "sync")]
 const SYNC_INVALID_REMOTE_ADDRESS_NOTICE: &str = "远端设备地址无效";
+#[cfg(feature = "sync")]
 const SYNC_REMOTE_NAME_REQUIRED_NOTICE: &str = "远端设备名称不能为空";
+#[cfg(feature = "sync")]
 const SYNC_LIBRARY_NOT_FOUND_NOTICE: &str = "资料库状态已更新，请重试";
+#[cfg(feature = "sync")]
 const SYNC_PENDING_FOLDER_NOT_FOUND_NOTICE: &str = "待接收资料库不存在";
 
+#[cfg(feature = "sync")]
 fn parse_sync_endpoint(candidate: &str) -> Result<LoopbackEndpoint, &'static str> {
     LoopbackEndpoint::parse(candidate.trim()).map_err(|_| SYNC_INVALID_ENDPOINT_NOTICE)
 }
 
+#[cfg(feature = "sync")]
 fn parse_sync_remote_device(
     device_id: String,
     name: String,
@@ -44,6 +55,7 @@ fn parse_sync_remote_device(
     Ok(RemoteDeviceSpec { device_id, name, addresses })
 }
 
+#[cfg(feature = "sync")]
 fn sync_controller_error_notice(
     error: &crate::sync_controller::SyncControllerError,
 ) -> &'static str {
@@ -99,6 +111,7 @@ impl App {
         effect
     }
 
+    #[cfg(feature = "sync")]
     pub(super) fn dispatch_sync_settings_action(
         &mut self,
         action: SyncSettingsAction,
@@ -108,6 +121,7 @@ impl App {
         })
     }
 
+    #[cfg(feature = "sync")]
     fn dispatch_sync_settings_action_with_folder_picker(
         &mut self,
         action: SyncSettingsAction,
@@ -203,6 +217,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "sync")]
     fn dispatch_library_controller_action<F>(
         &mut self,
         library_index: usize,
@@ -231,6 +246,7 @@ impl App {
         self.finish_sync_controller_action(result)
     }
 
+    #[cfg(feature = "sync")]
     fn finish_sync_controller_action(
         &mut self,
         result: Result<
@@ -244,6 +260,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "sync")]
     fn report_sync_settings_error(&mut self, message: &'static str) -> AppEffect {
         if let Some(controller) = self.sync_controller_mut() {
             controller.push_local_error(message.to_owned());
@@ -326,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sync")]
     fn sync_settings_action_reaches_existing_controller_validation() {
         let mut app = App::new(None);
         let sync_action = SyncSettingsAction::TestConnection {
@@ -341,6 +359,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sync")]
     fn publish_library_prompts_for_folder_before_validating_remote_fields() {
         let mut app = App::new(None);
         let mut folder_picker_call_count = 0;
@@ -373,6 +392,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sync")]
     fn sync_remote_input_parser_accepts_static_addresses_and_dynamic_placeholder() {
         let remote = parse_sync_remote_device(
             "ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG-ABCDEFG".to_owned(),
@@ -391,6 +411,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sync")]
     fn sync_remote_input_parser_rejects_invalid_device_or_address() {
         assert!(
             parse_sync_remote_device(

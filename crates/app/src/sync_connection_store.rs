@@ -70,9 +70,8 @@ impl SyncConnectionStore {
     }
 
     pub(crate) fn default() -> Self {
-        let home =
-            std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-        Self::new(home.join(".edit+"))
+        let home = crate::product_paths::home_directory();
+        Self::new(crate::product_paths::ProductPaths::textora(&home).config_dir)
     }
 
     pub(crate) fn path(&self) -> PathBuf {

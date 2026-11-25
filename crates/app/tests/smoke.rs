@@ -49,9 +49,14 @@ fn test_app_construction() {
 
 #[test]
 fn launch_preparation_starts_before_event_loop_construction() {
-    let source = include_str!("../src/main.rs");
+    let standard_entry = include_str!("../src/main.rs");
+    let lite_entry = include_str!("../../textora-lite/src/main.rs");
+    assert!(standard_entry.contains("textora_app::launch(textora_app::Edition::Standard)"));
+    assert!(lite_entry.contains("textora_app::launch(textora_app::Edition::Lite)"));
+
+    let source = include_str!("../src/launch.rs");
     let app_position = source
-        .find("App::new_for_launch")
+        .find("App::new_for_edition")
         .expect("production entry point must use the parallel launch constructor");
     let event_loop_position = source
         .find("EventLoop::<AppEvent>::with_user_event")

@@ -12,10 +12,11 @@ name = "textora"
 path = "src/main.rs"
 
 [features]
-default = ["markdown-rich"]
+default = ["markdown-rich", "sync"]
 ci-no-fonts = ["appkit-shell/ci-no-fonts"]
-markdown = ["dep:textora-markdown", "dep:textora-mindmap"]
+markdown = ["dep:textora-markdown", "dep:textora-mindmap", "appkit-shell/rich-clipboard"]
 markdown-rich = ["markdown", "textora-markdown/rich-markdown"]
+sync = ["dep:textora-sync", "dep:semver", "dep:security-framework", "dep:security-framework-sys"]
 
 [dependencies]
 unicode_categories = { workspace = true }
@@ -26,7 +27,7 @@ shaping.workspace = true
 textora-markdown = { path = "../markdown", optional = true, default-features = false }
 textora-mindmap = { path = "../mindmap", optional = true }
 appkit-core = { path = "../appkit-core", package = "textora-appkit-core" }
-appkit-shell = { path = "../appkit-shell", package = "textora-appkit-shell" }
+appkit-shell = { path = "../appkit-shell", package = "textora-appkit-shell", default-features = false }
 render.workspace = true
 pollster = "0.4"
 textora_core.workspace = true
@@ -39,8 +40,8 @@ similar = "2"
 blake3 = "1"
 dirs = "6"
 smallvec = { workspace = true }
-textora-sync = { path = "../sync" }
-semver = "1"
+textora-sync = { path = "../sync", optional = true }
+semver = { version = "1", optional = true }
 notify = "8"
 file-watch = { package = "textora-file-watch", path = "../file-watch" }
 
@@ -48,8 +49,8 @@ file-watch = { package = "textora-file-watch", path = "../file-watch" }
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
-security-framework = "3.7"
-security-framework-sys = "2.17"
+security-framework = { version = "3.7", optional = true }
+security-framework-sys = { version = "2.17", optional = true }
 wgpu = { workspace = true, features = ["metal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{LazyLock, Mutex};
 
+use crate::Edition;
+
 /// Cached recent file paths for menu building.
 /// Index in the vec corresponds to the menu tag.
 #[allow(dead_code)]
@@ -97,26 +99,27 @@ pub struct NativeMenu {
 }
 
 impl NativeMenu {
-    pub fn build(recent_files: &[PathBuf]) -> Self {
+    pub fn build(recent_files: &[PathBuf], edition: Edition) -> Self {
         #[cfg(target_os = "macos")]
         {
-            macos::build_native_menu(Some(recent_files))
+            macos::build_native_menu(Some(recent_files), edition)
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = recent_files;
+            let _ = (recent_files, edition);
             NativeMenu { rx: None }
         }
     }
 
     /// Build the menu bar before background recent-file validation completes.
-    pub fn build_loading() -> Self {
+    pub fn build_loading(edition: Edition) -> Self {
         #[cfg(target_os = "macos")]
         {
-            macos::build_native_menu(None)
+            macos::build_native_menu(None, edition)
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = edition;
             NativeMenu { rx: None }
         }
     }
@@ -129,7 +132,7 @@ impl NativeMenu {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{
-        INSERT_TABLE_TAG, MenuAction, RECENT_SLOTS, RECENT_TAG_BASE, menu_action_from_tag,
+        Edition, INSERT_TABLE_TAG, MenuAction, RECENT_SLOTS, RECENT_TAG_BASE, menu_action_from_tag,
     };
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -223,11 +226,12 @@ mod macos {
         target: &MenuTarget,
         mtm: MainThreadMarker,
         recent_files: Option<&[PathBuf]>,
+        edition: Edition,
     ) {
         // -- App menu --
         {
             let m = new_menu("", mtm);
-            m.addItem(&make_item("关于 textora", 1, "", target, mtm));
+            m.addItem(&make_item(&format!("关于 {}", edition.name()), 1, "", target, mtm));
             m.addItem(&separator(mtm));
             // Settings submenu
             {
@@ -247,7 +251,7 @@ mod macos {
             }
             m.addItem(&make_item("偏好设置…", 2, ",", target, mtm));
             m.addItem(&separator(mtm));
-            m.addItem(&make_item("退出 textora", 3, "q", target, mtm));
+            m.addItem(&make_item(&format!("退出 {}", edition.name()), 3, "q", target, mtm));
             main_menu.addItem(&make_submenu("", &m, mtm));
         }
         // -- File --
@@ -298,8 +302,7 @@ mod macos {
             m.addItem(&make_item("查找", 15, "f", target, mtm));
             main_menu.addItem(&make_submenu("编辑", &m, mtm));
         }
-        // -- Insert --
-        {
+        if edition.supports_markdown_views() {
             let menu = new_menu("插入", mtm);
             menu.addItem(&make_item("表格…", INSERT_TABLE_TAG, "", target, mtm));
             main_menu.addItem(&make_submenu("插入", &menu, mtm));
@@ -317,7 +320,10 @@ mod macos {
         }
     }
 
-    pub(crate) fn build_native_menu(recent_files: Option<&[PathBuf]>) -> super::NativeMenu {
+    pub(crate) fn build_native_menu(
+        recent_files: Option<&[PathBuf]>,
+        edition: Edition,
+    ) -> super::NativeMenu {
         if let Ok(mut guard) = super::RECENT_FILES.lock() {
             guard.clear();
             if let Some(paths) = recent_files {
@@ -353,7 +359,7 @@ mod macos {
         };
 
         let main_menu = new_menu("", mtm);
-        build_menu_items(&main_menu, &target, mtm, recent_files);
+        build_menu_items(&main_menu, &target, mtm, recent_files, edition);
 
         let app = objc2_app_kit::NSApp(mtm);
         app.setMainMenu(Some(&main_menu));

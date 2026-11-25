@@ -14,22 +14,35 @@ pub fn build_new_document_menu(
     metrics: &crate::settings::UiMetrics,
     include_encrypted_markdown: bool,
 ) -> PopupMenu {
+    build_document_menu(split_button_rect, screen_size, metrics, include_encrypted_markdown, false)
+}
+
+pub(super) fn build_document_menu(
+    split_button_rect: Rect,
+    screen_size: (f32, f32),
+    metrics: &crate::settings::UiMetrics,
+    include_encrypted_markdown: bool,
+    plain_text_only: bool,
+) -> PopupMenu {
     let (screen_w, screen_h) = screen_size;
     let dpi = metrics.dpi;
     let item_h = constants::ROW_HEIGHT * dpi;
     let menu_w = 200.0 * dpi;
     let anchor_x = split_button_rect.x + split_button_rect.w / 2.0 - menu_w / 2.0;
     let anchor_y = split_button_rect.bottom() + 2.0 * dpi;
-    let mut items = vec![
-        PopupMenuItem::action("新建 TXT", PMA::NewDocument(NewDocumentKind::Text)),
-        PopupMenuItem::action("新建 MMAP", PMA::NewDocument(NewDocumentKind::Mindmap)),
-        PopupMenuItem::action("新建 MD", PMA::NewDocument(NewDocumentKind::Markdown)),
-    ];
-    if include_encrypted_markdown {
-        items.push(PopupMenuItem::action(
-            "加密笔记",
-            PMA::NewDocument(NewDocumentKind::EncryptedMarkdown),
-        ));
+    let mut items =
+        vec![PopupMenuItem::action("新建 TXT", PMA::NewDocument(NewDocumentKind::Text))];
+    if !plain_text_only {
+        items.extend([
+            PopupMenuItem::action("新建 MMAP", PMA::NewDocument(NewDocumentKind::Mindmap)),
+            PopupMenuItem::action("新建 MD", PMA::NewDocument(NewDocumentKind::Markdown)),
+        ]);
+        if include_encrypted_markdown {
+            items.push(PopupMenuItem::action(
+                "加密笔记",
+                PMA::NewDocument(NewDocumentKind::EncryptedMarkdown),
+            ));
+        }
     }
 
     let menu_left = anchor_x.min(screen_w - menu_w).max(0.0);

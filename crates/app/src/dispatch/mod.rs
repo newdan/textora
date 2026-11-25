@@ -160,6 +160,7 @@ impl App {
                 AppEffect::REDRAW
             }
             AppAction::Settings(action) => self.dispatch_settings_view_action(action),
+            #[cfg(feature = "sync")]
             AppAction::Sync(action) => self.dispatch_sync_settings_action(action),
             AppAction::UpdateMousePos(x, y) => {
                 self.platform.mouse_mut().pos = (x, y);

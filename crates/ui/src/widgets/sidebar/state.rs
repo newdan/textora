@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use super::layout::*;
-use super::menu::build_new_document_menu;
+use super::menu::build_document_menu;
 use super::persistent::SidebarInteraction;
 use super::types::*;
 use crate::constants;
@@ -30,6 +30,7 @@ pub struct SidebarState {
     open_menu: Option<PopupMenu>,
     menu_hovered_index: Option<usize>,
     hovered_index: Option<usize>,
+    pub(super) plain_text_only: bool,
     pub(crate) hovered_button: SidebarHoverButton,
 }
 
@@ -224,9 +225,18 @@ impl SidebarState {
     ) {
         let split_button_rect =
             self.layout.as_ref().map(|layout| layout.new_menu_btn_rect).unwrap_or(Rect::ZERO);
-        self.open_menu =
-            Some(build_new_document_menu(split_button_rect, (screen_w, screen_h), metrics, false));
+        self.open_menu = Some(build_document_menu(
+            split_button_rect,
+            (screen_w, screen_h),
+            metrics,
+            false,
+            self.plain_text_only,
+        ));
         self.menu_hovered_index = None;
+    }
+
+    pub(super) fn default_document_kind(&self) -> NewDocumentKind {
+        if self.plain_text_only { NewDocumentKind::Text } else { NewDocumentKind::Markdown }
     }
 
     pub fn dispatch_menu_click(
@@ -678,7 +688,7 @@ impl SidebarState {
             return None;
         }
         if layout.new_btn_rect.contains(px, py) {
-            return Some(SidebarAction::NewDocument(NewDocumentKind::Markdown));
+            return Some(SidebarAction::NewDocument(self.default_document_kind()));
         }
         if layout.new_menu_btn_rect.contains(px, py) {
             return Some(SidebarAction::OpenNewDocumentMenu);

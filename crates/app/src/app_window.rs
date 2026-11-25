@@ -14,7 +14,6 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
 use winit::window::Icon;
 use winit::window::WindowAttributes;
 
-const WINDOW_TITLE: &str = "textora";
 const MINIMUM_WINDOW_WIDTH_LOGICAL: u32 = 800;
 const MINIMUM_WINDOW_HEIGHT_LOGICAL: u32 = 600;
 const MINIMUM_VISIBLE_WINDOW_EDGE_PHYSICAL: i64 = 64;
@@ -100,10 +99,19 @@ impl App {
         }
         let overlay_rect = self.ui_shell.active_overlay_layout_rect()?;
         let frame = self.ui_shell.active_overlay_widget_ref::<ui::modal_frame::ModalFrame>()?;
-        let overlay = frame
-            .content_as_any()
-            .downcast_ref::<crate::textora_settings_overlay::TextoraSettingsOverlay>()?;
-        let local = overlay.focused_ime_cursor_rect()?;
+        let content = frame.content_as_any();
+        let local = if let Some(view) = content.downcast_ref::<ui::settings_view::SettingsView>() {
+            view.focused_ime_cursor_rect()
+        } else {
+            #[cfg(feature = "sync")]
+            {
+                content
+                    .downcast_ref::<crate::textora_settings_overlay::TextoraSettingsOverlay>()?
+                    .focused_ime_cursor_rect()
+            }
+            #[cfg(not(feature = "sync"))]
+            None
+        }?;
         let content_rect = frame.content_rect();
         Some(ui::core::geom::Rect::new(
             overlay_rect.x + content_rect.x + local.x,
@@ -117,25 +125,39 @@ impl App {
         if !self.editor_runtime.window_focused() || !self.ui_shell.active_overlay_is_modal() {
             return None;
         }
-        self.ui_shell
-            .active_overlay_widget_ref::<ui::modal_frame::ModalFrame>()?
-            .content_as_any()
-            .downcast_ref::<crate::textora_settings_overlay::TextoraSettingsOverlay>()?
-            .next_cursor_blink_at()
+        let frame = self.ui_shell.active_overlay_widget_ref::<ui::modal_frame::ModalFrame>()?;
+        let content = frame.content_as_any();
+        if let Some(view) = content.downcast_ref::<ui::settings_view::SettingsView>() {
+            return view.next_cursor_blink_at();
+        }
+        #[cfg(feature = "sync")]
+        if let Some(overlay) =
+            content.downcast_ref::<crate::textora_settings_overlay::TextoraSettingsOverlay>()
+        {
+            return overlay.next_cursor_blink_at();
+        }
+        None
     }
 
     pub(crate) fn advance_settings_overlay_cursor_blink(&mut self, now: Instant) -> bool {
         if !self.editor_runtime.window_focused() || !self.ui_shell.active_overlay_is_modal() {
             return false;
         }
-        self.ui_shell
-            .active_overlay_widget_mut::<ui::modal_frame::ModalFrame>()
-            .and_then(|frame| {
-                frame
-                    .content_as_any_mut()
-                    .downcast_mut::<crate::textora_settings_overlay::TextoraSettingsOverlay>()
-            })
-            .is_some_and(|overlay| overlay.advance_cursor_blink(now))
+        let Some(frame) = self.ui_shell.active_overlay_widget_mut::<ui::modal_frame::ModalFrame>()
+        else {
+            return false;
+        };
+        let content = frame.content_as_any_mut();
+        if let Some(view) = content.downcast_mut::<ui::settings_view::SettingsView>() {
+            return view.advance_cursor_blink(now);
+        }
+        #[cfg(feature = "sync")]
+        if let Some(overlay) =
+            content.downcast_mut::<crate::textora_settings_overlay::TextoraSettingsOverlay>()
+        {
+            return overlay.advance_cursor_blink(now);
+        }
+        false
     }
 
     /// Phase 2：从 App / EditorTabSet 状态组装 ShellInputs。
@@ -425,7 +447,7 @@ impl App {
             }
         };
         let mut attrs = WindowAttributes::default()
-            .with_title(WINDOW_TITLE)
+            .with_title(self.product.edition().name())
             .with_visible(false)
             .with_decorations(!cfg!(target_os = "windows"));
         #[cfg(target_os = "windows")]
@@ -825,6 +847,7 @@ mod shutdown_sync_controller_boundary_tests {
     }
 
     #[test]
+    #[cfg(feature = "sync")]
     fn shutdown_product_services_removes_configured_sync_controller() {
         let mut app = App::new(None);
         app.set_sync_controller(crate::sync_controller::SyncController::new_default(|| {}));

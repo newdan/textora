@@ -66,14 +66,25 @@ cargo lite
 
 产物位于 `target/lite/textora`。精简版将数学公式和 HTML 标签显示为原文，`mermaid` 代码块仍按普通代码块显示。
 
+构建纯文本版 `textora_lite`：
+
+```bash
+cargo textora-lite
+```
+
+产物位于 `target/lite/textora_lite`。它保留纯文本编辑和复制粘贴、语法高亮、工作区和外观设置。`.md`、`.mmap.md` 等文件在纯文本编辑器中打开。同步功能和 Markdown、思维导图、阅读视图均未编入这个目标。
+
+`textora` 和 `textora_lite` 共用 `~/.textora` 中的设置、主题和工作区。首次启动时，如果只有旧的 `~/.edit+` 目录，应用会将其迁移到新路径。
+
 构建 macOS 发布包：
 
 ```bash
 ./scripts/bundle-mac.sh
+./scripts/bundle-textora-lite-mac.sh
 ./scripts/bundle-notora-mac.sh
 ```
 
-默认的应用包路径为 `target/textora.app` 和 `target/notora.app`。
+默认的应用包路径为 `target/textora.app`、`target/textora_lite.app` 和 `target/notora.app`。Lite 应用包使用去重后的 512 像素图标。
 
 ### 验证
 

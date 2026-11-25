@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use crate::Edition;
 use crate::app::{App, PlatformState, SettingsUiState, WorkspaceServices};
 use crate::product_paths::ProductPaths;
 use crate::ui_shell::UiShell;
@@ -57,7 +58,7 @@ fn register_plugin_factory(
 }
 
 /// 构造 textora 产品的插件和路径路由；runtime 只接收这一步产出的 shared 配置。
-fn product_editor_plugins() -> (ui::plugin::PluginRegistry, ViewRouteTable) {
+fn product_editor_plugins(edition: Edition) -> (ui::plugin::PluginRegistry, ViewRouteTable) {
     use ui::plugin::PLUGIN_EDITOR;
     #[cfg(feature = "markdown")]
     use ui::plugin::{PLUGIN_MARKDOWN_EDITOR, PLUGIN_MINDMAP, PLUGIN_NOVEL_VIEW};
@@ -70,70 +71,70 @@ fn product_editor_plugins() -> (ui::plugin::PluginRegistry, ViewRouteTable) {
         PLUGIN_EDITOR,
         Box::new(crate::plugins::editor::EditorPluginFactory),
     );
-    #[cfg(feature = "markdown")]
-    register_plugin_factory(
-        &mut registry,
-        &mut registered_plugin_ids,
-        PLUGIN_MINDMAP,
-        Box::new(textora_mindmap::mindmap_view::MindmapPluginFactory),
-    );
-    #[cfg(feature = "markdown")]
-    register_plugin_factory(
-        &mut registry,
-        &mut registered_plugin_ids,
-        PLUGIN_MARKDOWN_EDITOR,
-        Box::new(textora_markdown::view::MarkdownEditorViewFactory),
-    );
-    #[cfg(feature = "markdown")]
-    register_plugin_factory(
-        &mut registry,
-        &mut registered_plugin_ids,
-        PLUGIN_MARKDOWN_VIEW,
-        Box::new(textora_markdown::view::MarkdownViewFactory),
-    );
-    #[cfg(feature = "markdown")]
-    register_plugin_factory(
-        &mut registry,
-        &mut registered_plugin_ids,
-        PLUGIN_NOVEL_VIEW,
-        Box::new(textora_markdown::view::NovelViewFactory),
-    );
-
     let mut routes = Vec::new();
-    #[cfg(feature = "markdown")]
-    routes.extend([
-        ViewRouteRule {
-            matcher: ViewPathMatcher::FileNameSuffix(".mmap.md"),
-            default_plugin: PLUGIN_MINDMAP,
-            toggle_target: Some(PLUGIN_MARKDOWN_EDITOR),
-            priority: MINDMAP_ROUTE_PRIORITY,
-        },
-        ViewRouteRule {
-            matcher: ViewPathMatcher::Extension("md"),
-            default_plugin: PLUGIN_MARKDOWN_EDITOR,
-            toggle_target: Some(PLUGIN_EDITOR),
-            priority: MARKDOWN_ROUTE_PRIORITY,
-        },
-        ViewRouteRule {
-            matcher: ViewPathMatcher::Extension("markdown"),
-            default_plugin: PLUGIN_MARKDOWN_EDITOR,
-            toggle_target: Some(PLUGIN_EDITOR),
-            priority: MARKDOWN_LONG_EXTENSION_ROUTE_PRIORITY,
-        },
-        ViewRouteRule {
+    if edition.supports_markdown_views() {
+        #[cfg(feature = "markdown")]
+        {
+            register_plugin_factory(
+                &mut registry,
+                &mut registered_plugin_ids,
+                PLUGIN_MINDMAP,
+                Box::new(textora_mindmap::mindmap_view::MindmapPluginFactory),
+            );
+            register_plugin_factory(
+                &mut registry,
+                &mut registered_plugin_ids,
+                PLUGIN_MARKDOWN_EDITOR,
+                Box::new(textora_markdown::view::MarkdownEditorViewFactory),
+            );
+            register_plugin_factory(
+                &mut registry,
+                &mut registered_plugin_ids,
+                PLUGIN_MARKDOWN_VIEW,
+                Box::new(textora_markdown::view::MarkdownViewFactory),
+            );
+            register_plugin_factory(
+                &mut registry,
+                &mut registered_plugin_ids,
+                PLUGIN_NOVEL_VIEW,
+                Box::new(textora_markdown::view::NovelViewFactory),
+            );
+
+            routes.extend([
+                ViewRouteRule {
+                    matcher: ViewPathMatcher::FileNameSuffix(".mmap.md"),
+                    default_plugin: PLUGIN_MINDMAP,
+                    toggle_target: Some(PLUGIN_MARKDOWN_EDITOR),
+                    priority: MINDMAP_ROUTE_PRIORITY,
+                },
+                ViewRouteRule {
+                    matcher: ViewPathMatcher::Extension("md"),
+                    default_plugin: PLUGIN_MARKDOWN_EDITOR,
+                    toggle_target: Some(PLUGIN_EDITOR),
+                    priority: MARKDOWN_ROUTE_PRIORITY,
+                },
+                ViewRouteRule {
+                    matcher: ViewPathMatcher::Extension("markdown"),
+                    default_plugin: PLUGIN_MARKDOWN_EDITOR,
+                    toggle_target: Some(PLUGIN_EDITOR),
+                    priority: MARKDOWN_LONG_EXTENSION_ROUTE_PRIORITY,
+                },
+                ViewRouteRule {
+                    matcher: ViewPathMatcher::Extension("txt"),
+                    default_plugin: PLUGIN_EDITOR,
+                    toggle_target: Some(PLUGIN_NOVEL_VIEW),
+                    priority: TEXT_ROUTE_PRIORITY,
+                },
+            ]);
+        }
+    } else {
+        routes.push(ViewRouteRule {
             matcher: ViewPathMatcher::Extension("txt"),
             default_plugin: PLUGIN_EDITOR,
-            toggle_target: Some(PLUGIN_NOVEL_VIEW),
+            toggle_target: None,
             priority: TEXT_ROUTE_PRIORITY,
-        },
-    ]);
-    #[cfg(not(feature = "markdown"))]
-    routes.push(ViewRouteRule {
-        matcher: ViewPathMatcher::Extension("txt"),
-        default_plugin: PLUGIN_EDITOR,
-        toggle_target: None,
-        priority: TEXT_ROUTE_PRIORITY,
-    });
+        });
+    }
 
     let routes = ViewRouteTable::new(routes, &registered_plugin_ids)
         .expect("textora product routes must reference unique priorities and registered plugins");
@@ -143,7 +144,7 @@ fn product_editor_plugins() -> (ui::plugin::PluginRegistry, ViewRouteTable) {
 
 #[cfg(test)]
 pub(crate) fn build_product_workspace() -> EditorTabSet {
-    let (registry, routes) = product_editor_plugins();
+    let (registry, routes) = product_editor_plugins(Edition::Standard);
     EditorTabSet::with_plugins(registry, routes)
 }
 
@@ -151,8 +152,9 @@ pub(crate) fn build_product_editor_runtime(
     settings: ui::settings::Settings,
     theme: ui::Theme,
     snapshots_directory: &std::path::Path,
+    edition: Edition,
 ) -> Result<EditorRuntime, EditorRuntimeError> {
-    let (plugin_registry, view_routes) = product_editor_plugins();
+    let (plugin_registry, view_routes) = product_editor_plugins(edition);
     let mut runtime = EditorRuntime::new(EditorRuntimeConfig {
         plugin_registry,
         view_routes,
@@ -215,27 +217,44 @@ fn load_user_themes(
 
 impl App {
     pub fn new(file_path: Option<PathBuf>) -> Self {
-        Self::new_with_startup_mode(file_path, AppStartupMode::TestReady)
+        Self::new_with_startup_mode(file_path, AppStartupMode::TestReady, Edition::Standard)
     }
 
     pub fn new_for_launch(file_path: Option<PathBuf>) -> Self {
-        Self::new_with_startup_mode(file_path, AppStartupMode::LaunchParallel)
+        Self::new_for_edition(file_path, Edition::Standard)
     }
 
-    fn new_with_startup_mode(file_path: Option<PathBuf>, startup_mode: AppStartupMode) -> Self {
+    pub(crate) fn new_for_edition(file_path: Option<PathBuf>, edition: Edition) -> Self {
+        Self::new_with_startup_mode(file_path, AppStartupMode::LaunchParallel, edition)
+    }
+
+    fn new_with_startup_mode(
+        file_path: Option<PathBuf>,
+        startup_mode: AppStartupMode,
+        edition: Edition,
+    ) -> Self {
         let startup_started_at = std::time::Instant::now();
-        let home_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+        let home_dir = crate::product_paths::home_directory();
         let paths = ProductPaths::textora(&home_dir);
-        Self::new_with_product_paths(file_path, startup_mode, paths, startup_started_at)
+        Self::new_with_product_paths(file_path, startup_mode, paths, startup_started_at, edition)
     }
 
     #[cfg(test)]
     pub(crate) fn new_with_test_home(home_dir: &std::path::Path) -> Self {
+        Self::new_for_edition_with_test_home(home_dir, Edition::Standard)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_edition_with_test_home(
+        home_dir: &std::path::Path,
+        edition: Edition,
+    ) -> Self {
         Self::new_with_product_paths(
             None,
             AppStartupMode::TestReady,
             ProductPaths::textora(home_dir),
             std::time::Instant::now(),
+            edition,
         )
     }
 
@@ -244,6 +263,7 @@ impl App {
         startup_mode: AppStartupMode,
         paths: ProductPaths,
         startup_started_at: std::time::Instant,
+        edition: Edition,
     ) -> Self {
         // Load persisted settings from settings.toml (before FontSystem/worker creation
         // so that font shaping uses persisted settings rather than defaults).
@@ -289,7 +309,7 @@ impl App {
         let current_theme =
             settings_ui.resolve_theme(settings.theme_mode, winit::window::Theme::Dark);
         let mut editor_runtime =
-            build_product_editor_runtime(settings, current_theme, &paths.snapshots_dir)
+            build_product_editor_runtime(settings, current_theme, &paths.snapshots_dir, edition)
                 .expect("textora editor runtime must be constructible");
         if let Some(font_system) = ready_font_system {
             editor_runtime.set_shared_font_system(font_system);
@@ -302,13 +322,14 @@ impl App {
         let mut app = Self {
             paths,
             settings_ui,
-            product: crate::textora_product::TextoraProduct::new(),
+            product: crate::textora_product::TextoraProduct::for_edition(edition),
             action_pump: appkit_shell::EventPump::default(),
             editor_runtime,
             workspace_services,
             ui_shell: UiShell::new(),
             platform: PlatformState::new(file_path, startup_started_at, startup_font_preparation),
         };
+        app.ui_shell.set_plain_text_only(edition == Edition::Lite);
         app.ui_shell.set_sidebar_width_logical(persisted.sidebar_width);
         eprintln!("[startup] App::new total: {:?}", startup_started_at.elapsed());
         app
@@ -643,7 +664,7 @@ mod product_paths_tests {
     #[test]
     fn app_init_uses_product_paths_for_config_dir() {
         let temp_home = tempfile::tempdir().unwrap();
-        let config_dir = temp_home.path().join(".edit+");
+        let config_dir = ProductPaths::textora(temp_home.path()).config_dir;
         std::fs::create_dir_all(&config_dir).unwrap();
 
         std::fs::write(
@@ -676,5 +697,60 @@ excluded_dirs = []
 
         let workspace = app.workspace_services.store().load_workspace().unwrap();
         assert!(workspace.is_some());
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn lite_uses_shared_settings_and_restores_a_markdown_tab_as_source() {
+        let home = tempfile::tempdir().expect("temporary home must be writable");
+        let paths = ProductPaths::textora(home.path());
+        let settings = crate::settings_io::PersistedSettings {
+            font_size: 19.0,
+            theme_mode: ui::ThemeMode::Dark,
+            ..Default::default()
+        };
+        crate::settings_io::save(&paths.settings_file, &settings)
+            .expect("shared settings must be writable");
+        let document_path = home.path().join("shared.md");
+        std::fs::write(&document_path, "# Shared").expect("Markdown fixture must be writable");
+        let mut standard = App::new_with_test_home(home.path());
+        let _ =
+            standard.open_file(&document_path).expect("standard should open the shared document");
+        standard.persist_workspace_state();
+
+        let mut lite = App::new_for_edition_with_test_home(home.path(), Edition::Lite);
+        assert_eq!(lite.paths, standard.paths);
+        assert_eq!(lite.editor_runtime.settings().font_size, settings.font_size);
+        assert_eq!(lite.editor_runtime.settings().theme_mode, settings.theme_mode);
+        restore_saved_workspace(&mut lite);
+        assert_eq!(lite.active_plugin_name(), Some(ui::plugin::PLUGIN_EDITOR));
+        assert_eq!(lite.active_editor_toggle_target(), None);
+        assert_eq!(lite.active_editor_file_path().as_deref(), Some(document_path.as_path()));
+        lite.persist_workspace_state();
+
+        let mut reopened = App::new_with_test_home(home.path());
+        restore_saved_workspace(&mut reopened);
+        assert_eq!(reopened.active_plugin_name(), Some(ui::plugin::PLUGIN_MARKDOWN_EDITOR));
+    }
+
+    #[cfg(feature = "markdown")]
+    fn restore_saved_workspace(app: &mut App) {
+        let snapshot = app
+            .workspace_services
+            .store()
+            .load_workspace()
+            .expect("shared workspace must be readable")
+            .expect("shared workspace must exist");
+        crate::workspace_persistence::restore_workspace(
+            &mut app.editor_runtime,
+            snapshot,
+            crate::workspace_tab_factory::ViewportDimensions {
+                visible_rows: 20,
+                viewport_height: 320.0,
+            },
+            16.0,
+            &app.paths.snapshots_dir,
+        )
+        .expect("shared workspace must restore");
     }
 }
