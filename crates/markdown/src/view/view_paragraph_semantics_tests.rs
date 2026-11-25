@@ -28,6 +28,85 @@ fn paragraph_enter_adds_one_row_at_each_source_boundary() {
     assert!(violations.is_empty(), "one Enter must create one paragraph: {violations:#?}");
 }
 
+fn editable_empty_paragraph_count(source: &str) -> usize {
+    fn count(blocks: &[crate::builder::BlockNode]) -> usize {
+        blocks
+            .iter()
+            .map(|block| usize::from(block.is_editable_empty_paragraph()) + count(&block.children))
+            .sum()
+    }
+    let parsed = crate::parser::parse_markdown(source);
+    let doc = crate::builder::MarkdownDoc::build_for_editing(
+        &parsed,
+        &crate::test_utils::default_style(),
+        source,
+    );
+    count(&doc.blocks)
+}
+
+#[test]
+fn paragraph_enter_at_inline_breaks_adds_one_row_and_zero_empty_paragraphs() {
+    let user_paste = "不做浏览器插件。\nPDF阅读能力加强\n新建PDF的推荐模版有问题";
+    for cursor in ["不做浏览器插件。".len(), "不做浏览器插件。\n".len()] {
+        let mut view = MarkdownEditorView::new();
+        render_at(&mut view, user_paste, cursor, 1, 1.0);
+        let original_rows = rendered_row_count(&view);
+        let (entered, entered_cursor) = apply_edit(user_paste, cursor, AugmentKind::Enter);
+        assert_eq!(editable_empty_paragraph_count(&entered), 0, "{entered:?}");
+        render_at(&mut view, &entered, entered_cursor, 2, 1.0);
+        assert_eq!(rendered_row_count(&view), original_rows + 1, "{entered:?}");
+    }
+
+    for newline in ["\n", "\r\n"] {
+        for (source_pattern, offset) in [
+            ("left\nright", "left".len()),
+            ("left\nright", "left\n".len()),
+            ("left \n   right", "left".len()),
+            ("left  \nright", "left".len()),
+            ("left  \nright", "left ".len()),
+            ("left  \nright", "left  ".len()),
+            ("left\\\nright", "left".len()),
+            ("left<br>right", "left".len()),
+            ("left<br>\nright", "left".len()),
+        ] {
+            let source = source_pattern.replace('\n', newline);
+            let cursor = if source_pattern.contains('\n')
+                && offset > source_pattern.find('\n').unwrap_or(usize::MAX)
+            {
+                offset + newline.len() - 1
+            } else {
+                offset
+            };
+            let mut view = MarkdownEditorView::new();
+            render_at(&mut view, &source, cursor, 1, 1.0);
+            let original_rows = rendered_row_count(&view);
+            let (entered, entered_cursor) = apply_edit(&source, cursor, AugmentKind::Enter);
+            assert_eq!(editable_empty_paragraph_count(&entered), 0, "{source:?} -> {entered:?}");
+            render_at(&mut view, &entered, entered_cursor, 2, 1.0);
+            let expected_rows = if source_pattern.contains("  \n")
+                || source_pattern.contains("\\\n")
+                || source_pattern.contains("<br>")
+            {
+                original_rows
+            } else {
+                original_rows + 1
+            };
+            assert_eq!(rendered_row_count(&view), expected_rows, "{source:?} -> {entered:?}");
+        }
+    }
+
+    for (source, cursor) in
+        [("head\t\n\ntail", "head".len()), ("head\n\u{3000}\ntail", "head".len())]
+    {
+        let mut view = MarkdownEditorView::new();
+        render_at(&mut view, source, cursor, 1, 1.0);
+        let original_rows = rendered_row_count(&view);
+        let (entered, entered_cursor) = apply_edit(source, cursor, AugmentKind::Enter);
+        render_at(&mut view, &entered, entered_cursor, 2, 1.0);
+        assert_eq!(rendered_row_count(&view), original_rows + 1, "{source:?} -> {entered:?}");
+    }
+}
+
 #[test]
 fn paragraph_enter_at_document_start_adds_only_one_empty_row() {
     for source in ["head", "段落", "head\n\ntail"] {

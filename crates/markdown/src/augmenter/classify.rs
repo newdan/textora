@@ -1005,7 +1005,13 @@ fn classify_top_level_paragraph(
     }
     let start = range.start;
     let end = content_end_without_trailing_newline(source, range);
-    if current_byte == end {
+    if current_byte == end
+        || (current_byte > start
+            && current_byte < end
+            && source
+                .get(current_byte..end)
+                .is_some_and(|suffix| suffix.bytes().all(|byte| matches!(byte, b' ' | b'\t'))))
+    {
         return Some(EnterContext::TopLevelParagraphEnd);
     }
     if is_visible_content_start(source, start, current_byte) {

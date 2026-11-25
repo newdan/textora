@@ -80,14 +80,14 @@ pub(in crate::augmenter) fn block_break_newline_count(
         return BLOCK_BOUNDARY_NEWLINE_COUNT;
     };
     let next_line_start = current_byte + newline_width;
-    if blank_source_line_width(source, next_line_start).is_none() {
-        return BLOCK_BOUNDARY_NEWLINE_COUNT;
-    }
     let document = source.structure();
     let paragraphs = crate::builder::EditableParagraphMap::from_blocks(&document.blocks, source);
     let Some(run) = paragraphs.run_at_byte(next_line_start) else {
         return BLOCK_BOUNDARY_NEWLINE_COUNT;
     };
+    if run.lines.first().is_none_or(|line| line.source_range.start != next_line_start) {
+        return BLOCK_BOUNDARY_NEWLINE_COUNT;
+    }
     let separator_becomes_hidden = run.has_preceding_block && run.hidden_separator_count == 0;
     1 + usize::from(separator_becomes_hidden)
 }
@@ -429,6 +429,202 @@ pub(in crate::augmenter) fn guard_unmergeable_leaf_boundary(
     };
     debug_assert_augmentation(&aug, source);
     Some(aug)
+}
+
+pub(in crate::augmenter) fn trailing_horizontal_whitespace_end(
+    source: &str,
+    current_byte: usize,
+) -> usize {
+    let Some((_, _, line_end)) = locate_source_line_bounds(source, current_byte) else {
+        return current_byte;
+    };
+    let content_end = source_line_content_end(source, line_end);
+    if current_byte <= content_end
+        && source
+            .get(current_byte..content_end)
+            .is_some_and(|suffix| suffix.bytes().all(|byte| matches!(byte, b' ' | b'\t')))
+    {
+        content_end
+    } else {
+        current_byte
+    }
+}
+
+pub(in crate::augmenter) fn inline_break_raw_span_at_cursor(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+) -> Option<std::ops::Range<usize>> {
+    if let Some(span) = ast_inline_break_raw_span(source, current_byte) {
+        return Some(span);
+    }
+    let boundary = hard_break_boundary_after(source, current_byte)?;
+    let is_terminal_or_inline = boundary.end == source.len()
+        || !crate::builder::EditableParagraphMap::from_blocks(&source.structure().blocks, source)
+            .run_at_byte(boundary.end)
+            .is_some_and(|run| {
+                run.lines.first().is_some_and(|line| line.source_range.start == boundary.end)
+            });
+    is_terminal_or_inline.then_some(boundary)
+}
+
+pub(in crate::augmenter) fn inline_break_span_at_cursor(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+) -> Option<std::ops::Range<usize>> {
+    let mut best: Option<std::ops::Range<usize>> = None;
+    let parsed = source.parsed();
+    let events = &parsed.events;
+    let ranges = &parsed.event_ranges;
+
+    let mut index = 0;
+    while index < events.len() {
+        let Some(range) = ranges.get(index) else {
+            break;
+        };
+        let mut span = match &events[index] {
+            MarkdownEvent::SoftBreak => {
+                let start = absorb_preceding_line_horizontal_whitespace(source, range.start);
+                let end = absorb_following_line_horizontal_whitespace(source, range.end);
+                start..end
+            }
+            MarkdownEvent::HardBreak => {
+                let end = absorb_following_line_horizontal_whitespace(source, range.end);
+                range.start..end
+            }
+            MarkdownEvent::InlineHtml(_)
+                if parsed.inline_html_break_starting_at(range.start) == Some(range.clone()) =>
+            {
+                let mut end = range.end;
+                if let Some((next_idx, next_end)) =
+                    merged_break_trailing_soft_break(source, events, ranges, index)
+                {
+                    end = absorb_following_line_horizontal_whitespace(source, next_end);
+                    index = next_idx;
+                }
+                range.start..end
+            }
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        if span.end < source.len() && line_starts_new_sibling_block(source, span.end) {
+            span.end = range_end_without_following_indent(source, range.end, span.end);
+        }
+        if span.start <= current_byte && current_byte <= span.end {
+            best = Some(span);
+            break;
+        }
+        index += 1;
+    }
+
+    if best.is_some() {
+        return best;
+    }
+
+    let boundary = hard_break_boundary_after(source, current_byte)?;
+    let is_terminal_or_inline = boundary.end == source.len()
+        || !crate::builder::EditableParagraphMap::from_blocks(&source.structure().blocks, source)
+            .run_at_byte(boundary.end)
+            .is_some_and(|run| {
+                run.lines.first().is_some_and(|line| line.source_range.start == boundary.end)
+            });
+    if !is_terminal_or_inline {
+        return None;
+    }
+    let end = absorb_following_line_horizontal_whitespace(source, boundary.end);
+    Some(boundary.start..end)
+}
+
+fn ast_inline_break_raw_span(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+) -> Option<std::ops::Range<usize>> {
+    let parsed = source.parsed();
+    let events = &parsed.events;
+    let ranges = &parsed.event_ranges;
+
+    let mut index = 0;
+    while index < events.len() {
+        let Some(range) = ranges.get(index) else {
+            break;
+        };
+        let span = match &events[index] {
+            MarkdownEvent::SoftBreak => {
+                let start = absorb_preceding_line_horizontal_whitespace(source, range.start);
+                start..range.end
+            }
+            MarkdownEvent::HardBreak => range.clone(),
+            MarkdownEvent::InlineHtml(_)
+                if parsed.inline_html_break_starting_at(range.start) == Some(range.clone()) =>
+            {
+                let mut end = range.end;
+                if let Some((next_idx, next_end)) =
+                    merged_break_trailing_soft_break(source, events, ranges, index)
+                {
+                    end = next_end;
+                    index = next_idx;
+                }
+                range.start..end
+            }
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        if span.start <= current_byte && current_byte <= span.end {
+            return Some(span);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn merged_break_trailing_soft_break(
+    source: &str,
+    events: &[MarkdownEvent],
+    ranges: &[std::ops::Range<usize>],
+    html_index: usize,
+) -> Option<(usize, usize)> {
+    let html_end = ranges.get(html_index)?.end;
+    let next_idx = html_index + 1;
+    if !matches!(events.get(next_idx), Some(MarkdownEvent::SoftBreak)) {
+        return None;
+    }
+    let next_range = ranges.get(next_idx)?;
+    if next_range.start >= html_end
+        && source
+            .get(html_end..next_range.start)
+            .is_some_and(|gap| gap.bytes().all(|byte| matches!(byte, b' ' | b'\t')))
+    {
+        Some((next_idx, next_range.end))
+    } else {
+        None
+    }
+}
+
+fn absorb_preceding_line_horizontal_whitespace(source: &str, byte: usize) -> usize {
+    let Some((line_start, _, _)) = locate_source_line_bounds(source, byte) else {
+        return byte;
+    };
+    let ws_width =
+        source[line_start..byte].bytes().rev().take_while(|b| matches!(b, b' ' | b'\t')).count();
+    byte - ws_width
+}
+
+fn absorb_following_line_horizontal_whitespace(source: &str, byte: usize) -> usize {
+    let ws_width = source
+        .get(byte..)
+        .map_or(0, |suffix| suffix.bytes().take_while(|b| matches!(b, b' ' | b'\t')).count());
+    byte + ws_width
+}
+
+fn range_end_without_following_indent(source: &str, raw_end: usize, absorbed_end: usize) -> usize {
+    if raw_end <= absorbed_end && line_starts_new_sibling_block(source, raw_end) {
+        raw_end
+    } else {
+        absorbed_end
+    }
 }
 
 pub(in crate::augmenter) fn matching_hard_break_boundary_before(

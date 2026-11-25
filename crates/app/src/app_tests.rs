@@ -4046,7 +4046,7 @@ fn wysiwyg_paragraph_end_before_existing_newline_typing_stays_in_new_paragraph()
 #[test]
 #[cfg(feature = "markdown")]
 fn wysiwyg_paragraph_end_enter_then_typing_keeps_following_line_below() {
-    let source = "hello\nnext";
+    let source = "hello\n\nnext";
     let paragraph_end = "hello".len();
     let mut app = App::new(None);
     let mut doc =
@@ -4063,6 +4063,12 @@ fn wysiwyg_paragraph_end_enter_then_typing_keeps_following_line_below() {
     render_active_wysiwyg_plugin_for_test(&mut app);
 
     {
+        let tab = app.active_tab_session().expect("active entry");
+        assert_eq!(tab.document().full_text(), "hello\n\n\nnext");
+        assert_eq!(tab.document().cursor_offset().to_usize(), "hello\n\n".len());
+    }
+
+    {
         let mut tab = app.active_tab_session_mut().expect("active entry");
         tab.document_mut().insert_at_cursor(b"X");
     }
@@ -4073,6 +4079,45 @@ fn wysiwyg_paragraph_end_enter_then_typing_keeps_following_line_below() {
         "hello\n\nX\nnext",
         "typing on the new paragraph line must not pull the following source line upward"
     );
+}
+
+#[test]
+#[cfg(feature = "markdown")]
+fn wysiwyg_soft_break_enter_splits_into_two_paragraphs_without_extra_empty_line() {
+    let source = "hello\nnext";
+    let soft_break = "hello".len();
+    let mut app = App::new(None);
+    let mut doc =
+        DocumentFixture::new(source.split('\n').map(|line| line.to_string()).collect(), 80, 10.0);
+    doc.cursor_move_to_offset(soft_break);
+    app.push_entry_for_test(doc, Box::new(textora_markdown::view::MarkdownEditorView::new()));
+    app.switch_workspace_for_test(0);
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+
+    let enter_effect = app.dispatch_transactional_edit_for_test(EditCommand::InsertNewline);
+    assert!(enter_effect.redraw, "soft-break Enter should redraw WYSIWYG content");
+    app.sync_plugin_state();
+    render_active_wysiwyg_plugin_for_test(&mut app);
+
+    {
+        let tab = app.active_tab_session().expect("active entry");
+        assert_eq!(tab.document().full_text(), "hello\n\nnext");
+        assert_eq!(tab.document().cursor_offset().to_usize(), "hello\n\n".len());
+    }
+
+    {
+        let mut tab = app.active_tab_session_mut().expect("active entry");
+        tab.document_mut().insert_at_cursor(b"X");
+    }
+
+    let tab = app.active_tab_session().expect("active entry");
+    assert_eq!(
+        tab.document().full_text(),
+        "hello\n\nXnext",
+        "typing at the start of the split paragraph should stay inline without an extra blank paragraph"
+    );
+    assert_eq!(tab.document().cursor_offset().to_usize(), "hello\n\nX".len());
 }
 
 #[cfg(feature = "markdown")]

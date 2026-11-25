@@ -8,8 +8,11 @@ pub(in crate::augmenter) fn enter_context_augmentation(
     context: EnterContext,
 ) -> Option<EditAugmentation> {
     match context {
-        EnterContext::TopLevelParagraphEnd | EnterContext::ParagraphInterior => {
-            Some(paragraph_enter_augmentation(source, current_byte))
+        EnterContext::TopLevelParagraphEnd => {
+            Some(paragraph_enter_augmentation(source, current_byte, true))
+        }
+        EnterContext::ParagraphInterior => {
+            Some(paragraph_enter_augmentation(source, current_byte, false))
         }
         EnterContext::ParagraphStart { insert_at } => {
             Some(emit_paragraph_before(source, current_byte, insert_at, ""))
@@ -100,22 +103,23 @@ pub(in crate::augmenter) fn enter_context_augmentation(
 pub(in crate::augmenter) fn paragraph_enter_augmentation(
     source: &MarkdownSource<'_>,
     current_byte: usize,
+    at_paragraph_end: bool,
 ) -> EditAugmentation {
-    if let Some(boundary) = hard_break_boundary_after(source, current_byte) {
-        return emit_block_break_replacing(source, boundary);
-    }
-    if let Some(boundary) = hard_break_boundary_before(source, current_byte) {
-        return emit_block_break_replacing(source, boundary);
+    if let Some(boundary) = inline_break_span_at_cursor(source, current_byte) {
+        let split_at = boundary.start;
+        let augmentation = emit_block_break_replacing(source, boundary);
+        return preserve_inline_elements_at_split(source, split_at, augmentation);
     }
 
-    // 段尾/段中：Typora 语义 = 切两半（`\n\n`）；跨已有 `\n` 时用
-    // emit_block_break 保留光标下方的原源码行。
-    if cursor_touches_source_newline(source, current_byte) {
-        if newline_sequence_width_at(source, current_byte).is_some() {
-            return emit_block_break(source, current_byte);
-        }
-        return emit_source_newline(source, current_byte);
+    if at_paragraph_end {
+        let insert_at = trailing_horizontal_whitespace_end(source, current_byte);
+        return if insert_at == current_byte {
+            emit_block_break(source, current_byte)
+        } else {
+            emit_block_break_at(source, insert_at)
+        };
     }
+
     let split_at = reversible_split_point(source, current_byte);
     let augmentation = if split_at == current_byte {
         emit_block_break(source, current_byte)
@@ -282,16 +286,13 @@ fn base_list_item_enter_augmentation(
         return emit_replace_current_line(source, current_byte, indent);
     }
 
-    if let Some(boundary) = hard_break_boundary_after(source, current_byte) {
-        let replaced =
-            extend_range_over_prefix_or_indent(source, boundary, continuation_content_prefix);
-        return Some(emit_marker_break_replacing(source, replaced, indent, continuation_marker));
-    }
-    if let Some(boundary) = hard_break_boundary_before(source, current_byte)
-        && let Some((line_start, _, _)) = locate_snapshot_line_bounds(source, current_byte)
-        && !next_source_line_has_list_marker(source, line_start, indent)
+    if let Some(boundary) =
+        list_inline_break_span(source, current_byte, indent, continuation_content_prefix)
     {
-        return Some(emit_marker_break_replacing(source, boundary, indent, continuation_marker));
+        let split_at = boundary.start;
+        let augmentation =
+            emit_marker_break_replacing(source, boundary, indent, continuation_marker);
+        return Some(preserve_inline_elements_at_split(source, split_at, augmentation));
     }
 
     if let Some(newline_width) = newline_sequence_width_at(source, current_byte) {
@@ -331,6 +332,45 @@ fn base_list_item_enter_augmentation(
         emit_marker_break_at(source, split_at, indent, continuation_marker)
     };
     Some(preserve_inline_elements_at_split(source, split_at, augmentation))
+}
+
+fn list_inline_break_span(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+    indent: &str,
+    continuation_content_prefix: &str,
+) -> Option<std::ops::Range<usize>> {
+    if let Some(raw_span) = inline_break_raw_span_at_cursor(source, current_byte) {
+        if is_only_blank_separator_before_content(source, raw_span.end)
+            || next_source_line_has_list_marker(source, raw_span.end, indent)
+        {
+            return None;
+        }
+        return Some(extend_range_over_prefix_or_indent(
+            source,
+            raw_span,
+            continuation_content_prefix,
+        ));
+    }
+    let prefix_start = source.get(..current_byte).and_then(|before| {
+        before.strip_suffix(continuation_content_prefix).map(|prefix| prefix.len()).or_else(|| {
+            let line_start = locate_snapshot_line_bounds(source, current_byte)?.0;
+            source[line_start..current_byte]
+                .bytes()
+                .all(|byte| matches!(byte, b' ' | b'\t'))
+                .then_some(line_start)
+        })
+    });
+    if let Some(line_start) = prefix_start
+        && let Some(raw_span) = inline_break_raw_span_at_cursor(source, line_start)
+        && !is_only_blank_separator_before_content(source, raw_span.end)
+        && !next_source_line_has_list_marker(source, raw_span.end, indent)
+    {
+        return Some(raw_span.start..current_byte);
+    }
+    let boundary = hard_break_boundary_before(source, current_byte)?;
+    let (line_start, _, _) = locate_snapshot_line_bounds(source, current_byte)?;
+    (!next_source_line_has_list_marker(source, line_start, indent)).then_some(boundary)
 }
 
 fn renumber_following_ordered_siblings(
@@ -538,12 +578,13 @@ pub(in crate::augmenter) fn blockquote_enter_augmentation(
         return emit_replace_current_line(source, current_byte, empty_parent_prefix);
     }
 
-    if let Some(boundary) = hard_break_boundary_after(source, current_byte) {
-        let replaced = extend_range_over_prefix_or_indent(source, boundary, continuation_prefix);
-        return Some(emit_marker_break_replacing(source, replaced, "", continuation_prefix));
-    }
-    if let Some(boundary) = hard_break_boundary_before(source, current_byte) {
-        return Some(emit_marker_break_replacing(source, boundary, "", continuation_prefix));
+    if let Some(boundary) = blockquote_inline_break_span(source, current_byte, continuation_prefix)
+    {
+        let split_at = boundary.start;
+        let paragraph_break =
+            blockquote_paragraph_break_marker(source, split_at, continuation_prefix);
+        let augmentation = emit_marker_break_replacing(source, boundary, "", &paragraph_break);
+        return Some(preserve_inline_elements_at_split(source, split_at, augmentation));
     }
 
     if let Some(newline_width) = newline_sequence_width_at(source, current_byte) {
@@ -571,9 +612,7 @@ pub(in crate::augmenter) fn blockquote_enter_augmentation(
 
     let split_at = reversible_split_point(source, current_byte);
     let marker = if is_blockquote_mid_line_split(source, split_at) {
-        let newline = preferred_newline_sequence(source, split_at);
-        let separator = continuation_prefix.trim_end_matches([' ', '\t']);
-        format!("{separator}{newline}{continuation_prefix}")
+        blockquote_paragraph_break_marker(source, split_at, continuation_prefix)
     } else {
         continuation_prefix.to_owned()
     };
@@ -583,6 +622,62 @@ pub(in crate::augmenter) fn blockquote_enter_augmentation(
         emit_marker_break_at(source, split_at, "", &marker)
     };
     Some(preserve_inline_elements_at_split(source, split_at, augmentation))
+}
+
+fn blockquote_paragraph_break_marker(
+    source: &str,
+    split_at: usize,
+    continuation_prefix: &str,
+) -> String {
+    let newline = preferred_newline_sequence(source, split_at);
+    let separator = continuation_prefix.trim_end_matches([' ', '\t']);
+    format!("{separator}{newline}{continuation_prefix}")
+}
+
+fn blockquote_inline_break_span(
+    source: &MarkdownSource<'_>,
+    current_byte: usize,
+    continuation_prefix: &str,
+) -> Option<std::ops::Range<usize>> {
+    let separator = continuation_prefix.trim_end_matches([' ', '\t']);
+    let extend_quote = |range: std::ops::Range<usize>| {
+        let extended = extend_range_over_prefix(source, range.clone(), continuation_prefix);
+        if extended.end > range.end {
+            return extended;
+        }
+        if !separator.is_empty()
+            && source.get(range.end..).is_some_and(|s| s.starts_with(separator))
+        {
+            return range.start..range.end + separator.len();
+        }
+        extend_range_over_prefix_or_indent(source, range, continuation_prefix)
+    };
+    if let Some(raw_span) = inline_break_raw_span_at_cursor(source, current_byte) {
+        return Some(extend_quote(raw_span));
+    }
+    let after_quote_prefix = source.get(..current_byte).and_then(|before| {
+        before
+            .strip_suffix(continuation_prefix)
+            .map(|prefix| prefix.len())
+            .or_else(|| {
+                (!separator.is_empty())
+                    .then(|| before.strip_suffix(separator).map(|prefix| prefix.len()))
+                    .flatten()
+            })
+            .or_else(|| {
+                let line_start = locate_snapshot_line_bounds(source, current_byte)?.0;
+                source[line_start..current_byte]
+                    .bytes()
+                    .all(|byte| matches!(byte, b' ' | b'\t'))
+                    .then_some(line_start)
+            })
+    });
+    if let Some(line_start) = after_quote_prefix
+        && let Some(raw_span) = inline_break_raw_span_at_cursor(source, line_start)
+    {
+        return Some(raw_span.start..current_byte);
+    }
+    hard_break_boundary_before(source, current_byte)
 }
 
 fn is_blockquote_mid_line_split(source: &str, split_at: usize) -> bool {
@@ -930,12 +1025,4 @@ pub(in crate::augmenter) fn inline_code_wrapper_frame<'a>(
         closing,
         kind: InlineFrameKind::Code,
     })
-}
-
-pub(in crate::augmenter) fn cursor_touches_source_newline(
-    source: &str,
-    current_byte: usize,
-) -> bool {
-    newline_sequence_width_at(source, current_byte).is_some()
-        || newline_sequence_width_before(source, current_byte).is_some()
 }

@@ -22,21 +22,21 @@ WYSIWYG 编辑视图把 Enter 解释为“新段落”，而不是源码编辑�
 | 文首正文起点 | `|paragraph` | `\n|paragraph` | 只前插一个空段 |
 | 已有 EOF 空段 | `paragraph|\n` | `paragraph\n\n|\n` | 保留原尾空段，同时新建一段 |
 | 段落末尾 | `paragraph|` | `paragraph\n\n|` | 创建一个尾随空段 |
-| 已有软换行前 | `left|\nright` | `left\n\n|\nright` | 创建新段并保留下方原源码行 |
-| 已有软换行后 | `left\n|right` | `left\n\n|right` | 在当前点补一个 `\n` |
-| 下一块前的段尾 | `paragraph|\n\nnext` | `paragraph\n\n|\nnext` | 只新增一个可编辑空段 |
-| 标题内容起点 | `# |title` | `\n# |title` | 前插普通空段，原标题与光标内容起点保留 |
-| ATX 标题中部 | `# left|right` | `# left\n|right` | 前半保留标题，后半成为普通段落；不产生视觉空行 |
-| ATX 标题末尾 | `# title|` | `# title\n\n|` | 离开标题并创建普通空段 |
-| 标题与下一块仅一个换行 | `# title|\nnext` | `# title\n\n|\nnext` | 必须补两个换行，不能把光标送入 `next` |
-| 标题与下一块已有块分隔 | `# title|\n\nnext` | `# title\n\n|\nnext` | 只补一个换行，形成一个可编辑空段 |
-| 段内单空格前 | `left| right` | `left\n\n|right` | 吃掉那一个空格 |
-| 段内单空格后 | `left |right` | `left\n\n|right` | 同上 |
-| 列表硬换行边界 | `- first\|\n  second` | `- first\n- |second` | 不残留硬换行反斜杠或续行缩进 |
-| 列表懒延续换行 | `- item|\npara` | `- item\n- |para` | 替换该换行，不插入额外空行 |
-| 引用硬换行边界 | `> first\|\n> second` | `> first\n> |second` | 不残留硬换行反斜杠或重复引用 marker |
-| 引用懒延续换行 | `> first|\nsecond` | `> first\n> |second` | 后行补显式 `>` |
-| 引用行中部 | `> left|right` | `> left\n>\n> |right` | 在引用容器内拆成两个独立段落；行首/行尾与硬换行边界保持单行续写 `> ` |
+| 已有软换行前/后 | `left\|\nright` / `left\n\|right` | `left\n\n\|right` | 段内软换行统一规范化为两段，不额外生成空段 |
+| 段内硬换行（空格 / 反斜杠 / `<br>`） | `left\|  \nright` / `left\|\\\nright` / `left\|<br>right` | `left\n\n\|right` | 光标位于标记前、尾空格内或标记后均统一拆为两段 |
+| 下一块前的段尾 | `paragraph\|\n\nnext` | `paragraph\n\n\|\nnext` | 只新增一个可编辑空段（块尾空白与全角空行以 `EditableParagraphMap` 为准） |
+| 标题内容起点 | `# \|title` | `\n# \|title` | 前插普通空段，原标题与光标内容起点保留 |
+| ATX 标题中部 | `# left\|right` | `# left\n\|right` | 前半保留标题，后半成为普通段落；不产生视觉空行 |
+| ATX 标题末尾 | `# title\|` | `# title\n\n\|` | 离开标题并创建普通空段 |
+| 标题与下一块仅一个换行 | `# title\|\nnext` | `# title\n\n\|\nnext` | 必须补两个换行，不能把光标送入 `next` |
+| 标题与下一块已有块分隔 | `# title\|\n\nnext` | `# title\n\n\|\nnext` | 只补一个换行，形成一个可编辑空段 |
+| 段内单空格前 | `left\| right` | `left\n\n\|right` | 吃掉那一个空格 |
+| 段内单空格后 | `left \|right` | `left\n\n\|right` | 同上 |
+| 列表硬换行边界 | `- first\|\n  second` | `- first\n- \|second` | 不残留硬换行反斜杠、`<br>` 或续行缩进 |
+| 列表懒延续换行 | `- item\|\npara` | `- item\n- \|para` | 替换该换行，不插入额外空行 |
+| 引用段内软/硬换行边界 | `> first\|\n> second` / `> first\|\\\n> second` / `> first\|<br>> second` | `> first\n>\n> \|second` | 方案 A：统一在引用容器内拆成两段，不产生隐藏分隔死区或残留反斜杠/`<br>` |
+| 引用懒延续换行 | `> first\|\nsecond` | `> first\n>\n> \|second` | 拆成两段并补显式 `>` |
+| 引用行中部与段尾 | `> left\|right` / `> first\|` | `> left\n>\n> \|right` / `> first\n> \|` | 行中拆成引用内两段；行尾新建空引用行，再 Enter 退出引用 |
 | 有序列表增删项 | `1. first|\n2. second` / 空项 `2. |` 退出 | 新增 `2. ` 并顺延为 `3. second`（空项退出则前移为 `2. second`） | 在单个替换内同步重排同一父列表下后续同级编号，保留 `.` / `)` 与容器/CRLF |
 | 表格非末行 | 格内 | 源码不变，光标到下一行同列 | 保持既有跳格行为 |
 | 表格末行有内容 | `| b |` 内 | 表末多一行 `|  |` | 列数与当前行相同 |
@@ -105,7 +105,7 @@ CRLF 文档中的一个逻辑换行是完整的 `\r\n` 序列。Backspace 删除
 ## 实现约束
 
 1. Enter 先按 Markdown 块上下文分类，再生成一次原子 replacement。
-2. 光标位于已有软换行前时，新段必须插在当前行与原下方行之间，不能把后续输入拼到原下方行开头。
+2. 段内软换行、反斜杠/双空格硬换行与 `<br>` 统一通过 AST 段内断点识别升级为单个块边界（`left\n\n|right`），不额外产生空段；引用块内按同样语义拆为两段（`> left\n>\n> |right`）。
 3. 标题解析事件的范围可能包含行尾换行；标题命中范围必须截止到真实标题内容末端。
 4. 段首 Backspace 与段尾 Delete 优先删除最近的可编辑空段；没有空段时才合并完整结构边界。
 5. 空行 Backspace、段首 Backspace、单字符删除和 marker 删除必须按此优先级分派，避免 marker 行被误并入上一块。

@@ -1241,7 +1241,7 @@ mod wysiwyg_tests {
     }
 
     #[test]
-    fn augment_edit_softbreak_boundary_before_newline_inserts_source_newline() {
+    fn augment_edit_softbreak_boundary_before_newline_splits_without_extra_empty_line() {
         let source = "first line\nsecond line";
         let softbreak_byte = "first line".len();
         let mut view = MarkdownEditorView::new();
@@ -1250,21 +1250,22 @@ mod wysiwyg_tests {
 
         let aug = view.engine.augment_edit(softbreak_byte, AugmentKind::Enter).unwrap();
 
+        assert_eq!(aug.replace_range, Some(softbreak_byte..softbreak_byte + 1));
         assert_eq!(aug.insert_text.as_deref(), Some("\n\n"));
         assert_eq!(aug.cursor_byte_after, softbreak_byte + 2);
 
         let mut edited_source = source.to_owned();
         edited_source.replace_range(
-            softbreak_byte..softbreak_byte,
+            aug.replace_range.unwrap_or(softbreak_byte..softbreak_byte),
             aug.insert_text
                 .as_deref()
-                .expect("paragraph Enter before a soft break must insert a block break"),
+                .expect("paragraph Enter before a soft break must replace it with a block break"),
         );
-        assert_eq!(edited_source, "first line\n\n\nsecond line");
+        assert_eq!(edited_source, "first line\n\nsecond line");
     }
 
     #[test]
-    fn augment_edit_softbreak_boundary_after_newline_inserts_source_newline() {
+    fn augment_edit_softbreak_boundary_after_newline_splits_without_extra_empty_line() {
         let source = "first line\nsecond line";
         let second_line_start = "first line\n".len();
         let mut view = MarkdownEditorView::new();
@@ -1273,7 +1274,8 @@ mod wysiwyg_tests {
 
         let aug = view.engine.augment_edit(second_line_start, AugmentKind::Enter).unwrap();
 
-        assert_eq!(aug.insert_text.as_deref(), Some("\n"));
+        assert_eq!(aug.replace_range, Some(second_line_start - 1..second_line_start));
+        assert_eq!(aug.insert_text.as_deref(), Some("\n\n"));
         assert_eq!(aug.cursor_byte_after, second_line_start + 1);
     }
 

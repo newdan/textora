@@ -721,7 +721,7 @@ fn enter_after_top_level_horizontal_rule_creates_editable_paragraph() {
 }
 
 #[test]
-fn paragraph_enter_before_soft_break_preserves_following_source_line() {
+fn paragraph_enter_before_soft_break_splits_without_extra_empty_paragraph() {
     let source = "first line\nsecond line";
     let current_byte = "first line".len();
 
@@ -730,12 +730,12 @@ fn paragraph_enter_before_soft_break_preserves_following_source_line() {
     let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
     assert_eq!(augmentation.insert_text.as_deref(), Some("\n\n"));
-    assert_eq!(augmentation.cursor_byte_after, current_byte + 2);
-    assert_eq!(edited_source, "first line\n\n\nsecond line");
+    assert_eq!(augmentation.cursor_byte_after, "first line\n\n".len());
+    assert_eq!(edited_source, "first line\n\nsecond line");
 }
 
 #[test]
-fn paragraph_enter_before_crlf_soft_break_preserves_crlf_line_endings() {
+fn paragraph_enter_before_crlf_soft_break_splits_without_extra_empty_paragraph() {
     let source = "first line\r\nsecond line";
     let current_byte = "first line".len();
 
@@ -744,8 +744,91 @@ fn paragraph_enter_before_crlf_soft_break_preserves_crlf_line_endings() {
     let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
     assert_eq!(augmentation.insert_text.as_deref(), Some("\r\n\r\n"));
-    assert_eq!(augmentation.cursor_byte_after, current_byte + 4);
-    assert_eq!(edited_source, "first line\r\n\r\n\r\nsecond line");
+    assert_eq!(augmentation.cursor_byte_after, "first line\r\n\r\n".len());
+    assert_eq!(edited_source, "first line\r\n\r\nsecond line");
+}
+
+#[test]
+fn paragraph_enter_at_soft_and_hard_breaks_normalizes_without_extra_empty_paragraphs() {
+    let multiline_paste = "不做浏览器插件。\nPDF阅读能力加强\n新建PDF的推荐模版有问题";
+    for cursor in ["不做浏览器插件。".len(), "不做浏览器插件。\n".len()] {
+        let augmentation = augment_edit(multiline_paste, cursor, AugmentKind::Enter)
+            .expect("Enter at soft break should split into two paragraphs");
+        assert_eq!(
+            apply_augmentation_at(multiline_paste, cursor, &augmentation),
+            "不做浏览器插件。\n\nPDF阅读能力加强\n新建PDF的推荐模版有问题"
+        );
+        assert_eq!(augmentation.cursor_byte_after, "不做浏览器插件。\n\n".len());
+    }
+
+    let padded_soft = "first \n   second";
+    for offset in 0..=" \n   ".len() {
+        let cursor = "first".len() + offset;
+        let augmentation = augment_edit(padded_soft, cursor, AugmentKind::Enter)
+            .expect("Enter inside soft break whitespace must normalize to one boundary");
+        assert_eq!(apply_augmentation_at(padded_soft, cursor, &augmentation), "first\n\nsecond");
+        assert_eq!(augmentation.cursor_byte_after, "first\n\n".len());
+    }
+
+    let double_space = "first  \nsecond";
+    for cursor in 5..=8 {
+        let augmentation = augment_edit(double_space, cursor, AugmentKind::Enter)
+            .expect("Enter anywhere in double-space hard break must split cleanly");
+        assert_eq!(apply_augmentation_at(double_space, cursor, &augmentation), "first\n\nsecond");
+        assert_eq!(augmentation.cursor_byte_after, "first\n\n".len());
+    }
+
+    for html_source in ["first<br>second", "first<br />second", "first<br>\nsecond"] {
+        let before = "first".len();
+        let after = html_source.find("second").expect("fixture contains second");
+        for cursor in [before, after] {
+            let augmentation = augment_edit(html_source, cursor, AugmentKind::Enter)
+                .expect("Enter around <br> must split into two paragraphs");
+            assert_eq!(
+                apply_augmentation_at(html_source, cursor, &augmentation),
+                "first\n\nsecond",
+                "source={html_source:?}, cursor={cursor}"
+            );
+            assert_eq!(augmentation.cursor_byte_after, "first\n\n".len());
+        }
+    }
+
+    for styled in ["**first\nsecond**", "**first  \nsecond**", "**first<br>second**"] {
+        let cursor = "first".len() + 2;
+        let augmentation = augment_edit(styled, cursor, AugmentKind::Enter)
+            .expect("Enter at break inside strong span must close and reopen markers");
+        assert_eq!(
+            apply_augmentation_at(styled, cursor, &augmentation),
+            "**first**\n\n**second**",
+            "styled={styled:?}"
+        );
+        assert_eq!(augmentation.cursor_byte_after, "**first**\n\n**".len());
+    }
+
+    let fullwidth_blank = "a\n\u{3000}\nb";
+    let augmentation = augment_edit(fullwidth_blank, 1, AugmentKind::Enter)
+        .expect("Enter before fullwidth blank separator must reuse existing separator");
+    assert_eq!(apply_augmentation_at(fullwidth_blank, 1, &augmentation), "a\n\n\u{3000}\nb");
+    assert_eq!(augmentation.cursor_byte_after, 3);
+}
+
+#[test]
+fn list_enter_promotes_html_break_and_double_space_interior_to_sibling_item() {
+    for source in ["- first<br>second", "- first<br />\n  second", "- first  \n  second"] {
+        let before = "- first".len();
+        let after = source.find("second").expect("fixture contains second");
+        let mid_range = if source.contains("  \n") { before..=before + 3 } else { before..=before };
+        for cursor in mid_range.chain(std::iter::once(after)) {
+            let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+                .expect("Enter at list inline break should create sibling item");
+            assert_eq!(
+                apply_augmentation_at(source, cursor, &augmentation),
+                "- first\n- second",
+                "source={source:?}, cursor={cursor}"
+            );
+            assert_eq!(augmentation.cursor_byte_after, "- first\n- ".len());
+        }
+    }
 }
 
 #[test]
@@ -1781,16 +1864,16 @@ fn list_enter_at_double_space_hard_break_promotes_it_to_a_new_item() {
 }
 
 #[test]
-fn quote_enter_at_backslash_hard_break_promotes_it_to_an_explicit_line() {
+fn quote_enter_at_backslash_hard_break_splits_into_two_paragraphs() {
     let source = "> first\\\n> second";
     let current_byte = "> first".len();
 
     let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
-        .expect("Enter at a quote hard break should continue with an explicit marker");
+        .expect("Enter at a quote hard break should split into two quote paragraphs");
     let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
-    assert_eq!(edited_source, "> first\n> second");
-    assert_eq!(augmentation.cursor_byte_after, "> first\n> ".len());
+    assert_eq!(edited_source, "> first\n>\n> second");
+    assert_eq!(augmentation.cursor_byte_after, "> first\n>\n> ".len());
 }
 
 #[test]
@@ -1802,7 +1885,8 @@ fn quote_enter_at_crlf_hard_break_keeps_crlf_line_endings() {
         .expect("Enter at a CRLF quote hard break should keep CRLF");
     let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
-    assert_eq!(edited_source, "> first\r\n> second");
+    assert_eq!(edited_source, "> first\r\n>\r\n> second");
+    assert_eq!(augmentation.cursor_byte_after, "> first\r\n>\r\n> ".len());
 }
 
 #[test]
@@ -1940,29 +2024,75 @@ fn list_enter_after_lazy_continuation_newline_prefixes_the_following_line() {
 }
 
 #[test]
-fn quote_enter_at_lazy_continuation_newline_inserts_an_explicit_marker() {
+fn quote_enter_at_lazy_continuation_newline_splits_into_two_quote_paragraphs() {
     let source = "> first\nsecond";
     let current_byte = "> first".len();
 
     let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
-        .expect("Enter on a lazy quote newline should add an explicit marker");
+        .expect("Enter on a lazy quote newline should split into two explicit paragraphs");
     let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
-    assert_eq!(edited_source, "> first\n> second");
-    assert_eq!(augmentation.cursor_byte_after, "> first\n> ".len());
+    assert_eq!(edited_source, "> first\n>\n> second");
+    assert_eq!(augmentation.cursor_byte_after, "> first\n>\n> ".len());
 }
 
 #[test]
-fn quote_enter_between_explicit_lines_still_inserts_a_quote_line() {
+fn quote_enter_between_explicit_lines_splits_into_two_quote_paragraphs() {
     let source = "> first\n> second";
     let current_byte = "> first".len();
 
     let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
-        .expect("Enter between explicit quote lines should insert a quoted line");
+        .expect("Enter between explicit quote lines should split into two quote paragraphs");
     let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
-    assert_eq!(edited_source, "> first\n> \n> second");
-    assert_eq!(augmentation.cursor_byte_after, "> first\n> ".len());
+    assert_eq!(edited_source, "> first\n>\n> second");
+    assert_eq!(augmentation.cursor_byte_after, "> first\n>\n> ".len());
+}
+
+#[test]
+fn quote_enter_at_inline_breaks_and_paragraph_ends_preserves_quote_semantics() {
+    for source in ["> first<br>> second", "> first<br>\n> second", "> first  \n> second"] {
+        let before = "> first".len();
+        let after = source.find("second").expect("fixture contains second");
+        let mid = if source.contains("  \n") {
+            vec![before, before + 1, before + 2, after]
+        } else {
+            vec![before, after]
+        };
+        for cursor in mid {
+            let augmentation = augment_edit(source, cursor, AugmentKind::Enter)
+                .expect("Enter at quote inline break must split into two quote paragraphs");
+            assert_eq!(
+                apply_augmentation_at(source, cursor, &augmentation),
+                "> first\n>\n> second",
+                "source={source:?}, cursor={cursor}"
+            );
+            assert_eq!(augmentation.cursor_byte_after, "> first\n>\n> ".len());
+        }
+    }
+
+    let nested = "> > a\n> > b";
+    let nested_aug = augment_edit(nested, "> > a".len(), AugmentKind::Enter)
+        .expect("Enter in nested quote soft break should split inside nested quote");
+    assert_eq!(apply_augmentation_at(nested, "> > a".len(), &nested_aug), "> > a\n> >\n> > b");
+    assert_eq!(nested_aug.cursor_byte_after, "> > a\n> >\n> > ".len());
+
+    // Block-end positions inside blockquote still create one editable quote line.
+    let between_paragraphs = "> first\n>\n> second";
+    let end_aug = augment_edit(between_paragraphs, "> first".len(), AugmentKind::Enter)
+        .expect("Enter at quote paragraph end before separator should add one quote line");
+    assert_eq!(
+        apply_augmentation_at(between_paragraphs, "> first".len(), &end_aug),
+        "> first\n> \n>\n> second"
+    );
+
+    let before_nested_list = "> first\n> - item";
+    let list_end_aug = augment_edit(before_nested_list, "> first".len(), AugmentKind::Enter)
+        .expect("Enter before nested list should add one quote line");
+    assert_eq!(
+        apply_augmentation_at(before_nested_list, "> first".len(), &list_end_aug),
+        "> first\n> \n> - item"
+    );
 }
 
 #[test]
@@ -2134,10 +2264,10 @@ fn blockquote_enter_at_indented_lazy_continuation_consumes_the_old_indent() {
     let current_byte = "> first".len();
 
     let augmentation = augment_edit(source, current_byte, AugmentKind::Enter)
-        .expect("Enter should make the lazy quote continuation explicit");
+        .expect("Enter should split the lazy quote continuation into two paragraphs");
     let edited_source = apply_augmentation_at(source, current_byte, &augmentation);
 
-    assert_eq!(edited_source, "> first\n> second");
+    assert_eq!(edited_source, "> first\n>\n> second");
 }
 
 #[test]
@@ -3650,8 +3780,8 @@ fn enter_at_line_start_after_hard_break_promotes_to_clean_boundary() {
         ("left\\\r\nright", "left\r\n\r\nright", "left\r\n\r\n"),
         ("- left\\\n  right", "- left\n- right", "- left\n- "),
         ("1. left\\\n   right", "1. left\n2. right", "1. left\n2. "),
-        ("> left\\\n> right", "> left\n> right", "> left\n> "),
-        ("> left\\\r\n> right", "> left\r\n> right", "> left\r\n> "),
+        ("> left\\\n> right", "> left\n>\n> right", "> left\n>\n> "),
+        ("> left\\\r\n> right", "> left\r\n>\r\n> right", "> left\r\n>\r\n> "),
     ] {
         let cursor = source.find("right").expect("fixture contains right");
         let aug = augment_edit(source, cursor, AugmentKind::Enter)
