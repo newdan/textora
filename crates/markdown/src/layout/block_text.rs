@@ -207,6 +207,26 @@ pub(in crate::layout::block) fn marker_source_range_for_projected_line(
     content_start.saturating_sub(marker_len)..content_start
 }
 
+fn resolved_text_marker_source_range(
+    projected: &crate::projection::ProjectedText,
+    marker: &crate::edit::ActiveBlockMarker,
+    has_source_text: bool,
+) -> std::ops::Range<usize> {
+    let content_start = projected
+        .boundaries
+        .first()
+        .expect("a projected line always has a sentinel boundary")
+        .byte
+        .get();
+    if has_source_text
+        && marker.marker_source_range.len() == marker.marker_text.len()
+        && marker.marker_source_range.end <= content_start
+    {
+        return marker.marker_source_range.clone();
+    }
+    marker_source_range_for_projected_line(projected, marker)
+}
+
 pub(in crate::layout::block) fn source_marker_for_projected_line(
     projected: &crate::projection::ProjectedText,
     marker: &crate::edit::ActiveBlockMarker,
@@ -430,8 +450,9 @@ pub(crate) fn layout_text_block(
                 |marker| source_marker_for_projected_line(&projected, marker, ctx.source_text),
             );
         let marker = marker.as_ref();
-        let marker_source_range =
-            marker.map(|marker| marker_source_range_for_projected_line(&projected, marker));
+        let marker_source_range = marker.map(|marker| {
+            resolved_text_marker_source_range(&projected, marker, ctx.source_text.is_some())
+        });
         let mut materialized_styles = if let Some(source_text) = ctx.source_text {
             crate::edit::materialized_spans_for_projected_line(
                 &base_projection,

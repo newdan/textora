@@ -1832,7 +1832,7 @@ fn nested_blockquote_syntax_gap_has_canonical_projection() {
 
 #[test]
 fn heading_active_marker_appears_in_flat_line_text() {
-    let lazy = layout_with_cursor("# Title", 1); // cursor in the prefix
+    let lazy = layout_with_cursor("# Title", 3); // cursor in "Title"
     assert!(!lazy.flat_lines.is_empty(), "should have flat lines");
     let first_text = &lazy.flat_lines[0].text;
     assert!(
@@ -1885,7 +1885,7 @@ fn heading_no_marker_when_cursor_outside_block() {
 
 #[test]
 fn heading_h2_active_marker_text() {
-    let lazy = layout_with_cursor("## Section", 1); // cursor in the prefix
+    let lazy = layout_with_cursor("## Section", 5); // cursor in "Section"
     let first_text = &lazy.flat_lines[0].text;
     assert!(
         first_text.starts_with("## "),
@@ -1948,7 +1948,7 @@ fn task_list_active_marker_appears_in_flat_line_text() {
 #[test]
 fn heading_active_marker_projection_correct() {
     // "# Title" = 7 bytes: [0]='#', [1]=' ', [2]='T', [3]='i', [4]='t', [5]='l', [6]='e'
-    let lazy = layout_with_cursor("# Title", 1);
+    let lazy = layout_with_cursor("# Title", 3);
     let fl = &lazy.flat_lines[0];
     let map = fl
         .source_projection
@@ -1998,10 +1998,10 @@ fn list_item_active_marker_projection_correct() {
 }
 
 #[test]
-fn heading_with_inline_bold_keeps_hidden_prefix_projection() {
+fn heading_with_inline_bold_active_marker_projection() {
     let lazy = layout_with_cursor("# **bold**", 5);
     let line = &lazy.flat_lines[0];
-    assert_eq!(line.text, "**bold**");
+    assert_eq!(line.text, "# **bold**");
     let boundaries = line
         .source_projection
         .as_ref()
@@ -2010,7 +2010,29 @@ fn heading_with_inline_bold_keeps_hidden_prefix_projection() {
         .iter()
         .map(|anchor| anchor.byte.get())
         .collect::<Vec<_>>();
-    assert_eq!(boundaries, (2..=10).collect::<Vec<_>>());
+    assert_eq!(boundaries, (0..=10).collect::<Vec<_>>());
+
+    // Cursor inside the heading prefix while "**bold**" stays folded must still map "# " to 0..2.
+    let prefix_lazy = layout_with_cursor("# **bold**", 1);
+    let prefix_line = &prefix_lazy.flat_lines[0];
+    assert_eq!(prefix_line.text, "# bold");
+    let prefix_boundaries = prefix_line
+        .source_projection
+        .as_ref()
+        .expect("prefix heading projection")
+        .boundaries
+        .iter()
+        .map(|anchor| anchor.byte.get())
+        .collect::<Vec<_>>();
+    assert_eq!(prefix_boundaries, vec![0, 1, 4, 5, 6, 7, 8]);
+}
+
+#[test]
+fn heading_followed_immediately_by_paragraph_does_not_activate_from_next_line() {
+    let md = "# Title\nparagraph";
+    let paragraph_start = "# Title\n".len();
+    let lazy = layout_with_cursor(md, paragraph_start);
+    assert_eq!(lazy.flat_lines[0].text, "Title");
 }
 
 #[test]
@@ -2178,8 +2200,8 @@ fn heading_y_stable_when_cursor_moves_into_marker() {
     let md = "# Title\n\nparagraph";
     // Cursor at byte 10 (in "paragraph") -> heading has no marker
     let outside = layout_with_cursor(md, 10);
-    // Cursor at byte 1 (in the prefix) -> heading has marker
-    let inside = layout_with_cursor(md, 1);
+    // Cursor at byte 3 (in "Title") -> heading has marker
+    let inside = layout_with_cursor(md, 3);
 
     // Heading text check
     assert!(

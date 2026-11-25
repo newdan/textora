@@ -778,8 +778,7 @@ fn focused_inline_code_preedit_keeps_content_and_marker_styles_aligned() {
                 _ => None,
             })
             .expect("fixture must lay out an editable text line");
-        let visible_prefix = if prefix == "# " { "" } else { prefix };
-        assert_eq!(line.text, format!("{visible_prefix}before `a中文b` after"));
+        assert_eq!(line.text, format!("{prefix}before `a中文b` after"));
         let styled_text = line
             .styles
             .iter()

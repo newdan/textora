@@ -900,7 +900,7 @@ mod wysiwyg_tests {
     #[test]
     fn active_heading_marker_cursor_and_hit_test_use_heading_advance() {
         let source = "# Title";
-        let marker_end = "#".len();
+        let marker_end = "# ".len();
         let document = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
         view.set_source(document.text.clone(), 1);
@@ -946,7 +946,7 @@ mod wysiwyg_tests {
             .shape("# ")
             .expect("heading marker should shape with its line font weight")
             .width;
-        let expected_x = flat_line.rect.x + shaper.shape("#").expect("prefix cursor advance").width;
+        let expected_x = flat_line.rect.x + expected_marker_width;
 
         assert!(
             (marker.width - expected_marker_width).abs() < 0.01,
@@ -1862,7 +1862,7 @@ mod wysiwyg_tests {
         let doc = StubDoc::new(&source);
         let mut view = MarkdownEditorView::new();
         view.set_source(source.clone(), 1);
-        view.set_cursor_byte(1);
+        view.set_cursor_byte(2);
         render_editor_once(&mut view, &doc);
 
         fn heading_text(view: &MarkdownEditorView) -> String {
@@ -3126,10 +3126,10 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     }
 
     #[test]
-    fn heading_space_shows_empty_heading_feedback_without_source_prefix() {
+    fn heading_space_shows_empty_heading_feedback_with_source_prefix() {
         let mut view = MarkdownEditorView::new();
         for (generation, source, expected_text) in
-            [(1, "###", "###"), (2, "### ", ""), (3, "### 标题", "标题")]
+            [(1, "###", "###"), (2, "### ", "### "), (3, "### 标题", "### 标题")]
         {
             view.set_source(source.to_owned(), generation);
             view.engine.handle_set_cursor_byte(source.len());
@@ -3140,12 +3140,29 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             assert!(line.source_projection.as_ref().is_some_and(|projection| {
                 projection.boundaries.last().is_some_and(|anchor| anchor.byte.get() == source.len())
             }));
-            let has_placeholder = commands.cmds.iter().any(|command| {
-                matches!(command, ui::DrawCmd::TextLayout { layout, .. } if layout.text == "三级标题")
+            let placeholder_x = commands.cmds.iter().find_map(|command| match command {
+                ui::DrawCmd::TextLayout { layout, x, .. } if layout.text == "三级标题" => {
+                    Some(*x)
+                }
+                _ => None,
             });
-            assert_eq!(has_placeholder, source == "### ", "source={source:?}");
             let (cursor_x, cursor_y, _, _) =
                 view.engine.cursor_screen_pos().expect("heading caret");
+            if source == "### " {
+                let placeholder_x =
+                    placeholder_x.expect("empty heading with space must render placeholder");
+                assert!(
+                    placeholder_x > line.rect.x,
+                    "placeholder x {placeholder_x} must be after '### ' at {}",
+                    line.rect.x
+                );
+                assert!(
+                    (placeholder_x - cursor_x).abs() < 0.01,
+                    "placeholder x {placeholder_x} must match cursor x {cursor_x}"
+                );
+            } else {
+                assert!(placeholder_x.is_none(), "source={source:?} must not render placeholder");
+            }
             assert_eq!(
                 view.engine.hit_test_byte(cursor_x, cursor_y + line.rect.h * 0.5, 0.0, 0.0),
                 Some(source.len())
@@ -3202,30 +3219,40 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
                         &mut shaper,
                         dpi_scale,
                     );
-                    let placeholder = commands
+                    let (placeholder, placeholder_x) = commands
                         .cmds
                         .iter()
                         .find_map(|command| match command {
-                            ui::DrawCmd::TextLayout { layout, .. }
+                            ui::DrawCmd::TextLayout { layout, x, .. }
                                 if layout.text.ends_with("级标题") =>
                             {
-                                Some(layout)
+                                Some((layout, *x))
                             }
                             _ => None,
                         })
                         .expect("empty heading needs a visible placeholder");
                     let line = &view.engine.flat_lines()[0];
-                    assert!(line.text.is_empty());
+                    assert_eq!(line.text, prefix);
                     let style = view.engine.cached_query_style.as_ref().expect("resolved style");
                     assert_eq!(placeholder.font_size, style.heading_font_sizes[level - 1]);
                     assert_eq!(line.font_size, placeholder.font_size);
+                    let expected_placeholder_x = line.rect.x
+                        + crate::layout::grapheme_x(
+                            line,
+                            crate::grapheme_map::grapheme_count(&line.text),
+                        );
+                    assert!(
+                        (placeholder_x - expected_placeholder_x).abs() < 0.01,
+                        "placeholder x {placeholder_x} must follow prefix at {expected_placeholder_x}"
+                    );
+                    let projection =
+                        line.source_projection.as_ref().expect("empty heading projection");
                     assert_eq!(
-                        line.source_projection
-                            .as_ref()
-                            .expect("empty heading projection")
-                            .boundaries[0]
-                            .byte
-                            .get(),
+                        projection.boundaries.first().expect("first boundary").byte.get(),
+                        0
+                    );
+                    assert_eq!(
+                        projection.boundaries.last().expect("last boundary").byte.get(),
                         prefix.len()
                     );
                 }
@@ -4620,8 +4647,8 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             "marker should NOT be visible when cursor is in paragraph, got: {joined:?}"
         );
 
-        // Cursor at byte 1 (inside the heading prefix) → marker visible.
-        view.set_cursor_byte(1);
+        // Cursor at byte 3 (inside "Title") → marker visible.
+        view.set_cursor_byte(3);
         render_editor_once(&mut view, &doc);
         let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let joined = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
@@ -4681,7 +4708,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        view.set_cursor_byte(1);
+        view.set_cursor_byte(5);
         render_editor_once(&mut view, &doc);
         let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let joined = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
@@ -4689,7 +4716,7 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
     }
 
     #[test]
-    fn heading_content_click_keeps_prefix_hidden_and_caret_stable() {
+    fn folded_h2_click_uses_expanded_cursor_rect_after_marker_appears() {
         let source = "## SubTitle\n\nparagraph";
         let doc = StubDoc::new(source);
         let mut view = MarkdownEditorView::new();
@@ -4719,8 +4746,8 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
 
         let expanded_line = view.engine().flat_lines()[0].clone();
         assert!(
-            expanded_line.text == folded_line.text,
-            "heading prefix should stay hidden after clicking content, got {:?}",
+            expanded_line.text.starts_with("## "),
+            "heading marker should appear after cursor enters heading, got {:?}",
             expanded_line.text
         );
 
@@ -4728,9 +4755,9 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
             .engine()
             .hit_test_byte(px, py, 0.0, 0.0)
             .expect("expanded heading stale hit-test should still hit the line");
-        assert_eq!(
+        assert_ne!(
             stale_mouse_hit, candidate,
-            "clicking heading content must keep the original source position"
+            "reusing the folded mouse x after marker expansion should shift the hit"
         );
 
         let (cursor_x, cursor_y, _cursor_w, cursor_h) =
@@ -4754,11 +4781,68 @@ C608-01 武昌职业第01组：计划 68，历史低线较低，是表里最像�
         let mut view = MarkdownEditorView::new();
         view.set_source(doc.text.clone(), 1);
 
-        view.set_cursor_byte(1);
+        view.set_cursor_byte(6);
         render_editor_once(&mut view, &doc);
         let lines = view.selection().expect("Markdown view provides selection").flat_lines();
         let joined = lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("### "), "h3 marker must be visible, got: {joined:?}");
+    }
+
+    #[test]
+    fn activating_non_first_heading_allows_navigating_and_editing_hashes() {
+        use ui::plugin::{EditIntent, EditPlan, EditPolicy, EditRequest, MoveDirection};
+
+        let source = "正文\n\n### 标题";
+        let doc = StubDoc::new(source);
+        let mut view = MarkdownEditorView::new();
+        view.set_source(source.to_owned(), 1);
+
+        let title_start = source.find("标题").expect("fixture must contain heading content");
+        view.set_cursor_byte(title_start + "标".len());
+        render_editor_once(&mut view, &doc);
+
+        let heading_line = view
+            .engine()
+            .flat_lines()
+            .iter()
+            .find(|line| line.text.contains("标题"))
+            .expect("heading line must render");
+        assert_eq!(heading_line.text, "### 标题");
+
+        let moved_to_title_start = view
+            .engine()
+            .visual_move(title_start + "标".len(), MoveDirection::Left, None)
+            .expect("left move to heading content start");
+        assert_eq!(moved_to_title_start, title_start);
+
+        let moved_into_separator = view
+            .engine()
+            .visual_move(moved_to_title_start, MoveDirection::Left, None)
+            .expect("left move into heading prefix space");
+        assert_eq!(moved_into_separator, title_start - 1);
+
+        let moved_between_hashes = view
+            .engine()
+            .visual_move(moved_into_separator, MoveDirection::Left, None)
+            .expect("left move between heading hashes");
+        let hash_prefix_start = source.find("### ").expect("fixture has heading prefix");
+        assert_eq!(moved_between_hashes, hash_prefix_start + 2);
+
+        let backspace_request = EditRequest {
+            source_generation: 1,
+            cursor_byte: moved_between_hashes,
+            selection: None,
+            intent: EditIntent::DeleteBackward,
+        };
+        assert_eq!(view.plan_edit(&backspace_request), EditPlan::UseDefault);
+
+        let insert_hash_request = EditRequest {
+            source_generation: 1,
+            cursor_byte: moved_between_hashes,
+            selection: None,
+            intent: EditIntent::InsertText("#".to_owned()),
+        };
+        assert_eq!(view.plan_edit(&insert_hash_request), EditPlan::UseDefault);
     }
 
     /// Task list checked marker "- [x] " is visible.

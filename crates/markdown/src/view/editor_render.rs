@@ -78,7 +78,7 @@ fn draw_editor_cursor(
     }
 }
 
-fn empty_heading_level(blocks: &[crate::builder::BlockNode], cursor: usize) -> Option<u8> {
+fn empty_heading_block(blocks: &[crate::builder::BlockNode], cursor: usize) -> Option<(u8, usize)> {
     for block in blocks {
         if block.block_range.start > cursor || block.block_range.end < cursor {
             continue;
@@ -86,10 +86,10 @@ fn empty_heading_level(blocks: &[crate::builder::BlockNode], cursor: usize) -> O
         if let crate::builder::BlockKind::Heading { level } = block.kind
             && block.text_lines.iter().all(String::is_empty)
         {
-            return Some(level);
+            return Some((level, block.block_range.start));
         }
-        if let Some(level) = empty_heading_level(&block.children, cursor) {
-            return Some(level);
+        if let Some(target) = empty_heading_block(&block.children, cursor) {
+            return Some(target);
         }
     }
     None
@@ -97,7 +97,7 @@ fn empty_heading_level(blocks: &[crate::builder::BlockNode], cursor: usize) -> O
 
 fn empty_heading_placeholder_target(
     engine: &BlockViewLayout,
-) -> Option<(u8, &crate::layout::FlatLine)> {
+) -> Option<(u8, &crate::layout::FlatLine, f32)> {
     let context = engine.edit_ctx.as_ref()?;
     if context.preedit_text.as_ref().is_some_and(|text| !text.is_empty())
         || engine.byte_selection_range().is_some()
@@ -105,17 +105,21 @@ fn empty_heading_placeholder_target(
         return None;
     }
     let layout = engine.lazy.as_ref()?;
-    let level = empty_heading_level(layout.source.blocks(), context.cursor_byte)?;
+    let (level, heading_start) = empty_heading_block(layout.source.blocks(), context.cursor_byte)?;
     let line = engine.flat_lines().iter().find(|line| {
-        line.text.is_empty()
+        line.text.ends_with([' ', '\t'])
             && line.source_projection.as_ref().is_some_and(|projection| {
-                projection
-                    .boundaries
-                    .first()
-                    .is_some_and(|anchor| anchor.byte.get() == context.cursor_byte)
+                matches!(
+                    projection.owner,
+                    crate::projection::ProjectionOwnerId::Block { block_start, .. }
+                        if block_start == heading_start
+                ) && projection.source_extent.start <= context.cursor_byte
+                    && context.cursor_byte <= projection.source_extent.end
             })
     })?;
-    Some((level, line))
+    let content_x = line.rect.x
+        + crate::layout::grapheme_x(line, crate::grapheme_map::grapheme_count(&line.text));
+    Some((level, line, content_x))
 }
 
 fn draw_empty_heading_placeholder(
@@ -128,10 +132,10 @@ fn draw_empty_heading_placeholder(
     const HEADING_PLACEHOLDERS: [&str; 6] =
         ["一级标题", "二级标题", "三级标题", "四级标题", "五级标题", "六级标题"];
     const PLACEHOLDER_FADE_RATIO: f32 = 0.55;
-    let Some((level, line)) = empty_heading_placeholder_target(engine) else { return };
+    let Some((level, line, content_x)) = empty_heading_placeholder_target(engine) else { return };
     commands.clip(bounds, |commands| {
         commands.text_shaped_with_font(
-            bounds.x + line.rect.x,
+            bounds.x + content_x,
             bounds.y + line.rect.y - engine.scroll_y + line.font_size,
             line.font_size,
             crate::style::blend_toward_bg(

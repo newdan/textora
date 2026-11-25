@@ -238,8 +238,11 @@ fn layout_display_math_block(block: &BlockNode, ctx: &mut LayoutCtx) {
 fn layout_heading_block(block: &BlockNode, ctx: &mut LayoutCtx, level: u8) {
     let idx = (level as usize).saturating_sub(1).min(5);
     let font_size = ctx.style.heading_font_sizes[idx];
-    if let (Some(edit_ctx), Some(source)) = (ctx.edit_ctx, ctx.source_text) {
-        ctx.active_block_marker = heading_marker_at_cursor(block, source, edit_ctx.cursor_byte);
+    if let Some(edit_ctx) = ctx.edit_ctx {
+        ctx.active_block_marker = match ctx.source_text {
+            Some(source) => heading_marker_at_cursor(block, source, edit_ctx.cursor_byte),
+            None => crate::edit::active_block_marker(block, edit_ctx.cursor_byte),
+        };
     }
     layout_text_block(block, ctx, font_size, ctx.style.heading_color, Weight::SEMIBOLD);
     ctx.active_block_marker = None;
@@ -637,23 +640,21 @@ pub(in crate::layout::block) fn heading_marker_at_cursor(
     source: &str,
     cursor_byte: usize,
 ) -> Option<crate::edit::ActiveBlockMarker> {
+    let spelling = source.get(block.block_range.clone())?;
+    let line = spelling.split('\n').next()?.trim_end_matches('\r');
+    let line_end = block.block_range.start + line.len();
     if cursor_byte < block.block_range.start
-        || cursor_byte > block.block_range.end
+        || cursor_byte > line_end
         || !crate::augmenter::heading_source_is_atx(source, block.block_range.start)
     {
         return None;
     }
-    let spelling = &source[block.block_range.clone()];
-    let line = spelling.split('\n').next()?.trim_end_matches('\r');
     let indentation = line.len() - line.trim_start_matches(' ').len();
     let hashes = line[indentation..].bytes().take_while(|&byte| byte == b'#').count();
     let hash_end = indentation + hashes;
     let separator =
         line[hash_end..].bytes().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
     let prefix_end = block.block_range.start + hash_end + separator;
-    if separator > 0 && cursor_byte >= prefix_end {
-        return None;
-    }
     Some(crate::edit::ActiveBlockMarker {
         marker_text: line[..hash_end + separator].to_owned(),
         marker_source_range: block.block_range.start..prefix_end,
