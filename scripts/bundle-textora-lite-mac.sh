@@ -17,14 +17,43 @@ if [[ -z "$version" ]]; then
     exit 1
 fi
 
-cargo textora-lite --locked --target-dir "$target_dir"
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+remap_flags="--remap-path-prefix=$cargo_home/registry/src=c --remap-path-prefix=$cargo_home/git/checkouts=g --remap-path-prefix=$project_root=w"
+base_rustflags="${RUSTFLAGS:+$RUSTFLAGS }$remap_flags"
+
+if [[ "${TEXTORA_LITE_NIGHTLY_BUILD_STD:-0}" == "1" ]]; then
+    if ! command -v rustup >/dev/null 2>&1 \
+        || ! rustup run nightly rustc --version >/dev/null 2>&1 \
+        || ! rustup component list --toolchain nightly --installed 2>/dev/null | grep -Eq '^rust-src(-|$)'; then
+        echo "启用 TEXTORA_LITE_NIGHTLY_BUILD_STD=1 需要 nightly 工具链与 rust-src 组件，请先执行：rustup toolchain install nightly --component rust-src" >&2
+        exit 1
+    fi
+    host_triple="$(rustc -vV | awk '/^host: / { print $2 }')"
+    if [[ -z "$host_triple" ]]; then
+        echo "无法识别当前主机 target triple。" >&2
+        exit 1
+    fi
+    nightly_rustflags="$base_rustflags -Z location-detail=none -Z fmt-debug=none -C force-unwind-tables=no"
+    RUSTFLAGS="$nightly_rustflags" cargo +nightly build \
+        --profile lite \
+        --package textora_lite \
+        --locked \
+        --target "$host_triple" \
+        --target-dir "$target_dir" \
+        -Z build-std=std,panic_abort \
+        -Z build-std-features=panic_immediate_abort
+    binary_path="$target_dir/$host_triple/lite/$app_name"
+else
+    RUSTFLAGS="$base_rustflags" cargo textora-lite --locked --target-dir "$target_dir"
+    binary_path="$target_dir/lite/$app_name"
+fi
 
 staging_dir="$(mktemp -d "$target_dir/.textora_lite.XXXXXXXX")"
 trap 'rm -rf -- "$staging_dir"' EXIT
 staged_bundle="$staging_dir/$app_name.app"
 contents="$staged_bundle/Contents"
 mkdir -p "$contents/MacOS" "$contents/Resources"
-install -m 755 "$target_dir/lite/$app_name" "$contents/MacOS/$app_name"
+install -m 755 "$binary_path" "$contents/MacOS/$app_name"
 # The Lite icon retains the original artwork up to 512 pixels without duplicate PNG payloads.
 install -m 644 assets/TextoraLiteAppIcon.icns "$contents/Resources/AppIcon.icns"
 

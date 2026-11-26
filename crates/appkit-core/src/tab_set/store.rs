@@ -33,14 +33,15 @@ impl WorkspaceStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        toml::from_str(&toml_str)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+        PersistedWorkspace::from_toml_str(&toml_str)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
             .map(Some)
     }
 
     pub fn save_workspace(&self, snapshot: &PersistedWorkspace) -> io::Result<()> {
-        let toml_str = toml::to_string_pretty(snapshot)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let toml_str = snapshot
+            .to_toml_string_pretty()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         crate::persistence::atomic_write(self.workspace_toml_path(), toml_str.as_bytes())
     }
 
@@ -53,7 +54,7 @@ impl WorkspaceStore {
             Ok(s) => s,
             Err(_) => return,
         };
-        let snap: PersistedWorkspace = match toml::from_str(&toml_str) {
+        let snap = match PersistedWorkspace::from_toml_str(&toml_str) {
             Ok(s) => s,
             Err(_) => return,
         };

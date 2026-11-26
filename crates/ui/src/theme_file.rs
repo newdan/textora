@@ -7,12 +7,22 @@ use crate::theme::{
     ColorPalette, EditorTheme, MarkdownSpacing, MarkdownTheme, MindmapNodeStyle, MindmapTheme,
     ThemeDefinition,
 };
-use serde::Deserialize;
 use std::collections::BTreeMap;
 
+/// Error returned when parsing a theme TOML file fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeParseError(String);
+
+impl std::fmt::Display for ThemeParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ThemeParseError {}
+
 /// Top-level TOML structure for a theme file.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct ThemeFile {
     /// Base theme id to inherit from (e.g. "default-dark").
     /// If `None`, resolved at load time based on `is_dark`.
@@ -27,13 +37,11 @@ pub struct ThemeFile {
     pub mindmap: Option<MindmapFile>,
 
     /// Additional syntax/UI scopes (color overrides).
-    #[serde(default)]
     pub scopes: BTreeMap<String, String>,
 }
 
 /// All-optional version of `ColorPalette`.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct PaletteFile {
     pub bg_base: Option<String>,
     pub bg_surface: Option<String>,
@@ -65,8 +73,7 @@ pub struct PaletteFile {
 }
 
 /// All-optional version of `EditorTheme`.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct EditorFile {
     pub background: Option<String>,
     pub foreground: Option<String>,
@@ -79,8 +86,7 @@ pub struct EditorFile {
 }
 
 /// All-optional version of `MarkdownTheme`.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct MarkdownFile {
     pub heading: Option<String>,
     pub link: Option<String>,
@@ -97,8 +103,7 @@ pub struct MarkdownFile {
 }
 
 /// All-optional version of `MarkdownSpacing`.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct MarkdownSpacingFile {
     pub paragraph_spacing_ratio: Option<f32>,
     pub heading_spacing_top_ratio: Option<f32>,
@@ -118,8 +123,7 @@ pub struct MarkdownSpacingFile {
 }
 
 /// All-optional version of `MindmapTheme`.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct MindmapFile {
     pub canvas: Option<MindmapCanvasFile>,
     pub node: Option<MindmapNodeThemeFile>,
@@ -127,8 +131,7 @@ pub struct MindmapFile {
     pub geometry: Option<MindmapGeometryFile>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct MindmapCanvasFile {
     pub background: Option<String>,
     pub connector: Option<String>,
@@ -140,8 +143,7 @@ pub struct MindmapCanvasFile {
     pub branch_palette: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct MindmapNodeStyleFile {
     pub fill: Option<String>,
     pub border: Option<String>,
@@ -149,25 +151,21 @@ pub struct MindmapNodeStyleFile {
     pub accent: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct MindmapNodeThemeFile {
     pub default: Option<MindmapNodeStyleFile>,
     pub root: Option<MindmapNodeStyleFile>,
     pub depth: Option<Vec<MindmapNodeStyleFile>>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct MindmapSemanticFile {
     pub status: Option<MindmapStatusFile>,
     pub priority: Option<MindmapPriorityFile>,
-    #[serde(default)]
     pub named: BTreeMap<String, MindmapNodeStyleFile>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct MindmapStatusFile {
     pub todo: Option<MindmapNodeStyleFile>,
     pub doing: Option<MindmapNodeStyleFile>,
@@ -176,8 +174,7 @@ pub struct MindmapStatusFile {
     pub canceled: Option<MindmapNodeStyleFile>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct MindmapPriorityFile {
     pub p0: Option<MindmapNodeStyleFile>,
     pub p1: Option<MindmapNodeStyleFile>,
@@ -185,8 +182,7 @@ pub struct MindmapPriorityFile {
     pub p3: Option<MindmapNodeStyleFile>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct MindmapGeometryFile {
     pub card_height: Option<f32>,
     pub card_padding_x: Option<f32>,
@@ -203,6 +199,429 @@ pub struct MindmapGeometryFile {
     pub same_level_threshold_ratio: Option<f32>,
     /// Per-depth font scale factors, index = depth (0 = root).
     pub depth_font_scales: Option<Vec<f32>>,
+}
+
+impl ThemeFile {
+    /// Parse a theme TOML document without generic `serde` monomorphization.
+    pub fn from_toml_str(source: &str) -> Result<Self, ThemeParseError> {
+        let value = source.parse::<toml::Value>().map_err(|e| ThemeParseError(e.to_string()))?;
+        let toml::Value::Table(table) = value else {
+            return Err(ThemeParseError("theme root must be a TOML table".to_owned()));
+        };
+        parse_theme_table(&table)
+    }
+}
+
+fn unknown_field_error(section: &str, key: &str) -> ThemeParseError {
+    ThemeParseError(format!("unknown field `{key}` in {section}"))
+}
+
+fn type_error(field: &str, expected: &str) -> ThemeParseError {
+    ThemeParseError(format!("field `{field}` must be {expected}"))
+}
+
+fn expect_string(value: &toml::Value, field: &str) -> Result<String, ThemeParseError> {
+    value.as_str().map(str::to_owned).ok_or_else(|| type_error(field, "a string"))
+}
+
+fn expect_bool(value: &toml::Value, field: &str) -> Result<bool, ThemeParseError> {
+    value.as_bool().ok_or_else(|| type_error(field, "a boolean"))
+}
+
+fn expect_f32(value: &toml::Value, field: &str) -> Result<f32, ThemeParseError> {
+    match value {
+        toml::Value::Float(v) => Ok(*v as f32),
+        toml::Value::Integer(v) => Ok(*v as f32),
+        _ => Err(type_error(field, "a number")),
+    }
+}
+
+fn expect_table<'a>(
+    value: &'a toml::Value,
+    field: &str,
+) -> Result<&'a toml::value::Table, ThemeParseError> {
+    value.as_table().ok_or_else(|| type_error(field, "a table"))
+}
+
+fn expect_string_vec(value: &toml::Value, field: &str) -> Result<Vec<String>, ThemeParseError> {
+    let items = value.as_array().ok_or_else(|| type_error(field, "an array"))?;
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| expect_string(item, &format!("{field}[{index}]")))
+        .collect()
+}
+
+fn expect_f32_vec(value: &toml::Value, field: &str) -> Result<Vec<f32>, ThemeParseError> {
+    let items = value.as_array().ok_or_else(|| type_error(field, "an array"))?;
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| expect_f32(item, &format!("{field}[{index}]")))
+        .collect()
+}
+
+fn expect_node_style_vec(
+    value: &toml::Value,
+    field: &str,
+) -> Result<Vec<MindmapNodeStyleFile>, ThemeParseError> {
+    let items = value.as_array().ok_or_else(|| type_error(field, "an array"))?;
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let item_field = format!("{field}[{index}]");
+            parse_mindmap_node_style_table(expect_table(item, &item_field)?, &item_field)
+        })
+        .collect()
+}
+
+fn expect_string_map(
+    value: &toml::Value,
+    field: &str,
+) -> Result<BTreeMap<String, String>, ThemeParseError> {
+    let table = expect_table(value, field)?;
+    let mut map = BTreeMap::new();
+    for (key, entry) in table {
+        map.insert(key.clone(), expect_string(entry, &format!("{field}.{key}"))?);
+    }
+    Ok(map)
+}
+
+fn expect_node_style_map(
+    value: &toml::Value,
+    field: &str,
+) -> Result<BTreeMap<String, MindmapNodeStyleFile>, ThemeParseError> {
+    let table = expect_table(value, field)?;
+    let mut map = BTreeMap::new();
+    for (key, entry) in table {
+        let entry_field = format!("{field}.{key}");
+        map.insert(
+            key.clone(),
+            parse_mindmap_node_style_table(expect_table(entry, &entry_field)?, &entry_field)?,
+        );
+    }
+    Ok(map)
+}
+
+fn parse_theme_table(table: &toml::value::Table) -> Result<ThemeFile, ThemeParseError> {
+    let mut file = ThemeFile::default();
+    for (key, value) in table {
+        match key.as_str() {
+            "extends" => file.extends = Some(expect_string(value, "extends")?),
+            "display_name" => file.display_name = Some(expect_string(value, "display_name")?),
+            "is_dark" => file.is_dark = Some(expect_bool(value, "is_dark")?),
+            "palette" => file.palette = Some(parse_palette_table(expect_table(value, "palette")?)?),
+            "editor" => file.editor = Some(parse_editor_table(expect_table(value, "editor")?)?),
+            "markdown" => {
+                file.markdown = Some(parse_markdown_table(expect_table(value, "markdown")?)?);
+            }
+            "mindmap" => {
+                file.mindmap = Some(parse_mindmap_table(expect_table(value, "mindmap")?)?);
+            }
+            "scopes" => file.scopes = expect_string_map(value, "scopes")?,
+            _ => return Err(unknown_field_error("theme", key)),
+        }
+    }
+    Ok(file)
+}
+
+fn parse_palette_table(table: &toml::value::Table) -> Result<PaletteFile, ThemeParseError> {
+    let mut palette = PaletteFile::default();
+    for (key, value) in table {
+        let slot = match key.as_str() {
+            "bg_base" => &mut palette.bg_base,
+            "bg_surface" => &mut palette.bg_surface,
+            "bg_elevated" => &mut palette.bg_elevated,
+            "bg_hover" => &mut palette.bg_hover,
+            "bg_active" => &mut palette.bg_active,
+            "text_main" => &mut palette.text_main,
+            "text_muted" => &mut palette.text_muted,
+            "text_inverse" => &mut palette.text_inverse,
+            "border_subtle" => &mut palette.border_subtle,
+            "border_strong" => &mut palette.border_strong,
+            "shadow" => &mut palette.shadow,
+            "accent" => &mut palette.accent,
+            "on_accent" => &mut palette.on_accent,
+            "accent_text" => &mut palette.accent_text,
+            "danger_text" => &mut palette.danger_text,
+            "warning_text" => &mut palette.warning_text,
+            "focus_ring" => &mut palette.focus_ring,
+            "highlight" => &mut palette.highlight,
+            "inactive_highlight" => &mut palette.inactive_highlight,
+            "danger" => &mut palette.danger,
+            "warning" => &mut palette.warning,
+            "input_bg" => &mut palette.input_bg,
+            "input_border" => &mut palette.input_border,
+            "input_fg" => &mut palette.input_fg,
+            "sidebar_hover_bg" => &mut palette.sidebar_hover_bg,
+            "sidebar_active_bg" => &mut palette.sidebar_active_bg,
+            "sidebar_active_fg" => &mut palette.sidebar_active_fg,
+            _ => return Err(unknown_field_error("palette", key)),
+        };
+        *slot = Some(expect_string(value, &format!("palette.{key}"))?);
+    }
+    Ok(palette)
+}
+
+fn parse_editor_table(table: &toml::value::Table) -> Result<EditorFile, ThemeParseError> {
+    let mut editor = EditorFile::default();
+    for (key, value) in table {
+        let slot = match key.as_str() {
+            "background" => &mut editor.background,
+            "foreground" => &mut editor.foreground,
+            "gutter_bg" => &mut editor.gutter_bg,
+            "line_number" => &mut editor.line_number,
+            "selection" => &mut editor.selection,
+            "cursor" => &mut editor.cursor,
+            "scrollbar_track" => &mut editor.scrollbar_track,
+            "scrollbar_thumb" => &mut editor.scrollbar_thumb,
+            _ => return Err(unknown_field_error("editor", key)),
+        };
+        *slot = Some(expect_string(value, &format!("editor.{key}"))?);
+    }
+    Ok(editor)
+}
+
+fn parse_markdown_table(table: &toml::value::Table) -> Result<MarkdownFile, ThemeParseError> {
+    let mut markdown = MarkdownFile::default();
+    for (key, value) in table {
+        if key == "spacing" {
+            markdown.spacing =
+                Some(parse_markdown_spacing_table(expect_table(value, "markdown.spacing")?)?);
+            continue;
+        }
+        let slot = match key.as_str() {
+            "heading" => &mut markdown.heading,
+            "link" => &mut markdown.link,
+            "inline_code" => &mut markdown.inline_code,
+            "code_bg" => &mut markdown.code_bg,
+            "code_block_bg" => &mut markdown.code_block_bg,
+            "toc_background" => &mut markdown.toc_background,
+            "toc_active_background" => &mut markdown.toc_active_background,
+            "toc_hover_background" => &mut markdown.toc_hover_background,
+            "toc_text" => &mut markdown.toc_text,
+            "toc_hover_text" => &mut markdown.toc_hover_text,
+            "toc_level_indicator" => &mut markdown.toc_level_indicator,
+            _ => return Err(unknown_field_error("markdown", key)),
+        };
+        *slot = Some(expect_string(value, &format!("markdown.{key}"))?);
+    }
+    Ok(markdown)
+}
+
+fn parse_markdown_spacing_table(
+    table: &toml::value::Table,
+) -> Result<MarkdownSpacingFile, ThemeParseError> {
+    let mut spacing = MarkdownSpacingFile::default();
+    for (key, value) in table {
+        let slot = match key.as_str() {
+            "paragraph_spacing_ratio" => &mut spacing.paragraph_spacing_ratio,
+            "heading_spacing_top_ratio" => &mut spacing.heading_spacing_top_ratio,
+            "heading_spacing_bottom_ratio" => &mut spacing.heading_spacing_bottom_ratio,
+            "list_item_spacing_ratio" => &mut spacing.list_item_spacing_ratio,
+            "list_group_spacing_ratio" => &mut spacing.list_group_spacing_ratio,
+            "list_indent_ratio" => &mut spacing.list_indent_ratio,
+            "code_block_padding_ratio" => &mut spacing.code_block_padding_ratio,
+            "code_line_height_ratio" => &mut spacing.code_line_height_ratio,
+            "blockquote_padding_ratio" => &mut spacing.blockquote_padding_ratio,
+            "table_cell_padding_ratio" => &mut spacing.table_cell_padding_ratio,
+            "rule_spacing" => &mut spacing.rule_spacing,
+            "rule_thickness" => &mut spacing.rule_thickness,
+            "rule_width_ratio" => &mut spacing.rule_width_ratio,
+            "border_radius_base" => &mut spacing.border_radius_base,
+            "border_radius_small" => &mut spacing.border_radius_small,
+            _ => return Err(unknown_field_error("markdown.spacing", key)),
+        };
+        *slot = Some(expect_f32(value, &format!("markdown.spacing.{key}"))?);
+    }
+    Ok(spacing)
+}
+
+fn parse_mindmap_table(table: &toml::value::Table) -> Result<MindmapFile, ThemeParseError> {
+    let mut mindmap = MindmapFile::default();
+    for (key, value) in table {
+        match key.as_str() {
+            "canvas" => {
+                mindmap.canvas =
+                    Some(parse_mindmap_canvas_table(expect_table(value, "mindmap.canvas")?)?);
+            }
+            "node" => {
+                mindmap.node =
+                    Some(parse_mindmap_node_theme_table(expect_table(value, "mindmap.node")?)?);
+            }
+            "semantic" => {
+                mindmap.semantic =
+                    Some(parse_mindmap_semantic_table(expect_table(value, "mindmap.semantic")?)?);
+            }
+            "geometry" => {
+                mindmap.geometry =
+                    Some(parse_mindmap_geometry_table(expect_table(value, "mindmap.geometry")?)?);
+            }
+            _ => return Err(unknown_field_error("mindmap", key)),
+        }
+    }
+    Ok(mindmap)
+}
+
+fn parse_mindmap_canvas_table(
+    table: &toml::value::Table,
+) -> Result<MindmapCanvasFile, ThemeParseError> {
+    let mut canvas = MindmapCanvasFile::default();
+    for (key, value) in table {
+        if key == "branch_palette" {
+            canvas.branch_palette =
+                Some(expect_string_vec(value, "mindmap.canvas.branch_palette")?);
+            continue;
+        }
+        let slot = match key.as_str() {
+            "background" => &mut canvas.background,
+            "connector" => &mut canvas.connector,
+            "connector_hover" => &mut canvas.connector_hover,
+            "selection" => &mut canvas.selection,
+            "focus_ring" => &mut canvas.focus_ring,
+            "drag_invalid" => &mut canvas.drag_invalid,
+            _ => return Err(unknown_field_error("mindmap.canvas", key)),
+        };
+        *slot = Some(expect_string(value, &format!("mindmap.canvas.{key}"))?);
+    }
+    Ok(canvas)
+}
+
+fn parse_mindmap_node_style_table(
+    table: &toml::value::Table,
+    section: &str,
+) -> Result<MindmapNodeStyleFile, ThemeParseError> {
+    let mut style = MindmapNodeStyleFile::default();
+    for (key, value) in table {
+        let slot = match key.as_str() {
+            "fill" => &mut style.fill,
+            "border" => &mut style.border,
+            "text" => &mut style.text,
+            "accent" => &mut style.accent,
+            _ => return Err(unknown_field_error(section, key)),
+        };
+        *slot = Some(expect_string(value, &format!("{section}.{key}"))?);
+    }
+    Ok(style)
+}
+
+fn parse_mindmap_node_theme_table(
+    table: &toml::value::Table,
+) -> Result<MindmapNodeThemeFile, ThemeParseError> {
+    let mut node = MindmapNodeThemeFile::default();
+    for (key, value) in table {
+        match key.as_str() {
+            "default" => {
+                node.default = Some(parse_mindmap_node_style_table(
+                    expect_table(value, "mindmap.node.default")?,
+                    "mindmap.node.default",
+                )?);
+            }
+            "root" => {
+                node.root = Some(parse_mindmap_node_style_table(
+                    expect_table(value, "mindmap.node.root")?,
+                    "mindmap.node.root",
+                )?);
+            }
+            "depth" => node.depth = Some(expect_node_style_vec(value, "mindmap.node.depth")?),
+            _ => return Err(unknown_field_error("mindmap.node", key)),
+        }
+    }
+    Ok(node)
+}
+
+fn parse_mindmap_semantic_table(
+    table: &toml::value::Table,
+) -> Result<MindmapSemanticFile, ThemeParseError> {
+    let mut semantic = MindmapSemanticFile::default();
+    for (key, value) in table {
+        match key.as_str() {
+            "status" => {
+                semantic.status = Some(parse_mindmap_status_table(expect_table(
+                    value,
+                    "mindmap.semantic.status",
+                )?)?);
+            }
+            "priority" => {
+                semantic.priority = Some(parse_mindmap_priority_table(expect_table(
+                    value,
+                    "mindmap.semantic.priority",
+                )?)?);
+            }
+            "named" => semantic.named = expect_node_style_map(value, "mindmap.semantic.named")?,
+            _ => return Err(unknown_field_error("mindmap.semantic", key)),
+        }
+    }
+    Ok(semantic)
+}
+
+fn parse_mindmap_status_table(
+    table: &toml::value::Table,
+) -> Result<MindmapStatusFile, ThemeParseError> {
+    let mut status = MindmapStatusFile::default();
+    for (key, value) in table {
+        let field = format!("mindmap.semantic.status.{key}");
+        let parsed = parse_mindmap_node_style_table(expect_table(value, &field)?, &field)?;
+        match key.as_str() {
+            "todo" => status.todo = Some(parsed),
+            "doing" => status.doing = Some(parsed),
+            "done" => status.done = Some(parsed),
+            "blocked" => status.blocked = Some(parsed),
+            "canceled" => status.canceled = Some(parsed),
+            _ => return Err(unknown_field_error("mindmap.semantic.status", key)),
+        }
+    }
+    Ok(status)
+}
+
+fn parse_mindmap_priority_table(
+    table: &toml::value::Table,
+) -> Result<MindmapPriorityFile, ThemeParseError> {
+    let mut priority = MindmapPriorityFile::default();
+    for (key, value) in table {
+        let field = format!("mindmap.semantic.priority.{key}");
+        let parsed = parse_mindmap_node_style_table(expect_table(value, &field)?, &field)?;
+        match key.as_str() {
+            "p0" => priority.p0 = Some(parsed),
+            "p1" => priority.p1 = Some(parsed),
+            "p2" => priority.p2 = Some(parsed),
+            "p3" => priority.p3 = Some(parsed),
+            _ => return Err(unknown_field_error("mindmap.semantic.priority", key)),
+        }
+    }
+    Ok(priority)
+}
+
+fn parse_mindmap_geometry_table(
+    table: &toml::value::Table,
+) -> Result<MindmapGeometryFile, ThemeParseError> {
+    let mut geometry = MindmapGeometryFile::default();
+    for (key, value) in table {
+        if key == "depth_font_scales" {
+            geometry.depth_font_scales =
+                Some(expect_f32_vec(value, "mindmap.geometry.depth_font_scales")?);
+            continue;
+        }
+        let slot = match key.as_str() {
+            "card_height" => &mut geometry.card_height,
+            "card_padding_x" => &mut geometry.card_padding_x,
+            "card_padding_y" => &mut geometry.card_padding_y,
+            "root_child_gap" => &mut geometry.root_child_gap,
+            "nested_child_gap" => &mut geometry.nested_child_gap,
+            "sibling_gap" => &mut geometry.sibling_gap,
+            "card_radius" => &mut geometry.card_radius,
+            "connector_width" => &mut geometry.connector_width,
+            "selection_outline_width" => &mut geometry.selection_outline_width,
+            "selection_outline_gap" => &mut geometry.selection_outline_gap,
+            "drag_source_alpha" => &mut geometry.drag_source_alpha,
+            "drag_preview_alpha" => &mut geometry.drag_preview_alpha,
+            "same_level_threshold_ratio" => &mut geometry.same_level_threshold_ratio,
+            _ => return Err(unknown_field_error("mindmap.geometry", key)),
+        };
+        *slot = Some(expect_f32(value, &format!("mindmap.geometry.{key}"))?);
+    }
+    Ok(geometry)
 }
 
 /// Error type for hex color resolution within ThemeFile.
@@ -601,7 +1020,7 @@ mod tests {
 display_name = "My Theme"
 is_dark = true
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         assert_eq!(file.display_name.as_deref(), Some("My Theme"));
         assert_eq!(file.is_dark, Some(true));
         assert!(file.palette.is_none());
@@ -614,7 +1033,7 @@ is_dark = true
 accent = "#FF6B6B"
 bg_base = "#1E1E2E"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let p = file.palette.unwrap();
         assert_eq!(p.accent.as_deref(), Some("#FF6B6B"));
         assert_eq!(p.bg_base.as_deref(), Some("#1E1E2E"));
@@ -628,7 +1047,7 @@ bg_base = "#1E1E2E"
 cursor = "#FF0000"
 selection = "#74ADE83D"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let e = file.editor.unwrap();
         assert_eq!(e.cursor.as_deref(), Some("#FF0000"));
         assert_eq!(e.selection.as_deref(), Some("#74ADE83D"));
@@ -641,14 +1060,14 @@ selection = "#74ADE83D"
 keyword = "#C678DD"
 string = "#98C379"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         assert_eq!(file.scopes.len(), 2);
         assert_eq!(file.scopes["keyword"], "#C678DD");
     }
 
     #[test]
     fn parse_empty_toml() {
-        let file: ThemeFile = toml::from_str("").unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str("").unwrap();
         assert!(file.display_name.is_none());
         assert!(file.palette.is_none());
     }
@@ -663,8 +1082,8 @@ danger_text = "#324252"
 warning_text = "#435363"
 focus_ring = "#546474"
 "##;
-        let file: ThemeFile =
-            toml::from_str(source).expect("readability roles are valid optional palette keys");
+        let file: ThemeFile = ThemeFile::from_toml_str(source)
+            .expect("readability roles are valid optional palette keys");
         let resolved = file
             .resolve(&ThemeDefinition::default_light())
             .expect("all readability role colors are valid hex values");
@@ -681,7 +1100,7 @@ focus_ring = "#546474"
 
     #[test]
     fn legacy_palette_overrides_inherit_readability_roles_from_the_base() {
-        let file: ThemeFile = toml::from_str("[palette]\naccent = '#336699'")
+        let file: ThemeFile = ThemeFile::from_toml_str("[palette]\naccent = '#336699'")
             .expect("legacy palette syntax remains valid");
         for base in [ThemeDefinition::default_light(), ThemeDefinition::default_dark()] {
             let inherited = file.resolve(&base).expect("legacy palette resolves against its base");
@@ -698,7 +1117,8 @@ focus_ring = "#546474"
     fn invalid_readability_colors_report_the_exact_palette_field() {
         for role in ["on_accent", "accent_text", "danger_text", "warning_text", "focus_ring"] {
             let source = format!("[palette]\n{role} = 'invalid-color'");
-            let file: ThemeFile = toml::from_str(&source).expect("all role names are supported");
+            let file: ThemeFile =
+                ThemeFile::from_toml_str(&source).expect("all role names are supported");
             let failure = file
                 .resolve(&ThemeDefinition::default_light())
                 .expect_err("invalid role colors must fail resolution");
@@ -711,7 +1131,7 @@ focus_ring = "#546474"
         let toml_str = r##"
 dispaly_name = "Typo"
 "##;
-        let err = toml::from_str::<ThemeFile>(toml_str).unwrap_err();
+        let err = ThemeFile::from_toml_str(toml_str).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
     }
 
@@ -722,7 +1142,7 @@ dispaly_name = "Typo"
 accent = "#FF0000"
 unknown_field = "#000000"
 "##;
-        let err = toml::from_str::<ThemeFile>(toml_str).unwrap_err();
+        let err = ThemeFile::from_toml_str(toml_str).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
     }
 
@@ -733,7 +1153,7 @@ unknown_field = "#000000"
 paragraph_spacing_ratio = 0.8
 code_line_height_ratio = 1.3
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let sp = file.markdown.unwrap().spacing.unwrap();
         assert_eq!(sp.paragraph_spacing_ratio, Some(0.8));
         assert_eq!(sp.code_line_height_ratio, Some(1.3));
@@ -749,7 +1169,7 @@ display_name = "Override"
 [palette]
 accent = "#FF0000"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
 
         assert_eq!(resolved.display_name, "Override");
@@ -767,7 +1187,7 @@ accent = "#FF0000"
 [palette]
 accent = "not-a-color"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let err = file.resolve(&base).unwrap_err();
         assert!(err.to_string().contains("accent"));
     }
@@ -779,7 +1199,7 @@ accent = "not-a-color"
 [scopes]
 keyword = "#C678DD"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
         let keyword = resolved.scopes.get("keyword").unwrap();
         assert!((keyword[0] - 0.776).abs() < 0.01);
@@ -798,7 +1218,7 @@ same_level_threshold_ratio = 0.35
 root_child_gap = 42.0
 nested_child_gap = 18.0
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
 
         assert_eq!(
@@ -827,7 +1247,7 @@ mod resolve_extra_tests {
 [editor]
 cursor = "#00FF00"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
 
         assert_ne!(resolved.editor.cursor, original_cursor);
@@ -843,7 +1263,7 @@ cursor = "#00FF00"
 [editor]
 selection = "#74ADE83D"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
 
         assert!((resolved.editor.selection[3] - 0.2392).abs() < 0.01);
@@ -858,7 +1278,7 @@ selection = "#74ADE83D"
 [markdown]
 heading = "#FF0000"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
 
         assert_ne!(resolved.markdown.heading, original_heading);
@@ -875,7 +1295,7 @@ heading = "#FF0000"
 paragraph_spacing_ratio = 0.9
 code_line_height_ratio = 1.2
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
 
         assert_eq!(resolved.markdown.spacing.paragraph_spacing_ratio, 0.9);
@@ -895,7 +1315,7 @@ code_line_height_ratio = 1.2
         let toml_str = r##"
 is_dark = false
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
         assert!(!resolved.is_dark);
     }
@@ -923,7 +1343,7 @@ link = "#FF00FF"
 keyword = "#C678DD"
 string = "#98C379"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
 
         assert_eq!(resolved.display_name, "Full Override");
@@ -945,7 +1365,7 @@ string = "#98C379"
 [palette]
 accent = "#ff6b6b"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
         assert!((resolved.palette.accent[0] - 1.0).abs() < 0.01);
         assert!((resolved.palette.accent[1] - 0.42).abs() < 0.01);
@@ -958,7 +1378,7 @@ accent = "#ff6b6b"
 [editor]
 cursor = "not-a-color"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let err = file.resolve(&base).unwrap_err();
         assert!(err.to_string().contains("cursor"));
     }
@@ -970,7 +1390,7 @@ cursor = "not-a-color"
 [markdown]
 heading = "invalid"
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let err = file.resolve(&base).unwrap_err();
         assert!(err.to_string().contains("heading"));
     }
@@ -985,7 +1405,7 @@ branch_palette = ["#FF0000", "#00FF00"]
 [mindmap.geometry]
 depth_font_scales = [1.5, 1.2]
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let resolved = file.resolve(&base).unwrap();
 
         assert_eq!(
@@ -1003,7 +1423,7 @@ depth_font_scales = [1.5, 1.2]
 [mindmap.canvas]
 branch_palette = ["#FF0000", "not-a-color"]
 "##;
-        let file: ThemeFile = toml::from_str(toml_str).unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str(toml_str).unwrap();
         let err = file.resolve(&base).unwrap_err();
         assert!(err.to_string().contains("branch_palette"));
     }
@@ -1011,7 +1431,7 @@ branch_palette = ["#FF0000", "not-a-color"]
     #[test]
     fn resolve_mindmap_unset_palette_and_scales_keep_base() {
         let base = ThemeDefinition::default_dark();
-        let file: ThemeFile = toml::from_str("").unwrap();
+        let file: ThemeFile = ThemeFile::from_toml_str("").unwrap();
         let resolved = file.resolve(&base).unwrap();
 
         assert_eq!(resolved.mindmap.canvas.branch_palette, base.mindmap.canvas.branch_palette);

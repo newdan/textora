@@ -199,7 +199,7 @@ impl ThemeRegistry {
         let mut parsed = BTreeMap::new();
         let mut failed_ids = BTreeSet::new();
         for (id, source) in accepted {
-            match toml::from_str::<ThemeFile>(&source.content) {
+            match ThemeFile::from_toml_str(&source.content) {
                 Ok(file) => {
                     let base_id = file.extends.clone().unwrap_or_else(|| {
                         if file.is_dark.unwrap_or(true) {

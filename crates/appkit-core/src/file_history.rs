@@ -47,7 +47,7 @@ impl FileHistory {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e),
         };
-        let mut h = toml::from_str::<Self>(&toml_str).map_err(|e| {
+        let mut h = Self::from_toml_str(&toml_str).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Failed to parse file history at {}: {}", path.display(), e),
@@ -62,9 +62,58 @@ impl FileHistory {
     }
 
     pub fn save_to(path: &Path, history: &Self) -> io::Result<()> {
-        let toml_str = toml::to_string_pretty(history)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let toml_str = history
+            .to_toml_string_pretty()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         crate::persistence::atomic_write(path, toml_str.as_bytes())
+    }
+
+    /// Parse a file-history TOML document without generic `serde` monomorphization.
+    pub fn from_toml_str(source: &str) -> Result<Self, String> {
+        let value = source.parse::<toml::Value>().map_err(|e| e.to_string())?;
+        let table = value.as_table().ok_or_else(|| "history root must be a table".to_owned())?;
+        let version = req_u32(table, "version")?;
+        let excluded_dirs = table
+            .get("excluded_dirs")
+            .ok_or_else(|| "missing required field `excluded_dirs`".to_owned())?
+            .as_array()
+            .ok_or_else(|| "field `excluded_dirs` must be an array".to_owned())?
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(PathBuf::from)
+                    .ok_or_else(|| "`excluded_dirs` entries must be strings".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let entries = table
+            .get("entries")
+            .ok_or_else(|| "missing required field `entries`".to_owned())?
+            .as_array()
+            .ok_or_else(|| "field `entries` must be an array".to_owned())?
+            .iter()
+            .map(|item| {
+                let entry_table =
+                    item.as_table().ok_or_else(|| "`entries` item must be a table".to_owned())?;
+                parse_history_entry(entry_table)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { version, excluded_dirs, entries })
+    }
+
+    /// Serialize a file-history TOML document without generic `serde` monomorphization.
+    pub fn to_toml_string_pretty(&self) -> Result<String, String> {
+        let mut table = toml::value::Table::new();
+        table.insert("version".to_owned(), toml::Value::Integer(i64::from(self.version)));
+        let excluded = self
+            .excluded_dirs
+            .iter()
+            .map(|path| path_to_toml("excluded_dirs", path))
+            .collect::<Result<Vec<_>, _>>()?;
+        table.insert("excluded_dirs".to_owned(), toml::Value::Array(excluded));
+        let entries =
+            self.entries.iter().map(history_entry_to_toml).collect::<Result<Vec<_>, _>>()?;
+        table.insert("entries".to_owned(), toml::Value::Array(entries));
+        toml::to_string_pretty(&toml::Value::Table(table)).map_err(|e| e.to_string())
     }
 
     pub fn record(&mut self, entry: FileHistoryEntry) {
@@ -142,6 +191,110 @@ impl FileHistory {
 }
 
 // ── Helpers ──
+
+fn parse_history_entry(table: &toml::value::Table) -> Result<FileHistoryEntry, String> {
+    let file_path = PathBuf::from(req_str(table, "file_path")?);
+    let workspace_root = table
+        .get("workspace_root")
+        .map(|v| {
+            v.as_str()
+                .map(PathBuf::from)
+                .ok_or_else(|| "field `workspace_root` must be a string".to_owned())
+        })
+        .transpose()?;
+    Ok(FileHistoryEntry {
+        file_path,
+        workspace_root,
+        last_closed_at: req_u64(table, "last_closed_at")?,
+        last_cursor_line: req_usize(table, "last_cursor_line")?,
+        last_cursor_col: req_usize(table, "last_cursor_col")?,
+        scroll_anchor_line: req_usize(table, "scroll_anchor_line")?,
+        scroll_anchor_offset: req_f32(table, "scroll_anchor_offset")?,
+    })
+}
+
+fn history_entry_to_toml(entry: &FileHistoryEntry) -> Result<toml::Value, String> {
+    let mut table = toml::value::Table::new();
+    table.insert("file_path".to_owned(), path_to_toml("file_path", &entry.file_path)?);
+    if let Some(root) = &entry.workspace_root {
+        table.insert("workspace_root".to_owned(), path_to_toml("workspace_root", root)?);
+    }
+    table
+        .insert("last_closed_at".to_owned(), toml_int_u64("last_closed_at", entry.last_closed_at)?);
+    table.insert(
+        "last_cursor_line".to_owned(),
+        toml_int_usize("last_cursor_line", entry.last_cursor_line)?,
+    );
+    table.insert(
+        "last_cursor_col".to_owned(),
+        toml_int_usize("last_cursor_col", entry.last_cursor_col)?,
+    );
+    table.insert(
+        "scroll_anchor_line".to_owned(),
+        toml_int_usize("scroll_anchor_line", entry.scroll_anchor_line)?,
+    );
+    table.insert(
+        "scroll_anchor_offset".to_owned(),
+        toml::Value::Float(f64::from(entry.scroll_anchor_offset)),
+    );
+    Ok(toml::Value::Table(table))
+}
+
+fn req_str<'a>(table: &'a toml::value::Table, key: &str) -> Result<&'a str, String> {
+    table
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("missing or invalid string field `{key}`"))
+}
+
+fn req_u32(table: &toml::value::Table, key: &str) -> Result<u32, String> {
+    table
+        .get(key)
+        .and_then(|v| v.as_integer())
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| format!("missing or invalid u32 field `{key}`"))
+}
+
+fn req_u64(table: &toml::value::Table, key: &str) -> Result<u64, String> {
+    table
+        .get(key)
+        .and_then(|v| v.as_integer())
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or_else(|| format!("missing or invalid u64 field `{key}`"))
+}
+
+fn req_usize(table: &toml::value::Table, key: &str) -> Result<usize, String> {
+    table
+        .get(key)
+        .and_then(|v| v.as_integer())
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| format!("missing or invalid usize field `{key}`"))
+}
+
+fn req_f32(table: &toml::value::Table, key: &str) -> Result<f32, String> {
+    match table.get(key) {
+        Some(toml::Value::Float(n)) => Ok(*n as f32),
+        Some(toml::Value::Integer(n)) => Ok(*n as f32),
+        _ => Err(format!("missing or invalid number field `{key}`")),
+    }
+}
+
+fn path_to_toml(field: &str, path: &Path) -> Result<toml::Value, String> {
+    let text = path.to_str().ok_or_else(|| format!("field `{field}` path is not valid UTF-8"))?;
+    Ok(toml::Value::String(text.to_owned()))
+}
+
+fn toml_int_u64(field: &str, value: u64) -> Result<toml::Value, String> {
+    i64::try_from(value)
+        .map(toml::Value::Integer)
+        .map_err(|_| format!("field `{field}` exceeds TOML integer range"))
+}
+
+fn toml_int_usize(field: &str, value: usize) -> Result<toml::Value, String> {
+    i64::try_from(value)
+        .map(toml::Value::Integer)
+        .map_err(|_| format!("field `{field}` exceeds TOML integer range"))
+}
 
 fn current_timestamp_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64

@@ -1,6 +1,5 @@
 //! Persistence for product settings.toml.
 
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 use ui::settings::ThemeMode;
 use ui::typography::TextSpacingMode;
@@ -11,35 +10,24 @@ fn default_sidebar_width() -> f32 {
     ui::sidebar::SidebarConfig::DEFAULT_WIDTH_LOGICAL
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub(crate) struct PersistedSettings {
     pub view_mode: ViewMode,
     pub theme_mode: ThemeMode,
-    #[serde(default = "default_true")]
     pub show_line_numbers: bool,
-    #[serde(default = "default_true")]
     pub word_wrap: bool,
-    #[serde(default = "default_false")]
     pub markdown_first_line_indent: bool,
-    #[serde(default)]
     pub text_spacing_mode: TextSpacingMode,
-    #[serde(default = "default_false")]
     pub show_status_bar: bool,
     /// Font family name (platform-dependent default, e.g. "Menlo" on macOS).
-    #[serde(default = "default_font_family")]
     pub font_family: String,
     /// Logical font size in points (before DPI scaling).
-    #[serde(default = "default_font_size")]
     pub font_size: f32,
     /// Line height multiplier relative to font_size.
-    #[serde(default = "default_line_height_ratio")]
     pub line_height_ratio: f32,
     /// Tab width in spaces.
-    #[serde(default = "default_tab_width")]
     pub tab_width: usize,
     /// Sidebar width in logical pixels (before DPI scaling).
-    #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
     /// Window geometry in logical pixels: None means not persisted or first run.
     pub window_x: Option<i32>,
@@ -47,7 +35,6 @@ pub(crate) struct PersistedSettings {
     pub window_width: Option<u32>,
     pub window_height: Option<u32>,
     /// Whether `window_width` and `window_height` are stored in logical pixels.
-    #[serde(default)]
     pub window_geometry_is_logical: bool,
 }
 
@@ -89,14 +76,191 @@ impl PersistedSettings {
         self.line_height_ratio = settings.line_height_ratio;
         self.tab_width = settings.tab_width;
     }
+    pub(crate) fn from_toml_str(source: &str) -> Result<Self, String> {
+        let value = source.parse::<toml::Value>().map_err(|e| e.to_string())?;
+        let toml::Value::Table(table) = value else {
+            return Err("settings root must be a TOML table".to_owned());
+        };
+        let mut settings = Self::default();
+        for (key, entry) in &table {
+            apply_settings_field(&mut settings, key, entry)?;
+        }
+        Ok(settings)
+    }
+
+    pub(crate) fn to_toml_string_pretty(&self) -> Result<String, String> {
+        let mut table = toml::value::Table::new();
+        table.insert(
+            "view_mode".to_owned(),
+            toml::Value::String(view_mode_to_str(self.view_mode).to_owned()),
+        );
+        table.insert(
+            "theme_mode".to_owned(),
+            toml::Value::String(theme_mode_to_str(self.theme_mode).to_owned()),
+        );
+        table.insert("show_line_numbers".to_owned(), toml::Value::Boolean(self.show_line_numbers));
+        table.insert("word_wrap".to_owned(), toml::Value::Boolean(self.word_wrap));
+        table.insert(
+            "markdown_first_line_indent".to_owned(),
+            toml::Value::Boolean(self.markdown_first_line_indent),
+        );
+        table.insert(
+            "text_spacing_mode".to_owned(),
+            toml::Value::String(text_spacing_mode_to_str(self.text_spacing_mode).to_owned()),
+        );
+        table.insert("show_status_bar".to_owned(), toml::Value::Boolean(self.show_status_bar));
+        table.insert("font_family".to_owned(), toml::Value::String(self.font_family.clone()));
+        table.insert("font_size".to_owned(), toml::Value::Float(f64::from(self.font_size)));
+        table.insert(
+            "line_height_ratio".to_owned(),
+            toml::Value::Float(f64::from(self.line_height_ratio)),
+        );
+        table.insert(
+            "tab_width".to_owned(),
+            toml::Value::Integer(
+                i64::try_from(self.tab_width)
+                    .map_err(|_| "tab_width exceeds TOML integer range".to_owned())?,
+            ),
+        );
+        table.insert("sidebar_width".to_owned(), toml::Value::Float(f64::from(self.sidebar_width)));
+        if let Some(x) = self.window_x {
+            table.insert("window_x".to_owned(), toml::Value::Integer(i64::from(x)));
+        }
+        if let Some(y) = self.window_y {
+            table.insert("window_y".to_owned(), toml::Value::Integer(i64::from(y)));
+        }
+        if let Some(width) = self.window_width {
+            table.insert("window_width".to_owned(), toml::Value::Integer(i64::from(width)));
+        }
+        if let Some(height) = self.window_height {
+            table.insert("window_height".to_owned(), toml::Value::Integer(i64::from(height)));
+        }
+        table.insert(
+            "window_geometry_is_logical".to_owned(),
+            toml::Value::Boolean(self.window_geometry_is_logical),
+        );
+        toml::to_string_pretty(&toml::Value::Table(table)).map_err(|e| e.to_string())
+    }
 }
 
-fn default_true() -> bool {
-    true
+fn apply_settings_field(
+    settings: &mut PersistedSettings,
+    key: &str,
+    value: &toml::Value,
+) -> Result<(), String> {
+    match key {
+        "view_mode" => settings.view_mode = parse_view_mode(expect_str(value, key)?)?,
+        "theme_mode" => settings.theme_mode = parse_theme_mode(expect_str(value, key)?)?,
+        "show_line_numbers" => settings.show_line_numbers = expect_bool(value, key)?,
+        "word_wrap" => settings.word_wrap = expect_bool(value, key)?,
+        "markdown_first_line_indent" => {
+            settings.markdown_first_line_indent = expect_bool(value, key)?
+        }
+        "text_spacing_mode" => {
+            settings.text_spacing_mode = parse_text_spacing_mode(expect_str(value, key)?)?
+        }
+        "show_status_bar" => settings.show_status_bar = expect_bool(value, key)?,
+        "font_family" => settings.font_family = expect_str(value, key)?.to_owned(),
+        "font_size" => settings.font_size = expect_f32(value, key)?,
+        "line_height_ratio" => settings.line_height_ratio = expect_f32(value, key)?,
+        "tab_width" => settings.tab_width = expect_usize(value, key)?,
+        "sidebar_width" => settings.sidebar_width = expect_f32(value, key)?,
+        "window_x" => settings.window_x = Some(expect_i32(value, key)?),
+        "window_y" => settings.window_y = Some(expect_i32(value, key)?),
+        "window_width" => settings.window_width = Some(expect_u32(value, key)?),
+        "window_height" => settings.window_height = Some(expect_u32(value, key)?),
+        "window_geometry_is_logical" => {
+            settings.window_geometry_is_logical = expect_bool(value, key)?
+        }
+        _ => {}
+    }
+    Ok(())
 }
-fn default_false() -> bool {
-    false
+
+fn expect_str<'a>(value: &'a toml::Value, field: &str) -> Result<&'a str, String> {
+    value.as_str().ok_or_else(|| format!("settings field `{field}` must be a string"))
 }
+
+fn expect_bool(value: &toml::Value, field: &str) -> Result<bool, String> {
+    value.as_bool().ok_or_else(|| format!("settings field `{field}` must be a boolean"))
+}
+
+fn expect_f32(value: &toml::Value, field: &str) -> Result<f32, String> {
+    match value {
+        toml::Value::Float(v) => Ok(*v as f32),
+        toml::Value::Integer(v) => Ok(*v as f32),
+        _ => Err(format!("settings field `{field}` must be a number")),
+    }
+}
+
+fn expect_i32(value: &toml::Value, field: &str) -> Result<i32, String> {
+    value
+        .as_integer()
+        .and_then(|v| i32::try_from(v).ok())
+        .ok_or_else(|| format!("settings field `{field}` must be a 32-bit integer"))
+}
+
+fn expect_u32(value: &toml::Value, field: &str) -> Result<u32, String> {
+    value
+        .as_integer()
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or_else(|| format!("settings field `{field}` must be a non-negative 32-bit integer"))
+}
+
+fn expect_usize(value: &toml::Value, field: &str) -> Result<usize, String> {
+    value
+        .as_integer()
+        .and_then(|v| usize::try_from(v).ok())
+        .ok_or_else(|| format!("settings field `{field}` must be a non-negative integer"))
+}
+
+fn view_mode_to_str(mode: ViewMode) -> &'static str {
+    match mode {
+        ViewMode::Sidebar => "sidebar",
+        ViewMode::Tabs => "tabs",
+    }
+}
+
+fn parse_view_mode(raw: &str) -> Result<ViewMode, String> {
+    match raw {
+        "sidebar" => Ok(ViewMode::Sidebar),
+        "tabs" => Ok(ViewMode::Tabs),
+        _ => Err(format!("unknown view_mode `{raw}`")),
+    }
+}
+
+fn theme_mode_to_str(mode: ThemeMode) -> &'static str {
+    match mode {
+        ThemeMode::System => "System",
+        ThemeMode::Dark => "Dark",
+        ThemeMode::Light => "Light",
+    }
+}
+
+fn parse_theme_mode(raw: &str) -> Result<ThemeMode, String> {
+    match raw {
+        "System" => Ok(ThemeMode::System),
+        "Dark" | "ClaudeDark" => Ok(ThemeMode::Dark),
+        "Light" | "ClaudeLight" => Ok(ThemeMode::Light),
+        _ => Err(format!("unknown theme_mode `{raw}`")),
+    }
+}
+
+fn text_spacing_mode_to_str(mode: TextSpacingMode) -> &'static str {
+    match mode {
+        TextSpacingMode::Natural => "natural",
+        TextSpacingMode::Verbatim => "verbatim",
+    }
+}
+
+fn parse_text_spacing_mode(raw: &str) -> Result<TextSpacingMode, String> {
+    match raw {
+        "natural" => Ok(TextSpacingMode::Natural),
+        "verbatim" => Ok(TextSpacingMode::Verbatim),
+        _ => Err(format!("unknown text_spacing_mode `{raw}`")),
+    }
+}
+
 fn default_font_family() -> String {
     ui::settings::platform_default_font_family().to_string()
 }
@@ -118,7 +282,7 @@ pub(crate) fn load(path: &Path) -> std::io::Result<PersistedSettings> {
         }
         Err(e) => return Err(e),
     };
-    toml::from_str(&toml_str).map_err(|e| {
+    PersistedSettings::from_toml_str(&toml_str).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Failed to parse settings at {}: {}", path.display(), e),
@@ -127,7 +291,8 @@ pub(crate) fn load(path: &Path) -> std::io::Result<PersistedSettings> {
 }
 
 pub(crate) fn save(path: &Path, settings: &PersistedSettings) -> std::io::Result<()> {
-    let toml_str = toml::to_string_pretty(settings)
+    let toml_str = settings
+        .to_toml_string_pretty()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     appkit_core::persistence::atomic_write(path, toml_str.as_bytes())
 }
@@ -153,9 +318,9 @@ mod tests {
         assert!(!persisted.markdown_first_line_indent);
 
         persisted.markdown_first_line_indent = true;
-        let serialized = toml::to_string(&persisted).expect("测试设置应可序列化");
-        let loaded: super::PersistedSettings =
-            toml::from_str(&serialized).expect("测试设置应可反序列化");
+        let serialized = persisted.to_toml_string_pretty().expect("测试设置应可序列化");
+        let loaded =
+            super::PersistedSettings::from_toml_str(&serialized).expect("测试设置应可反序列化");
 
         assert!(loaded.markdown_first_line_indent);
     }
@@ -166,17 +331,17 @@ mod tests {
         assert_eq!(persisted.text_spacing_mode, ui::typography::TextSpacingMode::Natural);
 
         persisted.text_spacing_mode = ui::typography::TextSpacingMode::Verbatim;
-        let serialized = toml::to_string(&persisted).expect("测试设置应可序列化");
-        let loaded: super::PersistedSettings =
-            toml::from_str(&serialized).expect("测试设置应可反序列化");
+        let serialized = persisted.to_toml_string_pretty().expect("测试设置应可序列化");
+        let loaded =
+            super::PersistedSettings::from_toml_str(&serialized).expect("测试设置应可反序列化");
 
         assert_eq!(loaded.text_spacing_mode, ui::typography::TextSpacingMode::Verbatim);
     }
 
     #[test]
     fn missing_text_spacing_mode_uses_natural_for_legacy_config() {
-        let parsed: super::PersistedSettings =
-            toml::from_str("view_mode = \"sidebar\"\n").expect("旧设置应可反序列化");
+        let parsed = super::PersistedSettings::from_toml_str("view_mode = \"sidebar\"\n")
+            .expect("旧设置应可反序列化");
 
         assert_eq!(parsed.text_spacing_mode, ui::typography::TextSpacingMode::Natural);
     }
@@ -190,8 +355,8 @@ mod tests {
     #[test]
     fn persisted_settings_roundtrip() {
         let s = PersistedSettings { view_mode: ViewMode::Sidebar, ..Default::default() };
-        let toml_str = toml::to_string_pretty(&s).unwrap();
-        let parsed: PersistedSettings = toml::from_str(&toml_str).unwrap();
+        let toml_str = s.to_toml_string_pretty().unwrap();
+        let parsed = PersistedSettings::from_toml_str(&toml_str).unwrap();
         assert_eq!(parsed.view_mode, ViewMode::Sidebar);
     }
 
@@ -268,7 +433,7 @@ mod tests {
     #[test]
     fn missing_field_falls_back_to_default() {
         let toml_str = "";
-        let parsed: PersistedSettings = toml::from_str(toml_str).unwrap();
+        let parsed = PersistedSettings::from_toml_str(toml_str).unwrap();
         assert_eq!(parsed.view_mode, ViewMode::Sidebar);
         assert_eq!(parsed.window_x, None);
         assert_eq!(parsed.window_y, None);
@@ -286,8 +451,8 @@ mod tests {
             window_height: Some(800),
             ..Default::default()
         };
-        let toml_str = toml::to_string_pretty(&s).unwrap();
-        let parsed: PersistedSettings = toml::from_str(&toml_str).unwrap();
+        let toml_str = s.to_toml_string_pretty().unwrap();
+        let parsed = PersistedSettings::from_toml_str(&toml_str).unwrap();
         assert_eq!(parsed.window_x, Some(100));
         assert_eq!(parsed.window_y, Some(200));
         assert_eq!(parsed.window_width, Some(1200));
@@ -297,8 +462,8 @@ mod tests {
     #[test]
     fn theme_mode_roundtrip() {
         let s = PersistedSettings { theme_mode: ThemeMode::Dark, ..Default::default() };
-        let toml_str = toml::to_string_pretty(&s).unwrap();
-        let parsed: PersistedSettings = toml::from_str(&toml_str).unwrap();
+        let toml_str = s.to_toml_string_pretty().unwrap();
+        let parsed = PersistedSettings::from_toml_str(&toml_str).unwrap();
         assert_eq!(parsed.theme_mode, ThemeMode::Dark);
     }
 
@@ -312,7 +477,7 @@ mod tests {
     fn theme_mode_legacy_claude_dark_deserializes_as_dark() {
         // Old config files may contain "ClaudeDark" — should deserialize as Dark
         let toml_str = "theme_mode = \"ClaudeDark\"\n";
-        let parsed: PersistedSettings = toml::from_str(toml_str).unwrap();
+        let parsed = PersistedSettings::from_toml_str(toml_str).unwrap();
         assert_eq!(parsed.theme_mode, ThemeMode::Dark);
     }
 
@@ -320,7 +485,7 @@ mod tests {
     fn theme_mode_legacy_claude_light_deserializes_as_light() {
         // Old config files may contain "ClaudeLight" — should deserialize as Light
         let toml_str = "theme_mode = \"ClaudeLight\"\n";
-        let parsed: PersistedSettings = toml::from_str(toml_str).unwrap();
+        let parsed = PersistedSettings::from_toml_str(toml_str).unwrap();
         assert_eq!(parsed.theme_mode, ThemeMode::Light);
     }
 
@@ -344,8 +509,8 @@ mod tests {
             show_status_bar: true,
             ..Default::default()
         };
-        let toml_str = toml::to_string_pretty(&s).unwrap();
-        let parsed: PersistedSettings = toml::from_str(&toml_str).unwrap();
+        let toml_str = s.to_toml_string_pretty().unwrap();
+        let parsed = PersistedSettings::from_toml_str(&toml_str).unwrap();
         assert!(!parsed.show_line_numbers);
         assert!(!parsed.word_wrap);
         assert!(parsed.show_status_bar);
@@ -360,7 +525,7 @@ mod tests {
     #[test]
     fn show_status_bar_missing_field_defaults_false() {
         let toml_str = "view_mode = \"sidebar\"\n";
-        let parsed: PersistedSettings = toml::from_str(toml_str).unwrap();
+        let parsed = PersistedSettings::from_toml_str(toml_str).unwrap();
         assert!(!parsed.show_status_bar);
     }
 
@@ -391,8 +556,8 @@ mod tests {
             tab_width: 2,
             ..Default::default()
         };
-        let toml_str = toml::to_string_pretty(&s).unwrap();
-        let parsed: PersistedSettings = toml::from_str(&toml_str).unwrap();
+        let toml_str = s.to_toml_string_pretty().unwrap();
+        let parsed = PersistedSettings::from_toml_str(&toml_str).unwrap();
         assert_eq!(parsed.font_family, "Menlo");
         assert_eq!(parsed.font_size, 18.0);
         assert_eq!(parsed.line_height_ratio, 1.5);
@@ -402,7 +567,7 @@ mod tests {
     #[test]
     fn missing_font_fields_use_defaults() {
         let toml_str = "view_mode = \"sidebar\"\n";
-        let parsed: PersistedSettings = toml::from_str(toml_str).unwrap();
+        let parsed = PersistedSettings::from_toml_str(toml_str).unwrap();
         assert_eq!(parsed.font_family, ui::settings::platform_default_font_family());
         assert_eq!(parsed.font_size, 15.0);
         assert_eq!(parsed.line_height_ratio, 1.618);
@@ -418,15 +583,15 @@ mod tests {
     #[test]
     fn sidebar_width_roundtrip() {
         let s = PersistedSettings { sidebar_width: 300.0, ..Default::default() };
-        let toml_str = toml::to_string_pretty(&s).unwrap();
-        let parsed: PersistedSettings = toml::from_str(&toml_str).unwrap();
+        let toml_str = s.to_toml_string_pretty().unwrap();
+        let parsed = PersistedSettings::from_toml_str(&toml_str).unwrap();
         assert_eq!(parsed.sidebar_width, 300.0);
     }
 
     #[test]
     fn missing_sidebar_width_uses_default() {
         let toml_str = "view_mode = \"sidebar\"\n";
-        let parsed: PersistedSettings = toml::from_str(toml_str).unwrap();
+        let parsed = PersistedSettings::from_toml_str(toml_str).unwrap();
         assert_eq!(parsed.sidebar_width, 220.0);
     }
 
@@ -440,8 +605,8 @@ mod tests {
             ..PersistedSettings::default()
         };
 
-        let encoded = toml::to_string(&persisted).unwrap();
-        let decoded: PersistedSettings = toml::from_str(&encoded).unwrap();
+        let encoded = persisted.to_toml_string_pretty().unwrap();
+        let decoded = PersistedSettings::from_toml_str(&encoded).unwrap();
         assert_eq!(decoded.sidebar_width, 220.0);
     }
 
