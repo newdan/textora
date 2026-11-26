@@ -1,3 +1,9 @@
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SelectedControlColors {
+    pub(crate) background: [f32; 4],
+    pub(crate) foreground: [f32; 4],
+}
+
 /// Semantic design tokens for UI chrome — backgrounds, text, borders, accents.
 #[derive(Debug, Clone)]
 pub struct ColorPalette {
@@ -18,9 +24,10 @@ pub struct ColorPalette {
     pub border_strong: [f32; 4],
     pub shadow: [f32; 4],
 
-    // Accents & Feedback (10)
+    // Accents & Feedback (11)
     pub accent: [f32; 4],
     pub on_accent: [f32; 4],
+    pub(crate) selected_control: Option<SelectedControlColors>,
     pub accent_text: [f32; 4],
     pub highlight: [f32; 4],
     pub inactive_highlight: [f32; 4],
@@ -72,7 +79,13 @@ impl ColorPalette {
             &mut self.sidebar_hover_bg,
             &mut self.sidebar_active_bg,
             &mut self.sidebar_active_fg,
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            self.selected_control
+                .iter_mut()
+                .flat_map(|colors| [&mut colors.background, &mut colors.foreground]),
+        ) {
             for ch in c[..3].iter_mut() {
                 *ch = ch.powf(gamma);
             }

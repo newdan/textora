@@ -715,6 +715,10 @@ fn resolve_palette(target: &mut ColorPalette, src: &PaletteFile) -> Result<(), R
     apply_color(&mut target.shadow, &src.shadow, "palette.shadow")?;
     apply_color(&mut target.accent, &src.accent, "palette.accent")?;
     resolve_readability_roles(target, src)?;
+    // An explicit accent color takes precedence over the built-in pair for selected controls.
+    if src.accent.is_some() || src.on_accent.is_some() {
+        target.selected_control = None;
+    }
     apply_color(&mut target.highlight, &src.highlight, "palette.highlight")?;
     apply_color(
         &mut target.inactive_highlight,
@@ -1096,6 +1100,8 @@ focus_ring = "#546474"
         ] {
             assert_eq!(actual, parse_hex_field(expected, "test role").expect("valid test hex"));
         }
+        let theme = crate::theme::Theme::from_definition(&resolved);
+        assert_eq!(theme.application_theme().selected_control.foreground, theme.palette.on_accent);
     }
 
     #[test]
@@ -1110,6 +1116,8 @@ focus_ring = "#546474"
             assert_eq!(inherited.palette.warning_text, base.palette.warning_text);
             assert_eq!(inherited.palette.focus_ring, base.palette.focus_ring);
             assert_ne!(inherited.palette.accent, base.palette.accent);
+            let theme = crate::theme::Theme::from_definition(&inherited);
+            assert_eq!(theme.application_theme().selected_control.background, theme.palette.accent);
         }
     }
 

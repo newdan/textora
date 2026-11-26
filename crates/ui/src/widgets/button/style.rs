@@ -161,7 +161,7 @@ impl ButtonStyle {
 
     pub fn segmented(application: ApplicationTheme) -> Self {
         Self {
-            selected_foreground: application.on_accent,
+            selected_foreground: application.selected_control.foreground,
             background: TRANSPARENT,
             border: TRANSPARENT,
             hover_background: blend(
@@ -174,7 +174,7 @@ impl ButtonStyle {
                 application.accent,
                 SEGMENT_PRESSED_ACCENT_BLEND,
             ),
-            selected_background: application.accent,
+            selected_background: application.selected_control.background,
             disabled_background: TRANSPARENT,
             ..Self::action(application)
         }
@@ -285,6 +285,16 @@ mod tests {
             Theme::resolve_builtin(crate::ThemeMode::Light, winit::window::Theme::Light),
             Theme::resolve_builtin(crate::ThemeMode::Dark, winit::window::Theme::Dark),
         ]
+    }
+
+    #[test]
+    fn light_theme_filled_controls_use_white_selected_labels() {
+        let [light, _dark] = builtin_themes();
+        let style = ButtonStyle::segmented(light.application_theme());
+        let white = [1.0; 4];
+
+        assert_eq!(style.foreground_color(ButtonVisualState::Selected, 1.0), white);
+        assert_eq!(style.foreground_color(ButtonVisualState::Normal, 1.0), light.palette.text_main);
     }
 
     #[test]

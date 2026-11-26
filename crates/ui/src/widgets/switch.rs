@@ -97,11 +97,12 @@ impl Switch {
 
     fn track_color(&self, ctx: &PaintCtx) -> [f32; 4] {
         let application = ctx.theme.application_theme();
-        let base_color =
-            if self.checked { application.accent } else { application.control_surface };
-        let hover_target =
-            if self.checked { application.on_accent } else { application.text_primary };
-        let hover_blend = if self.checked { CHECKED_HOVER_BLEND } else { UNCHECKED_HOVER_BLEND };
+        let (base_color, hover_target, hover_blend) = if self.checked {
+            let selected = application.selected_control;
+            (selected.background, selected.foreground, CHECKED_HOVER_BLEND)
+        } else {
+            (application.control_surface, application.text_primary, UNCHECKED_HOVER_BLEND)
+        };
         let color = if self.hovered {
             blend_color(base_color, hover_target, hover_blend)
         } else {
@@ -128,15 +129,10 @@ impl Switch {
     }
 
     fn thumb_color(&self, ctx: &PaintCtx) -> [f32; 4] {
-        if self.checked {
-            return apply_alpha(
-                ctx.theme.application_theme().on_accent,
-                ctx.global_alpha * self.alpha_factor(),
-            );
-        }
-
         let application = ctx.theme.application_theme();
-        let color = if self.hovered {
+        let color = if self.checked {
+            application.selected_control.foreground
+        } else if self.hovered {
             blend_color(application.text_secondary, application.text_primary, THUMB_HOVER_BLEND)
         } else {
             application.text_secondary
@@ -508,6 +504,22 @@ mod tests {
     }
 
     #[test]
+    fn light_theme_filled_controls_use_white_checked_thumbs() {
+        let theme = crate::theme::Theme::resolve_builtin(
+            crate::settings::ThemeMode::Light,
+            winit::window::Theme::Light,
+        );
+        let white = [1.0; 4];
+        for checked in [false, true] {
+            let switch = make_switch(WidgetId(95), checked);
+            let mut draw_list = DrawList::new();
+            switch.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+            let expected = if checked { white } else { theme.palette.text_muted };
+            assert_eq!(fill_color(&draw_list.cmds[2]), expected);
+        }
+    }
+
+    #[test]
     fn checked_switch_thumb_remains_visible_across_themes_and_hover_states() {
         const MINIMUM_THUMB_CONTRAST: f32 = 3.0;
         const CONTRAST_LUMINANCE_OFFSET: f32 = 0.05;
@@ -551,7 +563,8 @@ mod tests {
             let mut draw_list = DrawList::new();
             let context = PaintCtx::new(&mut draw_list, &theme, 1.0);
 
-            assert_eq!(hovered.thumb_color(&context), theme.application_theme().on_accent);
+            let selected = theme.application_theme().selected_control;
+            assert_eq!(hovered.thumb_color(&context), selected.foreground);
             assert_ne!(hovered.track_color(&context), idle.track_color(&context));
             assert_ne!(hovered.border_color(&context), idle.border_color(&context));
         }
@@ -580,7 +593,8 @@ mod tests {
                 let mut draw_list = DrawList::new();
                 switch.paint(&mut PaintCtx::new(&mut draw_list, &theme, dpi));
 
-                assert_eq!(fill_color(&draw_list.cmds[2]), application.on_accent);
+                assert_eq!(fill_color(&draw_list.cmds[0]), application.selected_control.background);
+                assert_eq!(fill_color(&draw_list.cmds[2]), application.selected_control.foreground);
                 match &draw_list.cmds[1] {
                     DrawCmd::StrokeRect { line_width, .. } => {
                         assert_eq!(*line_width, metrics.focus_ring_width_logical * dpi);

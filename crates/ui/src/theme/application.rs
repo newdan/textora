@@ -1,3 +1,4 @@
+use super::color::SelectedControlColors;
 use super::{ColorPalette, EditorTheme};
 
 const MODAL_SCRIM_MINIMUM_ALPHA: f32 = 0.45;
@@ -38,6 +39,7 @@ pub struct ApplicationTheme {
     pub button_danger_foreground: [f32; 4],
     pub accent: [f32; 4],
     pub on_accent: [f32; 4],
+    pub(crate) selected_control: SelectedControlColors,
     pub accent_text: [f32; 4],
     pub danger: [f32; 4],
     pub danger_text: [f32; 4],
@@ -96,6 +98,10 @@ impl ApplicationTheme {
             ),
             accent: palette.accent,
             on_accent: palette.on_accent,
+            selected_control: palette.selected_control.unwrap_or(SelectedControlColors {
+                background: palette.accent,
+                foreground: palette.on_accent,
+            }),
             accent_text: palette.accent_text,
             danger: palette.danger,
             danger_text: palette.danger_text,

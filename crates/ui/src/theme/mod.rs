@@ -28,6 +28,8 @@ pub use crate::theme_registry::{
 
 use std::collections::{BTreeMap, HashMap};
 
+use self::color::SelectedControlColors;
+
 const DEFAULT_DARK_ON_ACCENT_SRGB: &str = "#2a1504";
 const DEFAULT_DARK_ACCENT_TEXT_SRGB: &str = "#ffc080";
 const DEFAULT_DARK_DANGER_TEXT_SRGB: &str = "#f08a7f";
@@ -35,6 +37,8 @@ const DEFAULT_DARK_WARNING_TEXT_SRGB: &str = "#e5ca9a";
 const DEFAULT_DARK_FOCUS_RING_SRGB: &str = "#f59a4a";
 const DEFAULT_DARK_INPUT_BORDER_SRGB: &str = "#8a7865";
 const DEFAULT_LIGHT_ON_ACCENT_SRGB: &str = "#2a1808";
+const DEFAULT_LIGHT_SELECTED_CONTROL_BACKGROUND_SRGB: &str = "#c04f18";
+const DEFAULT_LIGHT_SELECTED_CONTROL_FOREGROUND_SRGB: &str = "#ffffff";
 const DEFAULT_LIGHT_ACCENT_TEXT_SRGB: &str = "#9a4815";
 const DEFAULT_LIGHT_DANGER_TEXT_SRGB: &str = "#b3261e";
 const DEFAULT_LIGHT_WARNING_TEXT_SRGB: &str = "#8a5a00";
@@ -190,6 +194,7 @@ impl ThemeDefinition {
                 shadow: [0.0000, 0.0000, 0.0000, 0.3216],
                 accent: [0.9608, 0.6039, 0.2902, 1.0000],
                 on_accent: builtin_srgb_color(DEFAULT_DARK_ON_ACCENT_SRGB),
+                selected_control: None,
                 accent_text: builtin_srgb_color(DEFAULT_DARK_ACCENT_TEXT_SRGB),
                 highlight: [0.9608, 0.6039, 0.2902, 1.0000],
                 inactive_highlight: [0.80, 0.60, 0.25, 0.70],
@@ -318,6 +323,10 @@ impl ThemeDefinition {
                 shadow: [0.0000, 0.0000, 0.0000, 0.0588],
                 accent: [0.9137, 0.4745, 0.1412, 1.0000],
                 on_accent: builtin_srgb_color(DEFAULT_LIGHT_ON_ACCENT_SRGB),
+                selected_control: Some(SelectedControlColors {
+                    background: builtin_srgb_color(DEFAULT_LIGHT_SELECTED_CONTROL_BACKGROUND_SRGB),
+                    foreground: builtin_srgb_color(DEFAULT_LIGHT_SELECTED_CONTROL_FOREGROUND_SRGB),
+                }),
                 accent_text: builtin_srgb_color(DEFAULT_LIGHT_ACCENT_TEXT_SRGB),
                 highlight: [0.9137, 0.4745, 0.1412, 1.0000],
                 inactive_highlight: [0.7, 0.6, 0.2, 0.5],
@@ -449,6 +458,7 @@ pub fn test_theme() -> Theme {
             shadow: [0.0, 0.0, 0.0, 0.30],
             accent: [0.4549, 0.6784, 0.9098, 1.0],
             on_accent: [0.9, 0.9, 0.9, 1.0],
+            selected_control: None,
             accent_text: [0.4549, 0.6784, 0.9098, 1.0],
             highlight: [1.0, 0.65, 0.2, 0.90],
             inactive_highlight: [0.80, 0.60, 0.25, 0.70],
@@ -578,6 +588,7 @@ pub fn test_light_theme() -> Theme {
             shadow: [0.0, 0.0, 0.0, 0.08],
             accent: [0.4549, 0.6784, 0.9098, 1.0],
             on_accent: [0.15, 0.15, 0.15, 1.0],
+            selected_control: None,
             accent_text: [0.4549, 0.6784, 0.9098, 1.0],
             highlight: [1.0, 0.55, 0.15, 0.7],
             inactive_highlight: [0.7, 0.6, 0.2, 0.5],
