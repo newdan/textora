@@ -9,10 +9,11 @@ use appkit_shell::ProductHost;
 use appkit_shell::accessibility_adapter::{
     PlatformAccessibilityEvent, PlatformAccessibilityWindowEvent,
 };
+use appkit_shell::editor_runtime::PreeditUpdate;
 pub(crate) use appkit_shell::window_input::winit_key_to_keycode;
 use appkit_shell::window_input::{scroll_delta_pixels, ui_modifiers};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
@@ -28,6 +29,13 @@ use ui::core::overlay::OverlayAction;
 use ui::core::widget::{KeyCode, Modifiers, WidgetAction};
 
 const FALLBACK_LOCAL_DEVICE_SHORT_ID: &str = "local";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputEventKind {
+    Key,
+    ImePreedit,
+    ImeCommit,
+}
 
 fn report_lifecycle_error(message: std::fmt::Arguments<'_>) {
     use std::io::Write;
@@ -477,6 +485,9 @@ impl App {
 
     /// Actual window event logic, wrapped in catch_unwind by the trait method.
     fn do_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        let entered_at = self.platform.input_latency_enabled().then(Instant::now);
+        let mut changed_input = None;
+        let mut redraw_measurement = None;
         if let Some(adapter) = self.platform.accessibility_mut()
             && let Some(window) = self.editor_runtime.window()
         {
@@ -532,11 +543,15 @@ impl App {
                     let action =
                         self.ui_shell.forward_ime(panel_event, self.editor_runtime.theme(), dpi);
                     if action.is_none() {
-                        let _ = self.editor_runtime.update_preedit(
+                        let status = self.editor_runtime.update_preedit_with_status(
                             self.editor_input_context(),
                             text,
                             cursor,
                         );
+                        if entered_at.is_some() && status == PreeditUpdate::Changed {
+                            changed_input =
+                                self.active_tab_id().map(|tab| (tab, InputEventKind::ImePreedit));
+                        }
                     } else {
                         let _ = self.editor_runtime.update_preedit(
                             self.editor_input_context(),
@@ -610,8 +625,10 @@ impl App {
                             self.platform.schedule_redraw();
                         }
                     } else {
+                        let before = entered_at.and_then(|_| self.editor_revision_for_input());
                         let effect = self.dispatch_ime_commit(text);
                         self.apply_effect(effect);
+                        changed_input = self.changed_input(before, InputEventKind::ImeCommit);
                     }
                 }
             }
@@ -696,10 +713,12 @@ impl App {
                     }
                     return; // consumed by search bar
                 }
+                let before = entered_at.and_then(|_| self.editor_revision_for_input());
                 let actions = crate::events::handle_keyboard(self, &event);
                 for action in actions {
                     self.dispatch(action, event_loop);
                 }
+                changed_input = self.changed_input(before, InputEventKind::Key);
             }
             WindowEvent::Focused(focused) => {
                 let effect = self.handle_window_focus_changed(focused);
@@ -793,6 +812,12 @@ impl App {
 
             WindowEvent::DroppedFile(path) => self.handle_dropped_file(&path),
             WindowEvent::RedrawRequested => {
+                if entered_at.is_some() {
+                    let active_tab = self.active_tab_id();
+                    if let Some(log) = self.platform.input_latency() {
+                        log.retain_tab(active_tab);
+                    }
+                }
                 self.platform.clear_redraw();
                 self.flush_pending_resize();
                 let sidebar_mode = matches!(
@@ -803,12 +828,55 @@ impl App {
                 {
                     self.platform.schedule_redraw();
                 }
-                self.render();
+                let submission = self.render();
+                let accessibility_started_at =
+                    self.platform.has_pending_input_sample().then(Instant::now);
                 self.publish_accessibility_tree();
+                if let (Some(redraw_started_at), Some(accessibility_started_at)) =
+                    (entered_at, accessibility_started_at)
+                {
+                    redraw_measurement =
+                        Some((redraw_started_at, submission, accessibility_started_at.elapsed()));
+                }
             }
             _ => {}
         }
+        let ime_position_started_at = redraw_measurement.as_ref().map(|_| Instant::now());
         self.update_ime_cursor_area();
+        if let Some(log) = self.platform.input_latency() {
+            if let (Some(entered_at), Some((tab, kind))) = (entered_at, changed_input) {
+                log.record(tab, kind, entered_at, Instant::now());
+            }
+            if let Some((redraw_started_at, submission, accessibility)) = redraw_measurement {
+                let finished_at = Instant::now();
+                let ime_position = ime_position_started_at
+                    .map_or(Duration::ZERO, |started_at| finished_at - started_at);
+                log.finish_redraw(
+                    redraw_started_at,
+                    submission,
+                    accessibility,
+                    ime_position,
+                    finished_at,
+                );
+            }
+        }
+    }
+
+    fn editor_revision_for_input(&self) -> Option<(appkit_core::tab_set::types::TabId, u32)> {
+        if !self.editor_runtime.keyboard_input_allowed(self.editor_input_context()) {
+            return None;
+        }
+        Some((self.active_tab_id()?, self.active_tab_session()?.document().generation()))
+    }
+
+    fn changed_input(
+        &self,
+        before: Option<(appkit_core::tab_set::types::TabId, u32)>,
+        kind: InputEventKind,
+    ) -> Option<(appkit_core::tab_set::types::TabId, InputEventKind)> {
+        let (tab, generation) = before?;
+        let (current_tab, current_generation) = self.editor_revision_for_input()?;
+        (current_tab == tab && current_generation != generation).then_some((tab, kind))
     }
 
     fn handle_window_focus_changed(&mut self, focused: bool) -> crate::app_effect::AppEffect {

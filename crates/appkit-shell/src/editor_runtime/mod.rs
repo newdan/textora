@@ -31,7 +31,7 @@ pub use document_save::{
 };
 pub use editor_frame::{
     EditorFrame, EmptyFrameTarget, RenderError, RenderResources, SurfaceFrameOptions,
-    WindowCornerClip,
+    SurfaceFramePreparation, SurfaceFrameSubmission, WindowCornerClip,
 };
 pub use editor_navigation::{
     apply_edit_hit_target, apply_target_to_document, set_wysiwyg_cursor_and_selection,
@@ -43,6 +43,7 @@ pub use editor_painter::{
 };
 pub use editor_pointer::{PluginPointerPolicy, PointerClickFocusLoss};
 pub use file_safety_session::{FileSafetyCandidate, FileSafetyObservation};
+pub use input_session::PreeditUpdate;
 pub use source_pointer::SourcePointerPolicy;
 pub const RESHAPE_AHEAD_LINES: usize = reshape_session::RESHAPE_AHEAD_LINES;
 
@@ -1380,6 +1381,15 @@ impl EditorRuntime {
         text: String,
         cursor: Option<(usize, usize)>,
     ) -> bool {
+        self.update_preedit_with_status(context, text, cursor).accepted()
+    }
+
+    pub fn update_preedit_with_status(
+        &mut self,
+        context: EditorInputContext,
+        text: String,
+        cursor: Option<(usize, usize)>,
+    ) -> PreeditUpdate {
         let update = self.input_session.update_preedit(context, text, cursor);
         if update == input_session::PreeditUpdate::Changed {
             if let Some(tab_id) = self.active_tab_id()
@@ -1389,7 +1399,7 @@ impl EditorRuntime {
             }
             self.render_session.request_redraw();
         }
-        update.accepted()
+        update
     }
 
     pub fn preedit(&self) -> (String, Option<(usize, usize)>) {

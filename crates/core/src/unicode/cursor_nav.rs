@@ -189,6 +189,21 @@ impl<'doc> CursorNav<'doc, TerminalAdvance> {
     }
 }
 
+/// Checks a byte position using the same grapheme rules as cursor movement.
+pub fn is_grapheme_boundary_in_text(text: &str, byte: usize) -> bool {
+    if !text.is_char_boundary(byte) {
+        return false;
+    }
+
+    let bytes = text.as_bytes();
+    // A grapheme always breaks after LF, including the LF in CRLF.
+    // Searching strictly before the target preserves the check inside CRLF.
+    let line_start = bytes[..byte].iter().rposition(|&value| value == b'\n').map_or(0, |lf| lf + 1);
+    let line_suffix = &bytes[line_start..];
+    let line_offset = ByteIndex(byte - line_start);
+    CursorNav::new(&line_suffix).goto_byte(line_offset).offset == line_offset
+}
+
 impl<'doc, A: GraphemeAdvance> CursorNav<'doc, A> {
     /// Creates a new [`CursorNav`] with a custom [`GraphemeAdvance`] implementation.
     pub fn with_advance(buffer: &'doc dyn ReadableDocument, advance: A) -> Self {
@@ -581,5 +596,24 @@ mod test {
         assert_eq!(cursor.offset, ByteIndex(1000));
         assert_eq!(cursor.visual_pos, VisualPoint { column: 8000, row: 0 });
         assert_eq!(cursor.column, 8000);
+    }
+
+    #[test]
+    fn line_local_boundaries_match_document_navigation() {
+        for text in ["", "first\r\n\nsecond\n", "prefix\r\né e\u{301} 🇨🇳🇺 👩‍🔬\n\u{301}का\ra"]
+        {
+            let document = text.as_bytes();
+            for byte in 0..=text.len() {
+                let expected = text.is_char_boundary(byte)
+                    && CursorNav::new(&document).goto_byte(ByteIndex(byte)).offset
+                        == ByteIndex(byte);
+                assert_eq!(
+                    is_grapheme_boundary_in_text(text, byte),
+                    expected,
+                    "byte {byte} in {text:?}"
+                );
+            }
+            assert!(!is_grapheme_boundary_in_text(text, text.len() + 1));
+        }
     }
 }

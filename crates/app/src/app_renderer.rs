@@ -8,7 +8,7 @@ use crate::app::App;
 use appkit_shell::editor_runtime::{
     EditorFrame, EditorPaintOptions, EditorRuntime, EmptyFrameTarget, PreeditAdvanceMeasure,
     PreparedPluginContent, RenderResources, SearchHighlightStyle, SurfaceFrameOptions,
-    TextCaretReveal, TextHighlightLayer, WindowCornerClip,
+    SurfaceFrameSubmission, TextCaretReveal, TextHighlightLayer, WindowCornerClip,
 };
 use ui::canvas::CanvasViewportSnapshot;
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_NOVEL_VIEW};
@@ -173,7 +173,7 @@ mod tests {
             .rsplit_once("    fn render_with_runtime_resources(")
             .expect("renderer should compose frames with runtime resources");
         let present_position = render
-            .find(".submit_surface_frame(")
+            .find(".submit_surface_frame_with_timing(")
             .expect("renderer should present through the shared surface submission");
         let startup_position = render
             .find("AppEvent::StartBackgroundServices")
@@ -188,6 +188,16 @@ mod tests {
             needs_redraw_after_render(true, false),
             "a redraw requested during render must schedule the follow-up frame"
         );
+    }
+
+    #[test]
+    fn render_consumes_the_runtime_request_that_started_it() {
+        let mut app = App::new(None);
+        app.editor_runtime.request_redraw();
+
+        let _ = app.render();
+
+        assert!(!app.editor_runtime.take_redraw_request());
     }
 
     #[test]
@@ -609,7 +619,10 @@ impl App {
         if toc_vis { 10.0 * metrics.dpi } else { 0.0 }
     }
 
-    pub(crate) fn render(&mut self) -> Option<()> {
+    pub(crate) fn render(&mut self) -> Option<SurfaceFrameSubmission> {
+        // This frame satisfies requests made before painting. The frame tail
+        // handles fresh requests raised during preparation or painting.
+        self.editor_runtime.take_redraw_request();
         let mut frame = self.editor_runtime.begin_frame().ok()?;
         EditorRuntime::with_render_resources_for(
             self,
@@ -622,7 +635,7 @@ impl App {
         &mut self,
         resources: &mut RenderResources,
         frame: &mut EditorFrame,
-    ) -> Option<()> {
+    ) -> Option<SurfaceFrameSubmission> {
         let _render_t0 = std::time::Instant::now();
         let _frame_interval_us = self.editor_runtime.note_render_started(_render_t0);
         if self.editor_is_empty() || self.active_editor_index().is_none() {
@@ -665,17 +678,18 @@ impl App {
         let perf_chrome_drain_us = frame_drain_started_at.elapsed().as_micros();
 
         let [red, green, blue, _] = self.editor_runtime.theme().editor.background;
-        let perf_gpu_submit_us = resources
-            .submit_surface_frame(
+        let submission = resources
+            .submit_surface_frame_with_timing(
                 &vertices,
                 SurfaceFrameOptions {
                     background: [red, green, blue, 1.0],
                     empty_frame_target: EmptyFrameTarget::MultisampledWhenTextAvailable,
                     window_corner_clip: WindowCornerClip::Preserve,
                 },
+                self.platform.has_pending_input_sample(),
             )
-            .ok()??
-            .as_micros();
+            .ok()??;
+        let perf_gpu_submit_us = submission.submit_and_present.as_micros();
 
         if !self.editor_runtime.first_frame_presented() {
             self.editor_runtime.mark_frame_presented();
@@ -745,7 +759,7 @@ impl App {
         ) {
             self.platform.schedule_redraw();
         }
-        Some(())
+        Some(submission)
     }
 
     /// 用最新的 Shell 输入完成一次布局。

@@ -38,6 +38,18 @@ pub struct SurfaceFrameOptions {
     pub window_corner_clip: WindowCornerClip,
 }
 
+pub struct SurfaceFrameSubmission {
+    pub present_returned_at: Instant,
+    pub submit_and_present: Duration,
+    pub preparation: Option<SurfaceFramePreparation>,
+}
+
+pub struct SurfaceFramePreparation {
+    pub acquire_started_at: Instant,
+    pub acquire: Duration,
+    pub encode: Duration,
+}
+
 impl RenderResources {
     /// 提交已按产品顺序组合的顶点，并返回 GPU 队列提交与呈现的耗时。
     /// 缺少 GPU 或无法取得当前表面纹理时，返回 `Ok(None)`。
@@ -46,17 +58,30 @@ impl RenderResources {
         vertices: &[GlyphVertex],
         options: SurfaceFrameOptions,
     ) -> Result<Option<Duration>, GpuError> {
+        Ok(self
+            .submit_surface_frame_with_timing(vertices, options, false)?
+            .map(|submission| submission.submit_and_present))
+    }
+
+    pub fn submit_surface_frame_with_timing(
+        &mut self,
+        vertices: &[GlyphVertex],
+        options: SurfaceFrameOptions,
+        measure_preparation: bool,
+    ) -> Result<Option<SurfaceFrameSubmission>, GpuError> {
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(None);
         };
         if let WindowCornerClip::Synchronize(radius) = options.window_corner_clip {
             gpu.ctx.set_window_corner_radius(radius)?;
         }
+        let acquire_started_at = measure_preparation.then(Instant::now);
         let output = match gpu.ctx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             _ => return Ok(None),
         };
+        let acquire_finished_at = acquire_started_at.map(|started_at| (started_at, Instant::now()));
         let surface_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = gpu.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("editor frame encoder"),
@@ -82,10 +107,22 @@ impl RenderResources {
             vertices.len() as u32,
         );
 
+        let commands = encoder.finish();
         let submit_started_at = Instant::now();
-        gpu.ctx.queue.submit(std::iter::once(encoder.finish()));
+        gpu.ctx.queue.submit(std::iter::once(commands));
         output.present();
-        Ok(Some(submit_started_at.elapsed()))
+        let present_returned_at = Instant::now();
+        Ok(Some(SurfaceFrameSubmission {
+            present_returned_at,
+            submit_and_present: present_returned_at - submit_started_at,
+            preparation: acquire_finished_at.map(|(acquire_started_at, encode_started_at)| {
+                SurfaceFramePreparation {
+                    acquire_started_at,
+                    acquire: encode_started_at - acquire_started_at,
+                    encode: submit_started_at - encode_started_at,
+                }
+            }),
+        }))
     }
 }
 

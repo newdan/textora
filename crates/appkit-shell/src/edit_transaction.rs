@@ -2,6 +2,7 @@ use appkit_core::document::DocumentModel;
 use appkit_core::edit::{TextEdit, apply_text_edit};
 use appkit_core::edit_command::EditCommand;
 use textora_core::buffer::EditHistoryKind;
+use textora_core::unicode::is_grapheme_boundary_in_text;
 use ui::plugin::{
     EditIntent, EditPlan, EditRequest, EditSelection, EditTransaction, TextReplacement,
 };
@@ -293,18 +294,6 @@ fn validate_selection(source: &str, selection: &EditSelection) -> Result<(), Edi
             validate_cursor_update(source, *cursor)
         }
     }
-}
-
-fn is_grapheme_boundary_in_text(text: &str, byte: usize) -> bool {
-    if byte > text.len() || !text.is_char_boundary(byte) {
-        return false;
-    }
-
-    let document = text.as_bytes();
-    textora_core::unicode::CursorNav::new(&document)
-        .goto_byte(textora_core::types::ByteIndex(byte))
-        .offset
-        == textora_core::types::ByteIndex(byte)
 }
 
 fn validate_cursor_update(source: &str, cursor_after: usize) -> Result<(), EditTransactionError> {

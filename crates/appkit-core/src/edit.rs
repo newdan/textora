@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use crate::document::DocumentModel;
 use textora_core::buffer::EditHistoryKind;
-use textora_core::types::ByteIndex;
+use textora_core::unicode::is_grapheme_boundary_in_text;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextEdit {
@@ -109,16 +109,6 @@ fn validate_replacement_range(source: &str, range: &Range<usize>) -> Result<(), 
     }
 
     Ok(())
-}
-
-fn is_grapheme_boundary_in_text(text: &str, byte: usize) -> bool {
-    if byte > text.len() || !text.is_char_boundary(byte) {
-        return false;
-    }
-
-    let document = text.as_bytes();
-    textora_core::unicode::CursorNav::new(&document).goto_byte(ByteIndex(byte)).offset
-        == ByteIndex(byte)
 }
 
 fn full_text(text_buffer: &textora_core::buffer::TextBuffer) -> String {

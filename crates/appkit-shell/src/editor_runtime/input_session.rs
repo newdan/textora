@@ -8,7 +8,7 @@ use crate::editor_runtime::{EditorFocus, EditorInputContext};
 use crate::pointer_capture::{CanvasDragSession, MouseCapture};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreeditUpdate {
+pub enum PreeditUpdate {
     Rejected,
     Unchanged,
     Changed,
