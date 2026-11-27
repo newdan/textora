@@ -63,7 +63,8 @@ impl LineIndex {
 
             // Assume valid UTF-8, but handle lossy safely.
             let text = String::from_utf8_lossy(chunk);
-            for ch in text.chars() {
+            let mut chars = text.chars();
+            while let Some(ch) = chars.next() {
                 let bytes_len = ch.len_utf8();
 
                 // --- Line counting logic ---
@@ -103,6 +104,24 @@ impl LineIndex {
 
                 last_char = ch;
                 pos += bytes_len;
+                if ch.is_ascii() && !matches!(ch, '\r' | '\n') {
+                    // Resolve the first boundary normally: an ASCII character can join
+                    // the preceding Unicode cluster. Adjacent ASCII characters other
+                    // than line endings always break, so count the remainder by byte.
+                    let remaining = chars.as_str().as_bytes();
+                    let ascii_run = remaining
+                        .iter()
+                        .take_while(|&&byte| byte.is_ascii() && !matches!(byte, b'\r' | b'\n'))
+                        .count();
+                    if ascii_run != 0 {
+                        last_char = char::from(remaining[ascii_run - 1]);
+                        prev_props = ucd_grapheme_cluster_lookup(last_char);
+                        grapheme_state = 0;
+                        cumulative_grapheme_offset += ascii_run;
+                        pos += ascii_run;
+                        chars = chars.as_str()[ascii_run..].chars();
+                    }
+                }
             }
         }
 
@@ -384,6 +403,22 @@ mod tests {
             tb.write_raw(content);
         }
         tb
+    }
+
+    #[test]
+    fn rebuilt_line_index_matches_scalar_scan_across_ascii_and_unicode_boundaries() {
+        let ascii: String =
+            (0..=127).map(char::from).filter(|ch| !matches!(ch, '\r' | '\n')).collect();
+        let content = format!("\u{0600}{ascii}\r\nASCII\u{0301}中文\r🇦\n🇧🇨\n\n{ascii}\n");
+        let tb = make_tb(content.as_bytes());
+        let mut scalar = LineIndex::new();
+        scalar.rescan_from(&tb, 0);
+
+        let rebuilt = LineIndex::rebuild_from(&tb);
+
+        assert_eq!(rebuilt.offsets, scalar.offsets);
+        assert_eq!(rebuilt.lengths, scalar.lengths);
+        assert_eq!(rebuilt.grapheme_offsets, scalar.grapheme_offsets);
     }
 
     #[test]

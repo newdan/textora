@@ -1,16 +1,16 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use appkit_shell::editor_runtime::{
     EditorFrame, EditorRuntime, EditorSurfacePaint, EmptyFrameTarget, RenderError, RenderResources,
-    SurfaceFrameOptions, WindowCornerClip,
+    SurfaceFrameOptions, SurfaceFrameSubmission, WindowCornerClip,
 };
 use appkit_shell::source_spacing;
+use appkit_shell::window_input::ImeCursorAreaCache;
 use ui::Widget;
 use ui::search_bar::{SearchBarEvent, SearchBarSnapshot, SearchBarWidget};
-use winit::dpi::{PhysicalPosition, PhysicalSize};
 
 use crate::NotoraState;
 use crate::autosave::AutoSaveState;
@@ -105,6 +105,8 @@ enum DocumentSearchComposition {
 /// shell、主题、字体准备与 GPU frame 提交的唯一所有者。
 pub(super) struct FrameRuntime {
     pub(super) document_search_bar: SearchBarWidget,
+    ime_cursor_area: ImeCursorAreaCache,
+    ime_allowed: Option<bool>,
     document_search_rect: ui::Rect,
     document_search_tab: Option<appkit_core::tab_set::types::TabId>,
     document_search_composition: DocumentSearchComposition,
@@ -140,6 +142,44 @@ pub(super) struct FrameInput<'a> {
     pub(super) window_width_px: f32,
     pub(super) window_height_px: f32,
     pub(super) editor_is_active: bool,
+    pub(super) measure_input: bool,
+}
+
+#[derive(Default)]
+struct FrameCpuTrace {
+    started_at: Option<Instant>,
+    stages: Vec<(&'static str, Duration)>,
+}
+
+impl FrameCpuTrace {
+    fn new(measure_input: bool) -> Self {
+        Self { started_at: measure_input.then(Instant::now), ..Self::default() }
+    }
+
+    fn mark(&mut self, stage: &'static str) {
+        if let Some(started_at) = self.started_at {
+            let now = Instant::now();
+            self.stages.push((stage, now - started_at));
+            self.started_at = Some(now);
+        }
+    }
+
+    fn report(self, submission: &SurfaceFrameSubmission) {
+        use std::fmt::Write;
+
+        if self.stages.is_empty() {
+            return;
+        }
+        let present_wall_us = SystemTime::now()
+            .checked_sub(submission.present_returned_at.elapsed())
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |elapsed| elapsed.as_micros());
+        let mut line = format!("[notora:frame-cpu] present_wall_us={present_wall_us}");
+        for (stage, elapsed) in self.stages {
+            let _ = write!(line, " {stage}_us={}", elapsed.as_micros());
+        }
+        eprintln!("{line}");
+    }
 }
 
 impl FrameRuntime {
@@ -150,6 +190,8 @@ impl FrameRuntime {
     ) -> Self {
         Self {
             document_search_bar: SearchBarWidget::find_only(),
+            ime_cursor_area: ImeCursorAreaCache::default(),
+            ime_allowed: None,
             document_search_rect: ui::Rect::ZERO,
             document_search_tab: None,
             document_search_composition: DocumentSearchComposition::Idle,
@@ -437,7 +479,8 @@ impl FrameRuntime {
         &mut self,
         document_runtime: &mut DocumentRuntime,
         mut input: FrameInput<'_>,
-    ) -> Result<EditorSurfacePaint, RenderError> {
+    ) -> Result<(EditorSurfacePaint, Option<SurfaceFrameSubmission>), RenderError> {
+        let mut trace = FrameCpuTrace::new(input.measure_input);
         let mut model = NotoraRenderModel::with_cache(
             input.state,
             input.product_settings,
@@ -458,13 +501,20 @@ impl FrameRuntime {
         } else {
             model.editor_chrome = crate::editor_pane::EditorPaneInput::default();
         }
+        trace.mark("product_model");
         refresh_source_spacing_state(document_runtime.editor_mut());
+        trace.mark("source_spacing");
         let editor = document_runtime.editor_mut();
-        let editor_surface = editor.with_render_resources(|editor, resources| {
-            self.render_editor_frame(editor, resources, input, &model)
+        let rendered_frame = editor.with_render_resources(|editor, resources| {
+            self.render_editor_frame(editor, resources, input, &model, &mut trace)
         })?;
-        editor.mark_frame_presented();
-        Ok(editor_surface)
+        if let Some(submission) = &rendered_frame.1 {
+            trace.report(submission);
+        }
+        if rendered_frame.1.is_some() || editor.window().is_none() {
+            editor.mark_frame_presented();
+        }
+        Ok(rendered_frame)
     }
 
     fn render_editor_frame(
@@ -473,7 +523,8 @@ impl FrameRuntime {
         resources: &mut RenderResources,
         input: FrameInput<'_>,
         model: &NotoraRenderModel,
-    ) -> Result<EditorSurfacePaint, RenderError> {
+        trace: &mut FrameCpuTrace,
+    ) -> Result<(EditorSurfacePaint, Option<SurfaceFrameSubmission>), RenderError> {
         let mut frame = editor.begin_frame()?;
         if let Some(text) = resources.text.as_mut() {
             text.begin_frame();
@@ -482,11 +533,13 @@ impl FrameRuntime {
         self.paint_frame_underlay(&mut frame, &input, frame_state);
         let editor_body_rect =
             crate::render::editor_inspector_rects(input.layout, model.inspector_panel.is_some()).0;
+        trace.mark("frame_underlay");
         let editor_surface = if input.editor_is_active {
             editor.paint_active_editor(&mut frame, resources, editor_body_rect)?
         } else {
             EditorSurfacePaint::Empty
         };
+        trace.mark("editor_paint");
         let editor_scrollbars_input = (input.editor_is_active
             && input.state.layout.overlay == crate::OverlayState::None)
             .then(|| editor.active_editor_scrollbars_input())
@@ -503,25 +556,32 @@ impl FrameRuntime {
         self.shell.render_with_document_search(&mut frame, input.layout, model, search_bar)?;
         self.shell.synchronize_focus(input.state.layout.focus_target, Instant::now());
         frame.with_paint_context(|context| self.window_frame.paint_border(context));
+        trace.mark("chrome_paint");
         let mut vertices = Vec::new();
         frame.drain_into(
             ui::Screen::new(input.window_width_px, input.window_height_px),
             resources,
             &mut vertices,
         );
+        trace.mark("vertices");
         let window_corner_radius = (frame_state == ui::window_frame::WindowFrameState::Restored)
             .then_some(ui::rounded_surface_frame::SHELL_CORNER_RADIUS_LOGICAL * input.layout.dpi);
-        if let Err(error) = resources.submit_surface_frame(
+        let submission = match resources.submit_surface_frame_with_timing(
             &vertices,
             SurfaceFrameOptions {
                 background: self.theme.application_theme().editor_surface,
                 empty_frame_target: EmptyFrameTarget::Surface,
                 window_corner_clip: WindowCornerClip::Synchronize(window_corner_radius),
             },
+            input.measure_input,
         ) {
-            eprintln!("[window] 无法同步合成窗口圆角：{error}");
-        }
-        Ok(editor_surface)
+            Ok(submission) => submission,
+            Err(error) => {
+                eprintln!("[window] 无法同步合成窗口圆角：{error}");
+                None
+            }
+        };
+        Ok((editor_surface, submission))
     }
 
     fn paint_frame_underlay(
@@ -550,14 +610,14 @@ impl FrameRuntime {
     }
 
     pub(super) fn update_focused_ime_cursor_area(
-        &self,
+        &mut self,
         document_runtime: &DocumentRuntime,
         state: &NotoraState,
     ) {
         let Some(window) = document_runtime.editor().window() else {
             return;
         };
-        window.set_ime_allowed(self.focused_text_input_ime_allowed());
+        self.set_ime_allowed(window, self.focused_text_input_ime_allowed());
         let ime_rect = self
             .document_search_bar
             .ime_cursor_rect()
@@ -567,12 +627,29 @@ impl FrameRuntime {
                     .then(|| document_runtime.editor().active_editor_ime_cursor_rect())?
             });
         let Some(ime_rect) = ime_rect else {
+            self.ime_cursor_area.invalidate();
             return;
         };
-        window.set_ime_cursor_area(
-            PhysicalPosition::new(ime_rect.x as f64, (ime_rect.y + ime_rect.h) as f64),
-            PhysicalSize::new(ime_rect.w.max(2.0) as f64, ime_rect.h as f64),
-        );
+        if let Some((position, size)) = self.ime_cursor_area.update(
+            ime_rect.x,
+            ime_rect.bottom(),
+            ime_rect.w.max(2.0),
+            ime_rect.h,
+        ) {
+            window.set_ime_cursor_area(position, size);
+        }
+    }
+
+    pub(super) fn invalidate_ime_cursor_area(&mut self) {
+        self.ime_cursor_area.invalidate();
+    }
+
+    pub(super) fn set_ime_allowed(&mut self, window: &winit::window::Window, allowed: bool) {
+        if self.ime_allowed != Some(allowed) {
+            self.ime_allowed = Some(allowed);
+            self.invalidate_ime_cursor_area();
+            window.set_ime_allowed(allowed);
+        }
     }
 
     pub(super) fn editor_save_status(
@@ -680,6 +757,7 @@ mod chrome_tests {
             window_width_px: 1200.0,
             window_height_px: 800.0,
             editor_is_active: true,
+            measure_input: false,
         };
 
         assert!(matches!(

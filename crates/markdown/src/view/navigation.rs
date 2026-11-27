@@ -16,7 +16,7 @@ impl BlockViewLayout<MarkdownDoc> {
         if incremental_layout_reuse_enabled()
             && let Some(previous) = self.lazy.take()
         {
-            layout.reuse_unchanged_blocks_from(previous);
+            layout.reuse_unchanged_blocks_from(previous, self.scroll_y, self.cached_dl_viewport.1);
         }
         layout.ensure_all_blocks(&style, self.cached_viewport_w, None, None, &document_view);
         layout.build_flat_lines(&document_view);

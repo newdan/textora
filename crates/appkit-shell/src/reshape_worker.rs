@@ -26,6 +26,8 @@ pub struct ReshapeRequest {
     pub generation: u64,
     pub doc_line: usize,
     pub byte_offset: usize,
+    /// Only syntax-highlighted layout depends on the absolute source position.
+    pub highlight_depends_on_position: bool,
     pub byte_length: u32,
     /// 原始行字节（Arc 共享避免拷贝大行）
     pub line_bytes: Arc<[u8]>,
@@ -48,7 +50,7 @@ impl ReshapeRequest {
     pub fn content_hash(&self) -> u64 {
         content_hash_for_layout(
             self.line_bytes.as_ref(),
-            self.byte_offset,
+            self.highlight_depends_on_position.then_some(self.byte_offset),
             self.viewport_width,
             self.font_size,
             self.spacing_mode,
@@ -62,7 +64,7 @@ impl ReshapeRequest {
 /// Compute the cache key shared by foreground rendering and worker reshaping.
 pub fn content_hash_for_layout(
     line_bytes: &[u8],
-    byte_offset: usize,
+    highlight_anchor: Option<usize>,
     viewport_width: f32,
     font_size: f32,
     spacing_mode: TextSpacingMode,
@@ -70,7 +72,12 @@ pub fn content_hash_for_layout(
     semantic_version: u64,
     font_family: &str,
 ) -> u64 {
-    let mut hash = content_hash::content_hash(line_bytes, byte_offset, viewport_width, font_size);
+    let mut hash = content_hash::content_hash(
+        line_bytes,
+        highlight_anchor.unwrap_or(usize::MAX),
+        viewport_width,
+        font_size,
+    );
     for byte in font_family.bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(LAYOUT_HASH_FNV_PRIME);
@@ -412,7 +419,7 @@ mod tests {
         let hash = |font_family| {
             content_hash_for_layout(
                 b"Skill agent loop",
-                0,
+                None,
                 800.0,
                 16.0,
                 TextSpacingMode::Natural,
@@ -437,6 +444,7 @@ mod tests {
                 generation: 1,
                 doc_line: 0,
                 byte_offset: 0,
+                highlight_depends_on_position: false,
                 byte_length: source.len() as u32,
                 line_bytes: Arc::from(source.as_bytes()),
                 viewport_width: 800.0,
@@ -471,6 +479,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: 0,
         };
         let entry = process_fallback(&req);
@@ -492,6 +501,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: 5,
         };
         let entry = process_fallback(&req);
@@ -513,6 +523,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: line.len() as u32,
         };
         let ascii_entry = process_fallback(&build_request("# tokens"));
@@ -553,6 +564,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: 4,
         });
         let r = recv_one(&w, std::time::Duration::from_secs(2));
@@ -578,6 +590,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: 3,
         });
         let r = recv_one(&w, std::time::Duration::from_secs(2));
@@ -604,6 +617,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: 200_000,
         });
         let r = recv_one(&w, std::time::Duration::from_secs(2));
@@ -630,6 +644,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: data.len() as u32,
         });
         let r = recv_one(&w, std::time::Duration::from_secs(2));
@@ -649,6 +664,7 @@ mod tests {
             max_line_bytes: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: "甲,乙".len() as u32,
             spacing_mode,
             protected_ranges: Arc::from([]),
@@ -677,6 +693,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: data.len() as u32,
         };
 
@@ -702,6 +719,7 @@ mod tests {
                 semantic_version: 0,
                 dv_idx: 0,
                 byte_offset: 0,
+                highlight_depends_on_position: false,
                 byte_length: source.len() as u32,
             };
             let entry = process_fallback(&request);
@@ -727,6 +745,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: line.len() as u32,
         };
 
@@ -756,6 +775,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: data.len() as u32,
         };
         let entry = process_fallback(&req);
@@ -794,6 +814,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: 200,
         };
         let entry = process_fallback(&req);
@@ -823,6 +844,7 @@ mod tests {
             semantic_version: 0,
             dv_idx: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: data.len() as u32,
         };
         let entry = process_fallback(&req);

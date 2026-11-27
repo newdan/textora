@@ -1,48 +1,132 @@
 use std::fs::OpenOptions;
-use std::io::{self, BufWriter, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use appkit_core::tab_set::types::TabId;
 use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
-use appkit_shell::editor_runtime::SurfaceFrameSubmission;
+use appkit_shell::editor_runtime::input_latency::InputLatencyLog;
+use appkit_shell::frame_pacer::WindowFramePacer;
+use appkit_shell::window_input::ImeCursorAreaCache;
 use winit::event_loop::EventLoopProxy;
 
 use crate::app_event::AppEvent;
-use crate::app_lifecycle::InputEventKind;
 use crate::mouse::MouseState;
+
+const STARTUP_LOG_ENV: &str = "TEXTORA_STARTUP_LOG";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedrawState {
+    Idle,
+    Requested,
+    DeferredWhileOccluded,
+}
+
+pub(crate) struct PreparedFontSystem {
+    pub(crate) font_system: shaping::FontSystem,
+    pub(crate) load_elapsed: Duration,
+}
 
 pub(crate) struct PlatformState {
     startup_file: Option<PathBuf>,
     startup_started_at: Instant,
-    font_preparation: Option<JoinHandle<shaping::FontSystem>>,
+    startup_log_path: Option<PathBuf>,
+    font_preparation: Option<JoinHandle<PreparedFontSystem>>,
     event_loop_proxy: Option<EventLoopProxy<AppEvent>>,
     accessibility: Option<PlatformAccessibilityAdapter>,
-    redraw_pending: bool,
+    redraw_state: RedrawState,
+    redraw_revision: u64,
+    presenting: bool,
     last_cursor_visible: bool,
     mouse: MouseState,
     input_latency: Option<InputLatencyLog>,
+    pub(crate) ime_cursor_area: ImeCursorAreaCache,
+    pub(crate) frame_pacer: WindowFramePacer,
+    #[cfg(target_os = "macos")]
+    latency_critical_activity: Option<appkit_shell::macos::LatencyCriticalActivity>,
+}
+
+fn parse_startup_log_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let value = value?;
+    if value.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(value))
 }
 
 impl PlatformState {
+    pub(crate) fn resolve_startup_log_path() -> Option<PathBuf> {
+        parse_startup_log_path(std::env::var_os(STARTUP_LOG_ENV))
+    }
+
     pub(crate) fn new(
         startup_file: Option<PathBuf>,
         startup_started_at: Instant,
-        font_preparation: Option<JoinHandle<shaping::FontSystem>>,
+        font_preparation: Option<JoinHandle<PreparedFontSystem>>,
+        startup_log_path: Option<PathBuf>,
     ) -> Self {
         Self {
             startup_file,
             startup_started_at,
+            startup_log_path,
             font_preparation,
             event_loop_proxy: None,
             accessibility: None,
-            redraw_pending: true,
+            redraw_state: RedrawState::Requested,
+            redraw_revision: 0,
+            presenting: false,
             last_cursor_visible: true,
             mouse: MouseState::new(),
             input_latency: InputLatencyLog::open(),
+            ime_cursor_area: ImeCursorAreaCache::default(),
+            frame_pacer: WindowFramePacer::default(),
+            #[cfg(target_os = "macos")]
+            latency_critical_activity: None,
         }
+    }
+
+    fn write_startup_line(&self, line: &str) {
+        eprintln!("{line}");
+        let Some(path) = self.startup_log_path.as_ref() else {
+            return;
+        };
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
+    pub(crate) fn log_startup_banner(&self, edition: crate::Edition) {
+        let wall_ms =
+            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_millis());
+        let line = format!(
+            "[startup] === launch pid={} edition=\"{}\" wall_ms={} ===",
+            std::process::id(),
+            edition.name(),
+            wall_ms
+        );
+        self.write_startup_line(&line);
+    }
+
+    pub(crate) fn log_startup_stage(
+        &self,
+        stage: &str,
+        stage_elapsed: Duration,
+        detail: std::fmt::Arguments<'_>,
+    ) {
+        let line = format!(
+            "[startup] {stage} stage={:.2}ms total={:.2}ms{detail}",
+            stage_elapsed.as_secs_f64() * 1_000.0,
+            self.startup_elapsed().as_secs_f64() * 1_000.0
+        );
+        self.write_startup_line(&line);
+    }
+
+    pub(crate) fn log_startup_point(&self, label: &str, detail: std::fmt::Arguments<'_>) {
+        let line = format!(
+            "[startup] {label} total={:.2}ms{detail}",
+            self.startup_elapsed().as_secs_f64() * 1_000.0
+        );
+        self.write_startup_line(&line);
     }
 
     pub(crate) fn startup_file(&self) -> Option<&Path> {
@@ -57,7 +141,7 @@ impl PlatformState {
         self.startup_started_at.elapsed()
     }
 
-    pub(crate) fn take_font_preparation(&mut self) -> Option<JoinHandle<shaping::FontSystem>> {
+    pub(crate) fn take_font_preparation(&mut self) -> Option<JoinHandle<PreparedFontSystem>> {
         self.font_preparation.take()
     }
 
@@ -87,22 +171,81 @@ impl PlatformState {
     }
 
     pub(crate) fn schedule_redraw(&mut self) {
-        self.redraw_pending = true;
+        if self.redraw_state != RedrawState::DeferredWhileOccluded {
+            self.redraw_state = RedrawState::Requested;
+        }
+        self.redraw_revision = self.redraw_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn redraw_revision(&self) -> u64 {
+        self.redraw_revision
+    }
+
+    pub(crate) fn begin_present(&mut self) -> bool {
+        if self.presenting || self.redraw_state == RedrawState::DeferredWhileOccluded {
+            return false;
+        }
+        self.presenting = true;
+        self.clear_redraw();
+        true
+    }
+
+    pub(crate) fn finish_present(&mut self) {
+        self.presenting = false;
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_latency_critical(&mut self, focused: bool) {
+        if focused {
+            self.latency_critical_activity
+                .get_or_insert_with(appkit_shell::macos::LatencyCriticalActivity::begin);
+        } else {
+            self.latency_critical_activity = None;
+        }
     }
 
     pub(crate) fn clear_redraw(&mut self) {
-        self.redraw_pending = false;
+        if self.redraw_state == RedrawState::Requested {
+            self.redraw_state = RedrawState::Idle;
+        }
     }
 
     pub(crate) fn redraw_pending(&self) -> bool {
-        self.redraw_pending
+        self.redraw_state == RedrawState::Requested
+    }
+
+    pub(crate) fn redraw_is_occluded(&self) -> bool {
+        self.redraw_state == RedrawState::DeferredWhileOccluded
+    }
+
+    pub(crate) fn redraw_state(&self) -> RedrawState {
+        self.redraw_state
+    }
+
+    pub(crate) fn defer_redraw_until_unoccluded(&mut self) {
+        self.redraw_state = RedrawState::DeferredWhileOccluded;
+        self.frame_pacer.stop();
+    }
+
+    pub(crate) fn handle_occlusion_changed(&mut self, occluded: bool, first_frame_pending: bool) {
+        if occluded {
+            self.defer_redraw_until_unoccluded();
+            return;
+        }
+        if self.redraw_state == RedrawState::DeferredWhileOccluded || first_frame_pending {
+            self.redraw_state = RedrawState::Requested;
+        }
     }
 
     pub(crate) fn update_cursor_visibility(&mut self, visible: bool) {
         if visible != self.last_cursor_visible {
-            self.last_cursor_visible = visible;
+            self.record_presented_cursor_visibility(visible);
             self.schedule_redraw();
         }
+    }
+
+    pub(crate) fn record_presented_cursor_visibility(&mut self, visible: bool) {
+        self.last_cursor_visible = visible;
     }
 
     pub(crate) fn mouse(&self) -> &MouseState {
@@ -122,216 +265,81 @@ impl PlatformState {
     }
 
     pub(crate) fn has_pending_input_sample(&self) -> bool {
-        self.input_latency.as_ref().is_some_and(|log| !log.pending.is_empty())
-    }
-}
-
-const INPUT_LOG_FRAME_CAPACITY: usize = 128;
-const INPUTS_PER_FRAME_LIMIT: usize = 512;
-const INPUT_LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
-
-struct InputSample {
-    kind: InputEventKind,
-    entered_at: Instant,
-    handled_at: Instant,
-}
-
-struct InputFrame {
-    sequence: u64,
-    inputs: Vec<InputSample>,
-    redraw_started_at: Instant,
-    submission: SurfaceFrameSubmission,
-    frame_tail: Duration,
-    accessibility: Duration,
-    ime_position: Duration,
-    skipped_redraws: usize,
-    discarded_inputs: usize,
-}
-
-pub(crate) struct InputLatencyLog {
-    sender: SyncSender<InputFrame>,
-    tab: Option<TabId>,
-    pending: Vec<InputSample>,
-    next_frame: u64,
-    skipped_redraws: usize,
-    discarded_inputs: usize,
-}
-
-impl InputLatencyLog {
-    fn open() -> Option<Self> {
-        let path = std::env::var_os("TEXTORA_INPUT_LOG").filter(|path| !path.is_empty())?;
-        let result = (|| -> io::Result<Self> {
-            let file = OpenOptions::new().create(true).append(true).open(path)?;
-            let (sender, receiver) = mpsc::sync_channel::<InputFrame>(INPUT_LOG_FRAME_CAPACITY);
-            std::thread::Builder::new().name("input-latency-log".into()).spawn(move || {
-                let mut writer = BufWriter::new(file);
-                let result = loop {
-                    let result = match receiver.recv_timeout(INPUT_LOG_FLUSH_INTERVAL) {
-                        Ok(frame) => frame.write(&mut writer),
-                        Err(RecvTimeoutError::Timeout) => writer.flush(),
-                        Err(RecvTimeoutError::Disconnected) => break writer.flush(),
-                    };
-                    if result.is_err() {
-                        break result;
-                    }
-                };
-                if let Err(error) = result {
-                    eprintln!("[input-latency] write failed: {error}");
-                }
-            })?;
-            Ok(Self {
-                sender,
-                tab: None,
-                pending: Vec::new(),
-                next_frame: 0,
-                skipped_redraws: 0,
-                discarded_inputs: 0,
-            })
-        })();
-        result.inspect_err(|error| eprintln!("[input-latency] setup failed: {error}")).ok()
-    }
-
-    pub(crate) fn retain_tab(&mut self, active_tab: Option<TabId>) {
-        if self.tab != active_tab {
-            self.discarded_inputs += self.pending.len();
-            self.pending.clear();
-            self.skipped_redraws = 0;
-            self.tab = active_tab;
-        }
-    }
-
-    pub(crate) fn record(
-        &mut self,
-        tab: TabId,
-        kind: InputEventKind,
-        entered_at: Instant,
-        handled_at: Instant,
-    ) {
-        self.retain_tab(Some(tab));
-        if self.pending.len() == INPUTS_PER_FRAME_LIMIT {
-            self.discarded_inputs += 1;
-            return;
-        }
-        self.pending.push(InputSample { kind, entered_at, handled_at });
-    }
-
-    pub(crate) fn finish_redraw(
-        &mut self,
-        redraw_started_at: Instant,
-        submission: Option<SurfaceFrameSubmission>,
-        accessibility: Duration,
-        ime_position: Duration,
-        finished_at: Instant,
-    ) {
-        if self.pending.is_empty() {
-            return;
-        }
-        let Some(submission) = submission else {
-            self.skipped_redraws += 1;
-            return;
-        };
-        let frame = InputFrame {
-            sequence: self.next_frame,
-            inputs: std::mem::take(&mut self.pending),
-            redraw_started_at,
-            frame_tail: finished_at - submission.present_returned_at,
-            submission,
-            accessibility,
-            ime_position,
-            skipped_redraws: std::mem::take(&mut self.skipped_redraws),
-            discarded_inputs: self.discarded_inputs,
-        };
-        self.next_frame += 1;
-        let input_count = frame.inputs.len();
-        self.discarded_inputs = match self.sender.try_send(frame) {
-            Ok(()) => 0,
-            Err(_) => self.discarded_inputs + input_count,
-        };
-    }
-}
-
-impl InputFrame {
-    fn write(&self, writer: &mut impl Write) -> io::Result<()> {
-        let Some(preparation) = self.submission.preparation.as_ref() else { return Ok(()) };
-        let last_preedit_or_commit = self.inputs.iter().rposition(|sample| {
-            matches!(sample.kind, InputEventKind::ImePreedit | InputEventKind::ImeCommit)
-        });
-        for (index, input) in self.inputs.iter().enumerate() {
-            let superseded =
-                input.kind == InputEventKind::ImePreedit && last_preedit_or_commit != Some(index);
-            writeln!(
-                writer,
-                "frame={} index={} kind={:?} superseded={} coalesced={} e2e_us={} handle_us={} queue_us={} render_cpu_us={} acquire_us={} encode_us={} submit_us={} frame_tail_us={} a11y_us={} ime_position_us={} skipped_redraws={} discarded_inputs={}",
-                self.sequence,
-                index,
-                input.kind,
-                u8::from(superseded),
-                self.inputs.len(),
-                (self.submission.present_returned_at - input.entered_at).as_micros(),
-                (input.handled_at - input.entered_at).as_micros(),
-                (self.redraw_started_at - input.handled_at).as_micros(),
-                (preparation.acquire_started_at - self.redraw_started_at).as_micros(),
-                preparation.acquire.as_micros(),
-                preparation.encode.as_micros(),
-                self.submission.submit_and_present.as_micros(),
-                self.frame_tail.as_micros(),
-                self.accessibility.as_micros(),
-                self.ime_position.as_micros(),
-                self.skipped_redraws,
-                self.discarded_inputs,
-            )?;
-        }
-        Ok(())
+        self.input_latency.as_ref().is_some_and(InputLatencyLog::has_pending_samples)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use appkit_core::tab_set::types::TabIdAllocator;
-    use appkit_shell::editor_runtime::SurfaceFramePreparation;
+    use super::{PlatformState, RedrawState, parse_startup_log_path};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    fn test_platform_state() -> PlatformState {
+        PlatformState::new(None, Instant::now(), None, None)
+    }
 
     #[test]
-    fn input_log_waits_for_submission_and_keeps_each_events_timestamp() {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let mut log = InputLatencyLog {
-            sender,
-            tab: None,
-            pending: Vec::new(),
-            next_frame: 0,
-            skipped_redraws: 0,
-            discarded_inputs: 0,
-        };
-        let tab = TabIdAllocator::new().allocate();
-        let start = Instant::now();
-        let at = |ms| start + Duration::from_millis(ms);
-        log.record(tab, InputEventKind::ImePreedit, at(0), at(1));
-        log.finish_redraw(at(2), None, Duration::ZERO, Duration::ZERO, at(3));
-        assert!(receiver.try_recv().is_err());
+    fn deferred_occluded_frame_does_not_spin_and_resumes_on_unoccluded() {
+        let mut state = test_platform_state();
+        state.clear_redraw();
+        state.defer_redraw_until_unoccluded();
 
-        log.record(tab, InputEventKind::ImeCommit, at(7), at(8));
-        let submission = SurfaceFrameSubmission {
-            present_returned_at: at(15),
-            submit_and_present: Duration::from_millis(1),
-            preparation: Some(SurfaceFramePreparation {
-                acquire_started_at: at(10),
-                acquire: Duration::from_millis(2),
-                encode: Duration::from_millis(2),
-            }),
-        };
-        log.finish_redraw(at(9), Some(submission), Duration::ZERO, Duration::ZERO, at(16));
-        let frame = receiver.try_recv().expect("successful submission must settle pending inputs");
-        let mut output = Vec::new();
-        frame.write(&mut output).expect("test log should write to memory");
-        let output = String::from_utf8(output).expect("input log contains only ASCII");
-        assert!(output.contains("kind=ImePreedit superseded=1 coalesced=2 e2e_us=15000"));
-        assert!(output.contains("kind=ImeCommit superseded=0 coalesced=2 e2e_us=8000"));
-        assert_eq!(frame.skipped_redraws, 1);
-        assert!(log.pending.is_empty());
+        assert_eq!(state.redraw_state(), RedrawState::DeferredWhileOccluded);
+        assert!(!state.redraw_pending());
+        state.schedule_redraw();
+        assert!(!state.redraw_pending());
 
-        log.record(tab, InputEventKind::Key, at(17), at(18));
-        log.retain_tab(None);
-        assert!(log.pending.is_empty());
-        assert_eq!(log.discarded_inputs, 1);
+        state.handle_occlusion_changed(false, false);
+        assert_eq!(state.redraw_state(), RedrawState::Requested);
+        assert!(state.redraw_pending());
+    }
+
+    #[test]
+    fn input_frame_that_restores_the_caret_does_not_request_an_extra_blink_frame() {
+        let mut state = test_platform_state();
+        state.update_cursor_visibility(false);
+        state.clear_redraw();
+
+        state.record_presented_cursor_visibility(true);
+        state.update_cursor_visibility(true);
+
+        assert!(!state.redraw_pending());
+    }
+
+    #[test]
+    fn unoccluded_event_schedules_redraw_when_first_frame_is_pending() {
+        let mut state = test_platform_state();
+        state.clear_redraw();
+        assert_eq!(state.redraw_state(), RedrawState::Idle);
+
+        state.handle_occlusion_changed(false, true);
+        assert_eq!(state.redraw_state(), RedrawState::Requested);
+        assert!(state.redraw_pending());
+    }
+
+    #[test]
+    fn occluded_event_defers_pending_redraw_without_losing_intent() {
+        let mut state = test_platform_state();
+        assert!(state.redraw_pending());
+
+        state.handle_occlusion_changed(true, false);
+        assert_eq!(state.redraw_state(), RedrawState::DeferredWhileOccluded);
+        assert!(!state.redraw_pending());
+
+        state.handle_occlusion_changed(false, false);
+        assert_eq!(state.redraw_state(), RedrawState::Requested);
+        assert!(state.redraw_pending());
+    }
+
+    #[test]
+    fn startup_log_path_requires_explicit_non_empty_value() {
+        assert_eq!(parse_startup_log_path(None), None);
+        assert_eq!(parse_startup_log_path(Some(OsString::from(""))), None);
+        assert_eq!(
+            parse_startup_log_path(Some(OsString::from("/tmp/custom.log"))),
+            Some(PathBuf::from("/tmp/custom.log"))
+        );
     }
 }

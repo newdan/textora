@@ -222,7 +222,7 @@ pub fn drain(
                 let ndc0 = screen.px_to_ndc(p0[0], p0[1]);
                 let ndc1 = screen.px_to_ndc(p1[0], p1[1]);
                 let ndc2 = screen.px_to_ndc(p2[0], p2[1]);
-                let uv = [0.0, 0.0];
+                let uv = GlyphVertex::SOLID_TEX_COORDS;
                 vertices.push(GlyphVertex { position: ndc0, tex_coords: uv, color });
                 vertices.push(GlyphVertex { position: ndc1, tex_coords: uv, color });
                 vertices.push(GlyphVertex { position: ndc2, tex_coords: uv, color });
@@ -504,7 +504,7 @@ fn tapered_mesh_vertices(
                 mesh_vertex.position[0] + translation[0],
                 mesh_vertex.position[1] + translation[1],
             ),
-            tex_coords: [0.0, 0.0],
+            tex_coords: GlyphVertex::SOLID_TEX_COORDS,
             color: [color[0], color[1], color[2], color[3] * mesh_vertex.alpha_multiplier],
         })
         .collect()
@@ -780,7 +780,7 @@ fn push_coverage_ring(
 ) {
     let vertex = |position: [f32; 2], alpha: f32| GlyphVertex {
         position: screen.px_to_ndc(position[0], position[1]),
-        tex_coords: [0.0; 2],
+        tex_coords: GlyphVertex::SOLID_TEX_COORDS,
         color: [color[0], color[1], color[2], color[3] * alpha],
     };
     for index in 0..outer.len() {
@@ -809,13 +809,13 @@ fn push_fill(
     let inner = rounded_contour(rect, radius, feather);
     let center = GlyphVertex {
         position: screen.px_to_ndc(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5),
-        tex_coords: [0.0; 2],
+        tex_coords: GlyphVertex::SOLID_TEX_COORDS,
         color,
     };
     for index in 0..inner.len() {
         let vertex = |position: [f32; 2]| GlyphVertex {
             position: screen.px_to_ndc(position[0], position[1]),
-            tex_coords: [0.0; 2],
+            tex_coords: GlyphVertex::SOLID_TEX_COORDS,
             color,
         };
         vertices.extend([center, vertex(inner[index]), vertex(inner[(index + 1) % inner.len()])]);
@@ -879,7 +879,7 @@ fn push_stroke(
 
     let p = |x: f32, y: f32| GlyphVertex {
         position: [x / sw * 2.0 - 1.0, 1.0 - y / sh * 2.0],
-        tex_coords: [0.0, 0.0],
+        tex_coords: GlyphVertex::SOLID_TEX_COORDS,
         color,
     };
 
@@ -931,7 +931,7 @@ fn push_quad(v: &mut Vec<GlyphVertex>, ndc: [f32; 4], color: [f32; 4]) {
     let tr = [right, top];
     let bl = [left, bottom];
     let br = [right, bottom];
-    let uv = [0.0, 0.0];
+    let uv = GlyphVertex::SOLID_TEX_COORDS;
 
     v.push(GlyphVertex { position: tl, tex_coords: uv, color });
     v.push(GlyphVertex { position: tr, tex_coords: uv, color });
@@ -1018,9 +1018,13 @@ mod tests {
         push_quad(&mut vertices, screen.rect_to_ndc(Rect::new(0.0, 0.0, 10.0, 10.0)), [1.0; 4]);
         append_image_quad(&mut vertices, original, clipped, [0.1, 0.2, 0.3, 0.6], &screen);
         push_quad(&mut vertices, screen.rect_to_ndc(Rect::new(90.0, 90.0, 10.0, 10.0)), [1.0; 4]);
-        assert!(vertices[..6].iter().all(|vertex| vertex.tex_coords[0] == 0.0));
-        assert!(vertices[6..12].iter().all(|vertex| vertex.tex_coords[0] < 0.0));
-        assert!(vertices[12..].iter().all(|vertex| vertex.tex_coords[0] == 0.0));
+        assert!(
+            vertices[..6].iter().all(|vertex| vertex.tex_coords == GlyphVertex::SOLID_TEX_COORDS)
+        );
+        assert!(vertices[6..12].iter().all(|vertex| vertex.tex_coords[0] <= -1.0));
+        assert!(
+            vertices[12..].iter().all(|vertex| vertex.tex_coords == GlyphVertex::SOLID_TEX_COORDS)
+        );
         assert!((vertices[6].tex_coords[0] + 1.18).abs() < 0.0001);
         assert!((vertices[7].tex_coords[0] + 1.24).abs() < 0.0001);
         assert!((vertices[6].tex_coords[1] - 0.28).abs() < 0.0001);

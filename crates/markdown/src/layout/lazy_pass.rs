@@ -127,6 +127,39 @@ pub(in crate::layout::types) fn block_tree_contains_embedded(
         || block.children.iter().any(block_tree_contains_embedded)
 }
 
+fn is_plain_paragraph(block: &crate::builder::BlockNode) -> bool {
+    matches!(block.kind, crate::builder::BlockKind::Paragraph)
+        && !block.block_range.is_empty()
+        && block.children.is_empty()
+        && block.text_styles.iter().all(Vec::is_empty)
+}
+
+fn surrounding_line_text<'a>(
+    source: &'a str,
+    block_range: &Range<usize>,
+) -> Option<(&'a str, &'a str)> {
+    let (before, block_and_after) = source.split_at_checked(block_range.start)?;
+    let (block, after) = block_and_after.split_at_checked(block_range.len())?;
+    let prefix = before.rsplit('\n').next()?;
+    let suffix = if block.ends_with('\n') { "" } else { after.split('\n').next()? };
+    Some((prefix, suffix))
+}
+
+fn same_plain_paragraph(
+    previous: &crate::builder::BlockNode,
+    previous_source: &str,
+    current: &crate::builder::BlockNode,
+    current_source: &str,
+) -> bool {
+    is_plain_paragraph(previous)
+        && is_plain_paragraph(current)
+        && previous.text_lines == current.text_lines
+        // CommonMark can omit indentation and trailing line whitespace that
+        // still affect layout and source projection.
+        && surrounding_line_text(previous_source, &previous.block_range)
+            == surrounding_line_text(current_source, &current.block_range)
+}
+
 pub(in crate::layout::types) fn block_contains_source_byte(
     block: &crate::builder::BlockNode,
     source_byte: usize,
@@ -338,16 +371,23 @@ impl<S: BlockSource> LazyLayout<S> {
         }
     }
 
-    pub(crate) fn reuse_unchanged_blocks_from(&mut self, mut previous: Self) -> usize {
-        let Some(previous_source_text) =
-            previous.source_snapshot.as_deref().map(MarkdownSource::as_str)
-        else {
+    pub(crate) fn reuse_unchanged_blocks_from(
+        &mut self,
+        mut previous: Self,
+        scroll_y: f32,
+        viewport_h: f32,
+    ) -> usize {
+        if self.cached_viewport_w != previous.cached_viewport_w {
+            return 0;
+        }
+        let Some(previous_source) = previous.source_snapshot.clone() else {
             return 0;
         };
-        let Some(current_source_text) = self.source_snapshot.as_deref().map(MarkdownSource::as_str)
-        else {
+        let Some(current_source) = self.source_snapshot.clone() else {
             return 0;
         };
+        let previous_source_text = previous_source.as_str();
+        let current_source_text = current_source.as_str();
         let reconcile_plan = BlockReconcilePlan::between(
             previous.source.blocks(),
             previous_source_text,
@@ -359,6 +399,9 @@ impl<S: BlockSource> LazyLayout<S> {
         let mut previous_flat_line_groups = take_flat_line_groups(&mut previous);
         let mut current_block_ordinals = vec![0usize; self.source.blocks().len()];
         let mut reused_block_count = 0usize;
+        let mut height_deltas = Vec::new();
+        let previous_visible = previous.precision_block_range(scroll_y, viewport_h);
+        let estimated_visible = self.precision_block_range(scroll_y, viewport_h);
 
         for current_laid_index in 0..self.laid_to_doc.len() {
             let current_doc_index = self.laid_to_doc[current_laid_index];
@@ -375,9 +418,6 @@ impl<S: BlockSource> LazyLayout<S> {
             else {
                 continue;
             };
-            if previous.precise.get(previous_laid_index).copied().unwrap_or(false) {
-                continue;
-            }
             let Some(current_source_block) = self.source.blocks().get(current_doc_index) else {
                 continue;
             };
@@ -385,12 +425,30 @@ impl<S: BlockSource> LazyLayout<S> {
             else {
                 continue;
             };
+            let was_precise = previous.precise.get(previous_laid_index).copied().unwrap_or(false);
+            if was_precise
+                && !((previous_visible.contains(&previous_laid_index)
+                    || estimated_visible.contains(&current_laid_index))
+                    && same_plain_paragraph(
+                        previous_source_block,
+                        previous_source_text,
+                        current_source_block,
+                        current_source_text,
+                    ))
+            {
+                continue;
+            }
             let current_cursor_intersects = self.edit_ctx.as_ref().is_some_and(|edit_context| {
-                block_contains_source_byte(current_source_block, edit_context.cursor_byte)
+                (!was_precise || edit_context.preedit_text.is_some())
+                    && block_contains_source_byte(current_source_block, edit_context.cursor_byte)
             });
             let previous_cursor_intersects =
                 previous.edit_ctx.as_ref().is_some_and(|edit_context| {
-                    block_contains_source_byte(previous_source_block, edit_context.cursor_byte)
+                    (!was_precise || edit_context.preedit_text.is_some())
+                        && block_contains_source_byte(
+                            previous_source_block,
+                            edit_context.cursor_byte,
+                        )
                 });
             let current_selection_intersects = self
                 .selection_range
@@ -437,11 +495,23 @@ impl<S: BlockSource> LazyLayout<S> {
                 }
                 self.reconciled_flat_lines[current_laid_index] = Some(reused_flat_lines);
             }
+            if was_precise {
+                // A carried paragraph keeps its real height. Later blocks still start
+                // at their estimates, so apply the height difference exactly once.
+                let height_delta = reused_block.rect.h - self.estimated_heights[current_laid_index];
+                self.estimated_heights[current_laid_index] = reused_block.rect.h;
+                self.total_height += height_delta;
+                self.precise[current_laid_index] = true;
+                if height_delta.abs() > 0.5 {
+                    height_deltas.push((current_laid_index, height_delta));
+                }
+            }
             self.retain_block_projections(current_laid_index, &reused_block);
             self.laid_out[current_laid_index] = Some(reused_block);
             reused_block_count += 1;
         }
 
+        apply_deltas(&mut self.y_delta, &height_deltas);
         reused_block_count
     }
 
@@ -889,9 +959,18 @@ impl<S: BlockSource> LazyLayout<S> {
         deltas
     }
 
-    /// Re-run precise layout for the viewport range even when blocks were
-    /// already shaped by a cheap whole-document pass. This lets callers defer
-    /// expensive adornments such as syntax highlighting to visible blocks.
+    fn precision_block_range(&self, scroll_y: f32, viewport_h: f32) -> Range<usize> {
+        let buffer = viewport_h * VIEWPORT_BUFFER_RATIO;
+        let range_start = (scroll_y - buffer).max(0.0);
+        let range_end = scroll_y + viewport_h + buffer;
+        let n = self.estimated_heights.len();
+        let start_block = self.block_at_y(range_start);
+        let end_block = self.block_at_y(range_end).min(n).saturating_add(1).min(n);
+        start_block..end_block
+    }
+
+    /// Finish precise layout in the viewport. Plain paragraphs keep their
+    /// existing geometry until the source or edit-context invalidates them.
     pub fn refresh_precise_range(
         &mut self,
         scroll_y: f32,
@@ -902,15 +981,14 @@ impl<S: BlockSource> LazyLayout<S> {
         doc: &dyn textora_core::document::DocView,
     ) -> Vec<(usize, f32)> {
         self.ensure_consistent();
-        let buffer = viewport_h * VIEWPORT_BUFFER_RATIO;
-        let range_start = (scroll_y - buffer).max(0.0);
-        let range_end = scroll_y + viewport_h + buffer;
-        let n = self.estimated_heights.len();
-        let start_block = self.block_at_y(range_start);
-        let end_block = self.block_at_y(range_end).min(n).saturating_add(1).min(n);
-
         let mut deltas = Vec::new();
-        for i in start_block..end_block {
+        for i in self.precision_block_range(scroll_y, viewport_h) {
+            if self.precise[i]
+                && self.laid_out[i].is_some()
+                && self.source.blocks().get(self.laid_to_doc[i]).is_some_and(is_plain_paragraph)
+            {
+                continue;
+            }
             let delta = self.precise_block_at(i, style, shaper, highlighter, doc);
             if delta.abs() > 0.5 {
                 deltas.push((i, delta));

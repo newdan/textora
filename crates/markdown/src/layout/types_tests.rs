@@ -166,10 +166,102 @@ fn reconcile_editing_layout(
         preedit_text: None,
         preedit_cursor: None,
     }));
-    let reused_block_count = layout.reuse_unchanged_blocks_from(previous);
+    let reused_block_count = layout.reuse_unchanged_blocks_from(previous, 0.0, 1400.0);
     layout.ensure_all_blocks(&style, 400.0, None, None, &document_view);
     layout.build_flat_lines(&document_view);
     (layout, reused_block_count)
+}
+
+fn refresh_test_layout(
+    layout: &mut LazyLayout<MarkdownDoc>,
+    source: &str,
+    shaper: &mut shaping::Shaper,
+) {
+    let document = textora_core::document::StringDocView::new(source);
+    layout.refresh_precise_range(0.0, 1400.0, &default_style(), shaper, None, &document);
+    layout.build_flat_lines(&document);
+}
+
+fn first_shaped_line(
+    layout: &LazyLayout<MarkdownDoc>,
+    block_index: usize,
+) -> std::sync::Arc<ui::core::text_layout::UiTextLayout> {
+    let block = layout.laid_out[block_index].as_ref().expect("test block is materialized");
+    let LaidOutBlockKind::Text { lines } = &block.kind else {
+        panic!("test block is text");
+    };
+    lines[0].text_layout.clone().expect("test block has been shaped")
+}
+
+#[test]
+fn precise_layout_refresh_only_reshapes_the_invalidated_plain_paragraph() {
+    let source = "typing here\n\n正文 keeps its shaping";
+    let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
+    let mut layout = build_editing_layout(source, 1, 1);
+    refresh_test_layout(&mut layout, source, &mut shaper);
+    let edited = first_shaped_line(&layout, 0);
+    let unrelated = first_shaped_line(&layout, 1);
+
+    layout.invalidate_lines_for_source_bytes([1]);
+    refresh_test_layout(&mut layout, source, &mut shaper);
+
+    assert!(!std::sync::Arc::ptr_eq(&edited, &first_shaped_line(&layout, 0)));
+    assert!(std::sync::Arc::ptr_eq(&unrelated, &first_shaped_line(&layout, 1)));
+}
+
+#[test]
+fn precise_reconciliation_keeps_an_unchanged_paragraph_after_a_source_shift() {
+    let wide_paragraph = "WWWWWWWW ".repeat(30);
+    let old_source = format!("first\n\n{wide_paragraph}\n\nlast");
+    let new_source = format!("first edited 你好\n\n{wide_paragraph}\n\nlast");
+    let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
+    let mut previous = build_editing_layout(&old_source, 1, 1);
+    refresh_test_layout(&mut previous, &old_source, &mut shaper);
+    let unrelated = first_shaped_line(&previous, 1);
+    let (mut reconciled, _) = reconcile_editing_layout(previous, &new_source, 1, 2);
+    refresh_test_layout(&mut reconciled, &new_source, &mut shaper);
+
+    let mut fresh = build_editing_layout(&new_source, 1, 2);
+    refresh_test_layout(&mut fresh, &new_source, &mut shaper);
+    assert_flat_layout_equivalent(&reconciled, &fresh, &new_source);
+    assert!(std::sync::Arc::ptr_eq(&unrelated, &first_shaped_line(&reconciled, 1)));
+}
+
+#[test]
+fn precise_reconciliation_respects_leading_whitespace_outside_the_parser_range() {
+    let old_source = "first\n\n正文";
+    let new_source = "first\n\n  正文";
+    let mut style = default_style();
+    style.paragraph_first_line_indent = 24.0;
+    let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
+    let old_document = textora_core::document::StringDocView::new(old_source);
+    let new_document = textora_core::document::StringDocView::new(new_source);
+    let mut previous = build_editing_layout(old_source, 0, 1);
+    previous.refresh_precise_range(0.0, 400.0, &style, &mut shaper, None, &old_document);
+    previous.build_flat_lines(&old_document);
+    assert_eq!(previous.flat_lines.last().expect("paragraph line").rect.x, 24.0);
+
+    let (mut reconciled, _) = reconcile_editing_layout(previous, new_source, 0, 2);
+    reconciled.refresh_precise_range(0.0, 400.0, &style, &mut shaper, None, &new_document);
+    reconciled.build_flat_lines(&new_document);
+
+    assert_eq!(reconciled.flat_lines.last().expect("paragraph line").rect.x, 0.0);
+}
+
+#[test]
+fn precise_reconciliation_keeps_trailing_crlf_projections_current() {
+    let old_source = "<div>hello</div>\n\npara";
+    let new_source = "<div>hello</div>\r\n\npara";
+    let mut shaper = shaping::Shaper::new().expect("test shaper must initialize");
+    let mut previous = build_editing_layout(old_source, old_source.len(), 1);
+    refresh_test_layout(&mut previous, old_source, &mut shaper);
+
+    let (mut reconciled, _) = reconcile_editing_layout(previous, new_source, new_source.len(), 2);
+    refresh_test_layout(&mut reconciled, new_source, &mut shaper);
+
+    let mut fresh = build_editing_layout(new_source, new_source.len(), 2);
+    refresh_test_layout(&mut fresh, new_source, &mut shaper);
+    assert_flat_layout_equivalent(&reconciled, &fresh, new_source);
 }
 
 #[test]
@@ -219,7 +311,7 @@ fn reconciled_layout_reuses_prefix_and_shifted_suffix_equivalently() {
         preedit_cursor: None,
     }));
 
-    let reused_block_count = reconciled.reuse_unchanged_blocks_from(previous);
+    let reused_block_count = reconciled.reuse_unchanged_blocks_from(previous, 0.0, 1400.0);
 
     assert_eq!(reused_block_count, 2);
     assert!(reconciled.laid_out[0].is_some());

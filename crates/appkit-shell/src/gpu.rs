@@ -15,6 +15,9 @@ mod windows_tests;
 pub(crate) use startup::with_gpu_error_scopes;
 use startup::{backend_candidates, surface_backend_candidates, try_backends};
 
+const SURFACE_SAMPLE_COUNT_ENV: &str = "TEXTORA_SURFACE_SAMPLE_COUNT";
+const MAX_FRAME_LATENCY_ENV: &str = "TEXTORA_MAX_FRAME_LATENCY";
+
 /// Errors that can occur during GPU initialization.
 #[derive(Debug)]
 pub enum GpuError {
@@ -52,6 +55,29 @@ impl std::fmt::Display for GpuError {
 
 impl std::error::Error for GpuError {}
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SurfaceAntialiasing {
+    None,
+    #[default]
+    Msaa4x,
+}
+
+impl SurfaceAntialiasing {
+    pub fn sample_count(self) -> u32 {
+        match self {
+            Self::None => 1,
+            Self::Msaa4x => 4,
+        }
+    }
+
+    fn from_diagnostic_override(value: Option<&str>) -> Self {
+        match value {
+            Some("1") => Self::None,
+            _ => Self::default(),
+        }
+    }
+}
+
 /// A configured GPU context (device, queue, surface config).
 pub struct GpuContext {
     pub surface: wgpu::Surface<'static>,
@@ -61,9 +87,8 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     pub format: wgpu::TextureFormat,
-    /// MSAA multisample target (recreated on resize).
-    pub msaa_tex: wgpu::Texture,
-    pub msaa_view: wgpu::TextureView,
+    pub antialiasing: SurfaceAntialiasing,
+    msaa_target: Option<wgpu::TextureView>,
 }
 
 struct WindowSurface {
@@ -133,8 +158,12 @@ fn startup_power_preference() -> wgpu::PowerPreference {
 fn create_msaa_texture(
     device: &wgpu::Device,
     config: &wgpu::SurfaceConfiguration,
-) -> (wgpu::Texture, wgpu::TextureView) {
-    let tex = device.create_texture(&wgpu::TextureDescriptor {
+    antialiasing: SurfaceAntialiasing,
+) -> Option<wgpu::TextureView> {
+    if antialiasing == SurfaceAntialiasing::None {
+        return None;
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("msaa target"),
         size: wgpu::Extent3d {
             width: config.width,
@@ -142,14 +171,13 @@ fn create_msaa_texture(
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 4,
+        sample_count: antialiasing.sample_count(),
         dimension: wgpu::TextureDimension::D2,
         format: config.format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT,
         view_formats: &[],
     });
-    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-    (tex, view)
+    Some(texture.create_view(&wgpu::TextureViewDescriptor::default()))
 }
 
 impl GpuContext {
@@ -170,9 +198,11 @@ impl GpuContext {
 
     /// Recreate the MSAA texture after surface resize.
     pub fn recreate_msaa(&mut self) {
-        let (tex, view) = create_msaa_texture(&self.device, &self.config);
-        self.msaa_tex = tex;
-        self.msaa_view = view;
+        self.msaa_target = create_msaa_texture(&self.device, &self.config, self.antialiasing);
+    }
+
+    pub fn msaa_view(&self) -> Option<&wgpu::TextureView> {
+        self.msaa_target.as_ref()
     }
 }
 
@@ -349,9 +379,15 @@ fn attach_prepared_device(
 }
 
 fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), GpuError> {
+    let mut required_features = wgpu::Features::DUAL_SOURCE_BLENDING;
+    if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && adapter.get_info().backend == wgpu::Backend::Metal
+    {
+        required_features |= adapter.features() & wgpu::Features::MAPPABLE_PRIMARY_BUFFERS;
+    }
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("edit+ device"),
-        required_features: wgpu::Features::DUAL_SOURCE_BLENDING,
+        required_features,
         ..Default::default()
     }))
     .map_err(|error| GpuError::DeviceCreation(error.to_string()))
@@ -369,6 +405,27 @@ fn configure_gpu_context(
     with_gpu_error_scopes(&scope_device, || {
         configure_gpu_context_resources(window_surface, adapter, device, queue, width, height)
     })
+}
+
+fn window_present_mode(
+    backend: wgpu::Backend,
+    supported_modes: &[wgpu::PresentMode],
+) -> wgpu::PresentMode {
+    // Waiting for a display refresh to recycle Metal drawables can block the
+    // window event loop and delay subsequent keyboard and IME events.
+    if backend == wgpu::Backend::Metal && supported_modes.contains(&wgpu::PresentMode::Immediate) {
+        return wgpu::PresentMode::Immediate;
+    }
+    wgpu::PresentMode::AutoVsync
+}
+
+fn window_frame_latency(backend: wgpu::Backend, override_value: Option<&str>) -> u32 {
+    match (override_value, backend) {
+        (Some("1"), _) => 1,
+        (Some("2"), _) => 2,
+        (_, wgpu::Backend::Metal) => 1,
+        _ => 2,
+    }
 }
 
 fn configure_gpu_context_resources(
@@ -408,15 +465,19 @@ fn configure_gpu_context_resources(
     } else {
         alpha_mode
     };
+    let backend = adapter.get_info().backend;
     let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,
         width: width.max(1),
         height: height.max(1),
-        present_mode: wgpu::PresentMode::AutoVsync,
+        present_mode: window_present_mode(backend, &surface_caps.present_modes),
         alpha_mode,
         view_formats: vec![],
-        desired_maximum_frame_latency: 2,
+        desired_maximum_frame_latency: window_frame_latency(
+            backend,
+            std::env::var(MAX_FRAME_LATENCY_ENV).ok().as_deref(),
+        ),
     };
     let surface_configuration_started_at = Instant::now();
     surface.configure(&device, &config);
@@ -427,7 +488,10 @@ fn configure_gpu_context_resources(
     let surface_configuration_elapsed = surface_configuration_started_at.elapsed();
 
     let msaa_started_at = Instant::now();
-    let (msaa_tex, msaa_view) = create_msaa_texture(&device, &config);
+    let antialiasing = SurfaceAntialiasing::from_diagnostic_override(
+        std::env::var(SURFACE_SAMPLE_COUNT_ENV).ok().as_deref(),
+    );
+    let msaa_target = create_msaa_texture(&device, &config, antialiasing);
     let msaa_elapsed = msaa_started_at.elapsed();
     let configuration_elapsed = configuration_started_at.elapsed();
     eprintln!("GPU surface format: {format:?}");
@@ -447,8 +511,8 @@ fn configure_gpu_context_resources(
         queue,
         config,
         format,
-        msaa_tex,
-        msaa_view,
+        antialiasing,
+        msaa_target,
     })
 }
 
@@ -483,7 +547,47 @@ pub async fn headless_init() -> Result<String, GpuError> {
 
 #[cfg(test)]
 mod tests {
-    use super::GpuError;
+    use super::{GpuError, window_present_mode};
+
+    #[test]
+    fn metal_defaults_to_two_drawables_and_honors_the_diagnostic_override() {
+        use super::window_frame_latency;
+        use wgpu::Backend;
+
+        assert_eq!(window_frame_latency(Backend::Metal, None), 1);
+        assert_eq!(window_frame_latency(Backend::Metal, Some("2")), 2);
+        assert_eq!(window_frame_latency(Backend::Metal, Some("0")), 1);
+        assert_eq!(window_frame_latency(Backend::Dx12, None), 2);
+    }
+
+    #[test]
+    fn four_samples_remain_the_default() {
+        use super::SurfaceAntialiasing;
+
+        assert_eq!(SurfaceAntialiasing::default().sample_count(), 4);
+        assert_eq!(SurfaceAntialiasing::from_diagnostic_override(Some("1")).sample_count(), 1);
+        assert_eq!(SurfaceAntialiasing::from_diagnostic_override(Some("2")).sample_count(), 4);
+    }
+
+    #[test]
+    fn metal_window_prefers_immediate_presentation_when_supported() {
+        use wgpu::{Backend, PresentMode};
+
+        let supported_modes = [PresentMode::Fifo, PresentMode::Immediate];
+        assert_eq!(window_present_mode(Backend::Metal, &supported_modes), PresentMode::Immediate);
+    }
+
+    #[test]
+    fn window_uses_vsync_without_metal_immediate_support() {
+        use wgpu::{Backend, PresentMode};
+
+        assert_eq!(
+            window_present_mode(Backend::Metal, &[PresentMode::Fifo]),
+            PresentMode::AutoVsync
+        );
+        let supported_modes = [PresentMode::Fifo, PresentMode::Immediate];
+        assert_eq!(window_present_mode(Backend::Vulkan, &supported_modes), PresentMode::AutoVsync);
+    }
 
     #[test]
     #[cfg(target_os = "windows")]

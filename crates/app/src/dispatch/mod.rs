@@ -76,7 +76,7 @@ impl App {
         })
     }
 
-    /// Top-level single-apply router: `reduce_action` → `apply_effect` → IME.
+    /// Top-level single-apply router: `reduce_action` → `apply_effect`.
     pub(crate) fn dispatch(
         &mut self,
         action: AppAction,
@@ -89,7 +89,6 @@ impl App {
         while let Some(action) = self.action_pump.next_action() {
             let effect = self.reduce_action(action, Some(event_loop));
             self.apply_effect(effect);
-            self.update_ime_cursor_area();
         }
         self.action_pump.finish_draining();
     }

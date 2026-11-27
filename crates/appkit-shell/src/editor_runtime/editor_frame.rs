@@ -7,11 +7,28 @@ use render::GlyphVertex;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceSkipReason {
+    NoGpu,
+    Timeout,
+    Outdated,
+    Lost,
+    Occluded,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceFrameReport {
+    Presented { acquire: Duration, encode: Duration, submit_and_present: Duration },
+    Skipped(SurfaceSkipReason),
+}
+
 #[derive(Default)]
 pub struct RenderResources {
     pub text: Option<TextState>,
     pub gpu: Option<GpuState>,
     pub frame_cache: crate::frame_cache::FrameCache,
+    last_surface_report: Option<SurfaceFrameReport>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -51,6 +68,10 @@ pub struct SurfaceFramePreparation {
 }
 
 impl RenderResources {
+    pub fn last_surface_report(&self) -> Option<SurfaceFrameReport> {
+        self.last_surface_report
+    }
+
     /// 提交已按产品顺序组合的顶点，并返回 GPU 队列提交与呈现的耗时。
     /// 缺少 GPU 或无法取得当前表面纹理时，返回 `Ok(None)`。
     pub fn submit_surface_frame(
@@ -69,76 +90,110 @@ impl RenderResources {
         options: SurfaceFrameOptions,
         measure_preparation: bool,
     ) -> Result<Option<SurfaceFrameSubmission>, GpuError> {
+        self.last_surface_report = None;
         let Some(gpu) = self.gpu.as_mut() else {
+            self.last_surface_report = Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::NoGpu));
             return Ok(None);
         };
         if let WindowCornerClip::Synchronize(radius) = options.window_corner_clip {
             gpu.ctx.set_window_corner_radius(radius)?;
         }
-        let acquire_started_at = measure_preparation.then(Instant::now);
+        let acquire_started_at = Instant::now();
         let output = match gpu.ctx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            _ => return Ok(None),
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                self.last_surface_report =
+                    Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::Timeout));
+                return Ok(None);
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.last_surface_report =
+                    Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::Outdated));
+                return Ok(None);
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                self.last_surface_report =
+                    Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::Lost));
+                return Ok(None);
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                self.last_surface_report =
+                    Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::Occluded));
+                return Ok(None);
+            }
+            #[allow(unreachable_patterns)]
+            _ => {
+                self.last_surface_report =
+                    Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::Other));
+                return Ok(None);
+            }
         };
-        let acquire_finished_at = acquire_started_at.map(|started_at| (started_at, Instant::now()));
+        let encode_started_at = Instant::now();
         let surface_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = gpu.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("editor frame encoder"),
         });
-        let (attachment_view, resolve_target) = if options
+        let msaa_view = if options
             .empty_frame_target
             .uses_multisampling(self.text.is_some(), !vertices.is_empty())
         {
-            (&gpu.ctx.msaa_view, Some(&surface_view))
+            gpu.ctx.msaa_view()
         } else {
-            (&surface_view, None)
+            None
         };
-        let text = self.text.as_mut().filter(|_| !vertices.is_empty()).map(|text| {
-            upload_frame_vertices(text, gpu, vertices);
-            &*text
+        let (attachment_view, resolve_target) =
+            msaa_view.map_or((&surface_view, None), |view| (view, Some(&surface_view)));
+        let geometry = self.text.as_mut().filter(|_| !vertices.is_empty()).map(|text| {
+            let bytes = bytemuck::cast_slice(vertices);
+            FrameGeometry {
+                renderer: &text.renderer,
+                bind_group: &text.bind_group,
+                vertex_buffer: text.frame_vertices.upload(
+                    &gpu.ctx.device,
+                    &gpu.ctx.queue,
+                    &encoder,
+                    bytes,
+                ),
+                vertex_bytes: bytes.len() as u64,
+                vertex_count: vertices.len() as u32,
+            }
         });
         encode_surface_pass(
             &mut encoder,
             attachment_view,
             resolve_target,
             options.background,
-            text,
-            vertices.len() as u32,
+            geometry,
         );
-
         let commands = encoder.finish();
         let submit_started_at = Instant::now();
         gpu.ctx.queue.submit(std::iter::once(commands));
         output.present();
         let present_returned_at = Instant::now();
+        let acquire = encode_started_at - acquire_started_at;
+        let encode = submit_started_at - encode_started_at;
+        let submit_and_present = present_returned_at - submit_started_at;
+        self.last_surface_report =
+            Some(SurfaceFrameReport::Presented { acquire, encode, submit_and_present });
         Ok(Some(SurfaceFrameSubmission {
             present_returned_at,
-            submit_and_present: present_returned_at - submit_started_at,
-            preparation: acquire_finished_at.map(|(acquire_started_at, encode_started_at)| {
-                SurfaceFramePreparation {
-                    acquire_started_at,
-                    acquire: encode_started_at - acquire_started_at,
-                    encode: submit_started_at - encode_started_at,
-                }
+            submit_and_present,
+            preparation: measure_preparation.then_some(SurfaceFramePreparation {
+                acquire_started_at,
+                acquire,
+                encode,
             }),
         }))
     }
 }
 
-fn upload_frame_vertices(text: &mut TextState, gpu: &GpuState, vertices: &[GlyphVertex]) {
-    let vertex_count = vertices.len() as u32;
-    if vertex_count > text.vertex_capacity {
-        let capacity = vertex_count.next_power_of_two();
-        text.vertex_buffer = gpu.ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("editor frame vertex buffer"),
-            size: (capacity as usize * std::mem::size_of::<GlyphVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        text.vertex_capacity = capacity;
-    }
-    gpu.ctx.queue.write_buffer(&text.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+struct FrameGeometry<'a> {
+    renderer: &'a render::GlyphRenderer,
+    bind_group: &'a wgpu::BindGroup,
+    vertex_buffer: &'a wgpu::Buffer,
+    vertex_bytes: u64,
+    vertex_count: u32,
 }
 
 fn encode_surface_pass(
@@ -146,8 +201,7 @@ fn encode_surface_pass(
     attachment_view: &wgpu::TextureView,
     resolve_target: Option<&wgpu::TextureView>,
     background: [f32; 4],
-    text: Option<&TextState>,
-    vertex_count: u32,
+    geometry: Option<FrameGeometry<'_>>,
 ) {
     let [red, green, blue, alpha] = background.map(f64::from);
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -158,17 +212,27 @@ fn encode_surface_pass(
             resolve_target,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color { r: red, g: green, b: blue, a: alpha }),
-                store: wgpu::StoreOp::Store,
+                store: surface_attachment_store_op(resolve_target.is_some()),
             },
         })],
         ..Default::default()
     });
-    if let Some(text) = text {
-        pass.set_pipeline(text.renderer.pipeline());
-        pass.set_bind_group(0, &text.bind_group, &[]);
-        pass.set_vertex_buffer(0, text.vertex_buffer.slice(..));
-        pass.draw(0..vertex_count, 0..1);
+    if let Some(geometry) = geometry {
+        pass.set_pipeline(geometry.renderer.pipeline());
+        pass.set_bind_group(0, geometry.bind_group, &[]);
+        pass.set_vertex_buffer(0, geometry.vertex_buffer.slice(..geometry.vertex_bytes));
+        pass.draw(0..geometry.vertex_count, 0..1);
     }
+}
+
+fn surface_attachment_store_op(resolves_to_surface: bool) -> wgpu::StoreOp {
+    if resolves_to_surface { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store }
+}
+
+#[test]
+fn resolve_discards_only_the_multisampled_attachment() {
+    assert_eq!(surface_attachment_store_op(true), wgpu::StoreOp::Discard);
+    assert_eq!(surface_attachment_store_op(false), wgpu::StoreOp::Store);
 }
 
 /// Coverage curves calibrated against native GDI+ text on a 233-glyph,
@@ -447,11 +511,7 @@ mod tests {
 
     #[test]
     fn headless_frame_submission_reports_no_presentation() {
-        let mut resources = RenderResources {
-            text: None,
-            gpu: None,
-            frame_cache: crate::frame_cache::FrameCache::new(),
-        };
+        let mut resources = RenderResources::default();
 
         let submission = resources.submit_surface_frame(
             &[],
@@ -463,6 +523,10 @@ mod tests {
         );
 
         assert!(matches!(submission, Ok(None)));
+        assert_eq!(
+            resources.last_surface_report(),
+            Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::NoGpu))
+        );
     }
 
     #[test]
@@ -584,11 +648,7 @@ mod tests {
             .paint_editor_vertices(ui::Rect::new(20.0, 20.0, 80.0, 60.0), editor_triangle([0.0; 4]))
             .expect("finite editor rect should accept editor vertices");
 
-        let mut resources = RenderResources {
-            text: None,
-            gpu: None,
-            frame_cache: crate::frame_cache::FrameCache::new(),
-        };
+        let mut resources = RenderResources::default();
         let mut vertices = Vec::new();
         frame.drain_into(ui::Screen::new(100.0, 100.0), &mut resources, &mut vertices);
 
@@ -623,11 +683,7 @@ mod tests {
             .paint_editor_vertices(editor_bounds, crossing_top_edge)
             .expect("finite editor bounds should clip crossing vertices");
 
-        let mut resources = RenderResources {
-            text: None,
-            gpu: None,
-            frame_cache: crate::frame_cache::FrameCache::new(),
-        };
+        let mut resources = RenderResources::default();
         let screen = ui::Screen::new(100.0, 100.0);
         let clip_top_ndc = screen.rect_to_ndc(editor_bounds)[2];
         let mut vertices = Vec::new();
@@ -664,11 +720,7 @@ mod tests {
             context.list.fill(ui::Rect::new(30.0, 30.0, 5.0, 5.0), overlay_color);
         });
 
-        let mut resources = RenderResources {
-            text: None,
-            gpu: None,
-            frame_cache: crate::frame_cache::FrameCache::new(),
-        };
+        let mut resources = RenderResources::default();
         let mut vertices = Vec::new();
         frame.drain_into(ui::Screen::new(100.0, 100.0), &mut resources, &mut vertices);
 

@@ -40,10 +40,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use appkit_core::tab_set::types::TabId;
+use appkit_shell::editor_runtime::input_latency::{InputEventKind, InputLatencyLog};
 use appkit_shell::editor_runtime::{
     EditorNotification, EditorOutcome, EditorRuntime, EditorRuntimeConfig, EditorRuntimeError,
-    EditorSurfacePaint, RenderError,
+    EditorSurfacePaint, RenderError, SurfaceFrameReport, SurfaceFrameSubmission, SurfaceSkipReason,
 };
+use appkit_shell::frame_pacer::{FrameRequest, WindowFramePacer};
 use appkit_shell::{DrainStart, ProductHost, ProductWakeHandle, ShellEffect, ShellEvent};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -306,6 +309,7 @@ pub struct NotoraRuntime {
     external_file_save_path_chooser: ExternalFileSavePathChooser,
     workspace_transition_runtime: WorkspaceTransitionRuntime,
     window_runtime: WindowRuntime,
+    input_latency: Option<InputLatencyLog>,
 }
 
 struct RuntimeShellEffectTarget<'a> {
@@ -410,6 +414,7 @@ impl NotoraRuntime {
             external_file_save_path_chooser: Box::new(choose_external_file_save_path),
             workspace_transition_runtime: WorkspaceTransitionRuntime::default(),
             window_runtime: WindowRuntime::new(),
+            input_latency: InputLatencyLog::open(),
         };
         app.synchronize_product_focus();
         app.frame_runtime.record_application_constructed();
@@ -728,7 +733,7 @@ impl NotoraRuntime {
         self.synchronize_document_search();
         let ime_allowed = self.frame_runtime.focused_text_input_ime_allowed();
         if let Some(window) = self.document_runtime.editor().window() {
-            window.set_ime_allowed(ime_allowed);
+            self.frame_runtime.set_ime_allowed(window, ime_allowed);
         }
     }
 
@@ -825,8 +830,13 @@ impl NotoraRuntime {
     }
 
     pub(crate) fn set_window_focused(&mut self, focused: bool) {
+        self.frame_runtime.invalidate_ime_cursor_area();
         self.window_runtime.set_focused(focused, self.document_runtime.editor_mut());
         self.synchronize_product_focus();
+    }
+
+    pub(crate) fn set_window_occluded(&mut self, occluded: bool) {
+        self.window_runtime.set_occluded(occluded);
     }
 
     pub(crate) fn set_window_size(&mut self, width: u32, height: u32) {
@@ -836,6 +846,51 @@ impl NotoraRuntime {
 
     pub(crate) fn editor_runtime_mut(&mut self) -> &mut EditorRuntime {
         self.document_runtime.editor_mut()
+    }
+
+    pub(crate) fn input_latency_started_at(&self) -> Option<Instant> {
+        self.input_latency.as_ref().map(|_| Instant::now())
+    }
+
+    pub(crate) fn cancel_pending_preedit_measurement(&mut self) {
+        if let Some(log) = self.input_latency.as_mut() {
+            log.cancel_pending_preedit();
+        }
+    }
+
+    pub(crate) fn measure_editor_input(
+        &mut self,
+        started_at: Option<Instant>,
+        kind: InputEventKind,
+        handle: impl FnOnce(&mut Self),
+    ) {
+        let previous = started_at.and_then(|started_at| {
+            let revision = self.editor_input_revision()?;
+            let preedit = (kind == InputEventKind::ImePreedit)
+                .then(|| self.document_runtime.editor().preedit());
+            Some((started_at, revision, preedit))
+        });
+        handle(self);
+        let Some((started_at, (tab_id, generation), previous_preedit)) = previous else { return };
+        let Some((active_tab_id, active_generation)) = self.editor_input_revision() else { return };
+        if tab_id != active_tab_id {
+            return;
+        }
+        let changed = previous_preedit.map_or(active_generation != generation, |preedit| {
+            self.document_runtime.editor().preedit() != preedit
+        });
+        if changed && let Some(log) = self.input_latency.as_mut() {
+            log.record(tab_id, kind, started_at, Instant::now());
+        }
+    }
+
+    fn editor_input_revision(&self) -> Option<(TabId, u32)> {
+        let editor = self.document_runtime.editor();
+        if !editor.keyboard_input_allowed(self.editor_input_context()) {
+            return None;
+        }
+        let tab_id = editor.active_tab_id()?;
+        Some((tab_id, editor.tab_session(tab_id)?.document().generation()))
     }
 
     pub(crate) fn take_redraw_request(&mut self) -> bool {
@@ -897,6 +952,7 @@ impl NotoraRuntime {
             self.persistence_runtime.next_deadline(),
             self.next_text_cursor_blink_at(),
             self.editor_cursor_blink_phase().map(|phase| phase.next_transition_at),
+            self.window_runtime.pacing_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -932,8 +988,22 @@ impl NotoraRuntime {
         }
     }
 
-    pub(crate) fn request_window_redraw(&self) {
-        self.window_runtime.request_window_redraw(self.document_runtime.editor());
+    pub(crate) fn request_window_redraw(&mut self) {
+        self.window_runtime.schedule_redraw();
+    }
+
+    pub(crate) fn paced_frame_requested(&mut self, request: FrameRequest) -> bool {
+        !self.window_runtime.occluded
+            && self.document_runtime.editor().window().is_some()
+            && self.window_runtime.frame_pacer.request(request, Instant::now())
+    }
+
+    pub(crate) fn frame_due_on_tick(&mut self) -> bool {
+        self.window_runtime.frame_pacer.take_tick(Instant::now(), false)
+    }
+
+    pub(crate) fn stop_frame_pacing(&mut self) {
+        self.window_runtime.frame_pacer.stop();
     }
 
     pub(crate) fn route_pointer_event(&mut self, event: &ui::Event) -> bool {
@@ -1008,7 +1078,7 @@ impl NotoraRuntime {
             WindowFrameAction::Close => {}
             WindowFrameAction::ToggleNavigation => {}
         }
-        window.request_redraw();
+        self.window_runtime.schedule_redraw();
     }
 
     fn toggle_navigation_from_title_bar(&mut self) {
@@ -1033,6 +1103,7 @@ impl NotoraRuntime {
     }
 
     pub(crate) fn set_scale_factor(&mut self, scale_factor: f64) {
+        self.frame_runtime.invalidate_ime_cursor_area();
         self.document_runtime.editor_mut().set_scale_factor(scale_factor);
         self.window_runtime.synchronize_window_chrome(self.document_runtime.editor());
         self.action_runtime.set_responsive_mode(self.shell_layout().responsive_mode);
@@ -1080,6 +1151,10 @@ impl NotoraRuntime {
             .map_err(NotoraAppError::Runtime)?;
         self.frame_runtime
             .record_startup_stage("window_gpu_text_ready", editor_runtime_resume_started_at);
+        if let Some(window) = self.document_runtime.editor().window() {
+            self.window_runtime.frame_pacer =
+                WindowFramePacer::for_window(window, self.window_runtime.event_loop_proxy());
+        }
         self.rebuild_theme_for_system_appearance(self.current_system_appearance());
         if let Some((width, height)) = self.document_runtime.editor_mut().window().map(|window| {
             let geometry = self.persistence_runtime.pending_window_geometry();
@@ -1092,10 +1167,12 @@ impl NotoraRuntime {
                 geometry.height_px.round().max(1.0) as u32,
             ));
             let size = window.inner_size();
-            window.set_ime_allowed(true);
             (size.width, size.height)
         }) {
             self.set_window_size(width, height);
+        }
+        if let Some(window) = self.document_runtime.editor().window() {
+            self.frame_runtime.set_ime_allowed(window, true);
         }
         self.window_runtime.synchronize_window_chrome(self.document_runtime.editor());
         if let Some(event_loop_proxy) = self.window_runtime.event_loop_proxy() {
@@ -1232,16 +1309,38 @@ impl NotoraRuntime {
     }
 
     pub(crate) fn render(&mut self) -> Result<(), RenderError> {
-        let _ = self.render_frame()?;
-        self.frame_runtime
-            .update_focused_ime_cursor_area(&self.document_runtime, self.action_runtime.state());
-        Ok(())
+        let started_at = self.input_latency_started_at();
+        let tab = self.document_runtime.editor().active_tab_id();
+        if let Some(log) = self.input_latency.as_mut() {
+            log.retain_tab(tab);
+        }
+        let (submission, result) = match self.render_frame() {
+            Ok((_, submission)) => (submission, Ok(())),
+            Err(error) => (None, Err(error)),
+        };
+        let ime_position_started_at = started_at.map(|_| Instant::now());
+        if submission.is_some() {
+            self.frame_runtime.update_focused_ime_cursor_area(
+                &self.document_runtime,
+                self.action_runtime.state(),
+            );
+        }
+        if let (Some(started_at), Some(log)) = (started_at, self.input_latency.as_mut()) {
+            let finished_at = Instant::now();
+            let ime_position = ime_position_started_at
+                .map_or(Duration::ZERO, |started_at| finished_at - started_at);
+            log.finish_redraw(started_at, submission, Duration::ZERO, ime_position, finished_at);
+        }
+        result
     }
 
-    fn render_frame(&mut self) -> Result<EditorSurfacePaint, RenderError> {
+    fn render_frame(
+        &mut self,
+    ) -> Result<(EditorSurfacePaint, Option<SurfaceFrameSubmission>), RenderError> {
         self.synchronize_document_search();
         self.window_runtime.synchronize_window_chrome(self.document_runtime.editor());
         self.window_runtime.mark_frame_rendered();
+        let editor_redraw_requested = self.document_runtime.editor_mut().take_redraw_request();
         let layout = self.shell_layout();
         let editor_is_active = self.active_editor_matches_selection();
         let (window_width_px, window_height_px) = self.window_runtime.size();
@@ -1253,12 +1352,45 @@ impl NotoraRuntime {
             window_width_px,
             window_height_px,
             editor_is_active,
+            measure_input: self
+                .input_latency
+                .as_ref()
+                .is_some_and(InputLatencyLog::has_pending_samples),
         };
         let rendered_frame = self.frame_runtime.render_frame(&mut self.document_runtime, input);
+        if rendered_frame.as_ref().is_ok_and(|(_, submission)| submission.is_none()) {
+            self.recover_skipped_surface_frame(editor_redraw_requested);
+        } else if rendered_frame.is_err() && editor_redraw_requested {
+            self.window_runtime.schedule_redraw();
+        }
         if rendered_frame.is_ok() && editor_is_active {
             self.frame_runtime.record_restored_document_rendered();
         }
         rendered_frame
+    }
+
+    fn recover_skipped_surface_frame(&mut self, editor_redraw_requested: bool) {
+        let report = self
+            .document_runtime
+            .editor_mut()
+            .with_render_resources(|_, resources| resources.last_surface_report());
+        match report {
+            Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::Timeout)) => {
+                self.window_runtime.schedule_redraw();
+            }
+            Some(SurfaceFrameReport::Skipped(
+                SurfaceSkipReason::Lost | SurfaceSkipReason::Outdated,
+            )) => {
+                if let Some((width, height)) = self.document_runtime.editor().surface_size() {
+                    self.resize_window(width, height);
+                }
+            }
+            Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::Occluded)) => {
+                self.set_window_occluded(true);
+            }
+            _ if editor_redraw_requested => self.window_runtime.schedule_redraw(),
+            _ => {}
+        }
     }
 
     #[cfg(test)]
@@ -1271,6 +1403,7 @@ impl NotoraRuntime {
     }
 
     pub(crate) fn shutdown(&mut self) {
+        self.stop_frame_pacing();
         self.finish_saves_and_snapshot_dirty_documents();
         self.flush_pending_catalog_backup();
         let final_session = self.capture_product_session();

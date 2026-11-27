@@ -1,7 +1,7 @@
 //! Window management: geometry, resize, IME, wake timing, shell inputs.
 //! Methods on `impl App`, extracted from app.rs.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::app::{App, compute_cursor_phase};
 use crate::ui_shell::ShellInputs;
@@ -9,7 +9,7 @@ use crate::workspace_persistence::restore_workspace;
 use appkit_shell::ProductHost;
 use appkit_shell::accessibility_adapter::PlatformAccessibilityAdapter;
 use appkit_shell::gpu::GpuError;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
+use winit::dpi::{LogicalSize, Size};
 #[cfg(target_os = "windows")]
 use winit::window::Icon;
 use winit::window::WindowAttributes;
@@ -216,6 +216,7 @@ impl App {
     }
 
     pub(crate) fn quit_app(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.platform.frame_pacer.stop();
         self.persist_workspace_state();
         self.record_all_entries_to_history();
         self.save_history();
@@ -272,49 +273,43 @@ impl App {
 
     /// Notify the OS of the current IME cursor position so the candidate
     /// window follows the text caret.
-    pub(crate) fn update_ime_cursor_area(&self) {
-        if let Some(window) = self.editor_runtime.window() {
-            // 设置弹窗中聚焦的输入框：IME 候选窗跟随弹窗内光标。
-            if let Some(ime_rect) = self.settings_overlay_ime_cursor_rect() {
-                window.set_ime_cursor_area(
-                    PhysicalPosition::new(ime_rect.x as f64, (ime_rect.y + ime_rect.h) as f64),
-                    PhysicalSize::new(ime_rect.w.max(2.0) as f64, ime_rect.h as f64),
-                );
-                return;
-            }
-
-            let search_has_focus =
-                self.active_tab_session().is_some_and(|tab| tab.search_state().panel_visible)
-                    && self.ui_shell.search_bar_has_keyboard_focus();
-
-            if search_has_focus {
-                // IME candidate window at search bar cursor position.
-                // Use content_top_offset() to get the correct Y in both Tabs and Sidebar modes.
-                if let Some(ime_rect) = self.ui_shell.search_ime_cursor_rect() {
-                    let cursor_y = self.content_top_offset() + ime_rect.y;
-                    let cursor_x = self.ui_shell.search_bar_x_offset() + ime_rect.x;
-                    window.set_ime_cursor_area(
-                        PhysicalPosition::new(cursor_x as f64, cursor_y as f64),
-                        PhysicalSize::new(2.0, ime_rect.h as f64),
-                    );
-                }
-                return;
-            }
-
-            let rect = if self.active_handles_own_rendering() {
-                self.active_tab_session().and_then(|tab| {
-                    self.plugin_cursor_window_rect(tab.document().cursor_offset().to_usize())
-                })
-            } else {
-                self.editor_runtime.active_editor_ime_cursor_rect()
-            };
-            if let Some(rect) = rect {
-                window.set_ime_cursor_area(
-                    PhysicalPosition::new(rect.x as f64, rect.bottom() as f64),
-                    PhysicalSize::new(2.0, rect.h as f64),
-                );
-            }
+    pub(crate) fn update_ime_cursor_area(&mut self) {
+        let Some(window) = self.editor_runtime.window() else {
+            self.platform.ime_cursor_area.invalidate();
+            return;
+        };
+        let Some((x, y, width, height)) = self.ime_cursor_area_pixels() else {
+            self.platform.ime_cursor_area.invalidate();
+            return;
+        };
+        if let Some((position, size)) = self.platform.ime_cursor_area.update(x, y, width, height) {
+            window.set_ime_cursor_area(position, size);
         }
+    }
+
+    fn ime_cursor_area_pixels(&self) -> Option<(f32, f32, f32, f32)> {
+        if let Some(rect) = self.settings_overlay_ime_cursor_rect() {
+            return Some((rect.x, rect.bottom(), rect.w.max(2.0), rect.h));
+        }
+        if self.active_tab_session().is_some_and(|tab| tab.search_state().panel_visible)
+            && self.ui_shell.search_bar_has_keyboard_focus()
+        {
+            let rect = self.ui_shell.search_ime_cursor_rect()?;
+            return Some((
+                self.ui_shell.search_bar_x_offset() + rect.x,
+                self.content_top_offset() + rect.y,
+                2.0,
+                rect.h,
+            ));
+        }
+        let rect = if self.active_handles_own_rendering() {
+            self.active_tab_session().and_then(|tab| {
+                self.plugin_cursor_window_rect(tab.document().cursor_offset().to_usize())
+            })
+        } else {
+            self.editor_runtime.active_editor_ime_cursor_rect()
+        }?;
+        Some((rect.x, rect.bottom(), 2.0, rect.h))
     }
 
     /// Flush any pending resize if 16ms have passed since last handled.
@@ -412,16 +407,7 @@ impl App {
             });
         }
 
-        // 2. 标签栏滚动动画 — 动画运行期间每 16ms 唤醒一帧
-        if self.has_active_animation() {
-            let next_frame = Instant::now() + Duration::from_millis(16);
-            earliest = Some(match earliest {
-                Some(e) => e.min(next_frame),
-                None => next_frame,
-            });
-        }
-
-        // 3. Revision-aware file safety checks
+        // 2. Revision-aware file safety checks
         if self.editor_runtime.file_safety_worker_started() && !self.editor_is_empty() {
             let next_file_safety = self.editor_runtime.file_safety_next_check();
             earliest = Some(match earliest {
@@ -439,6 +425,7 @@ impl App {
     ) -> Result<(), GpuError> {
         let _t0 = std::time::Instant::now();
 
+        let settings_started_at = Instant::now();
         let persisted = match crate::settings_io::load(&self.paths.settings_file) {
             Ok(s) => s,
             Err(e) => {
@@ -446,10 +433,24 @@ impl App {
                 crate::settings_io::PersistedSettings::default()
             }
         };
+        self.platform.log_startup_stage(
+            "settings_reload",
+            settings_started_at.elapsed(),
+            format_args!(""),
+        );
         let mut attrs = WindowAttributes::default()
             .with_title(self.product.edition().name())
             .with_visible(false)
             .with_decorations(!cfg!(target_os = "windows"));
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+
+            attrs = attrs
+                .with_titlebar_transparent(true)
+                .with_title_hidden(true)
+                .with_fullsize_content_view(true);
+        }
         #[cfg(target_os = "windows")]
         {
             use winit::platform::windows::WindowAttributesExtWindows;
@@ -480,9 +481,17 @@ impl App {
         let shared_font_system = self.resolve_startup_font_system();
         let font_size = self.persisted_font_size();
         let font_family = self.editor_runtime.settings().font_family.clone();
+        let resume_started_at = Instant::now();
         self.editor_runtime
             .resume(event_loop, attrs, shared_font_system.clone(), font_size, &font_family)
             .map_err(|error| GpuError::SurfaceCreation(error.to_string()))?;
+        self.platform.log_startup_stage(
+            "runtime_resume",
+            resume_started_at.elapsed(),
+            format_args!(""),
+        );
+
+        let a11y_started_at = Instant::now();
         let window = self.editor_runtime.window().ok_or(GpuError::NoAdapter)?;
         if let Some(event_loop_proxy) = self.platform.event_loop_proxy().cloned() {
             self.platform.install_accessibility(PlatformAccessibilityAdapter::new(
@@ -491,61 +500,107 @@ impl App {
                 event_loop_proxy,
             ));
         }
-        window.set_visible(true);
-        window.set_ime_allowed(true);
-        window.set_cursor(winit::window::CursorIcon::Text);
-        // Follow system appearance after runtime creates the window.
-        self.rebuild_theme_state(window.theme().unwrap_or(winit::window::Theme::Dark));
-        eprintln!("[startup] window create + theme: {:?}", _t0.elapsed());
+        self.platform.log_startup_stage("a11y_init", a11y_started_at.elapsed(), format_args!(""));
 
-        // Both view modes draw content beneath the native macOS traffic lights.
-        if let Some(w) = self.editor_runtime.window() {
-            crate::sys::macos_titlebar::enable_full_size_content(w);
-        }
-
-        // Restore window position from persisted settings (after titlebar config)
-        if let Some(window) = self.editor_runtime.window()
-            && let (Some(window_x), Some(window_y)) = (persisted.window_x, persisted.window_y)
-        {
-            let window_size = window.outer_size();
-            let monitor_bounds = window
-                .available_monitors()
-                .map(|monitor| {
-                    let position = monitor.position();
-                    let size = monitor.size();
-                    (position.x, position.y, size.width, size.height)
-                })
-                .collect::<Vec<_>>();
-            if window_position_has_visible_region(
-                window_x,
-                window_y,
-                window_size.width,
-                window_size.height,
-                &monitor_bounds,
-            ) {
-                window.set_outer_position(winit::dpi::Position::Physical(
-                    winit::dpi::PhysicalPosition::new(window_x, window_y),
-                ));
-            } else {
-                eprintln!("[startup] ignored off-screen window position: ({window_x}, {window_y})");
+        // Align traffic lights and restore persisted window position before showing the window.
+        let titlebar_pos_started_at = Instant::now();
+        if let Some(window) = self.editor_runtime.window() {
+            crate::sys::macos_titlebar::align_traffic_lights(window);
+            if let (Some(window_x), Some(window_y)) = (persisted.window_x, persisted.window_y) {
+                let window_size = window.outer_size();
+                let monitor_bounds = window
+                    .available_monitors()
+                    .map(|monitor| {
+                        let position = monitor.position();
+                        let size = monitor.size();
+                        (position.x, position.y, size.width, size.height)
+                    })
+                    .collect::<Vec<_>>();
+                if window_position_has_visible_region(
+                    window_x,
+                    window_y,
+                    window_size.width,
+                    window_size.height,
+                    &monitor_bounds,
+                ) {
+                    window.set_outer_position(winit::dpi::Position::Physical(
+                        winit::dpi::PhysicalPosition::new(window_x, window_y),
+                    ));
+                } else {
+                    eprintln!(
+                        "[startup] ignored off-screen window position: ({window_x}, {window_y})"
+                    );
+                }
             }
         }
+        self.platform.log_startup_stage(
+            "titlebar_and_pos",
+            titlebar_pos_started_at.elapsed(),
+            format_args!(""),
+        );
+
+        // Follow system appearance after runtime creates the window.
+        let theme_started_at = Instant::now();
+        let system_theme = self
+            .editor_runtime
+            .window()
+            .and_then(|window| window.theme())
+            .unwrap_or(winit::window::Theme::Dark);
+        self.rebuild_theme_state(system_theme);
+        self.platform.log_startup_stage(
+            "rebuild_theme",
+            theme_started_at.elapsed(),
+            format_args!(""),
+        );
+
+        let visible_started_at = Instant::now();
+        if let Some(window) = self.editor_runtime.window() {
+            window.set_ime_allowed(true);
+            window.set_cursor(winit::window::CursorIcon::Text);
+            window.set_visible(true);
+        }
+        self.platform.log_startup_stage(
+            "window_set_visible",
+            visible_started_at.elapsed(),
+            format_args!(""),
+        );
 
         // TextState and reshape worker are created and owned by EditorRuntime.
         let metrics = self.ui_metrics();
+        let reshape_started_at = Instant::now();
         self.editor_runtime.start_reshape_worker(
             shared_font_system,
             metrics.font_size,
             font_family,
         );
+        self.platform.log_startup_stage(
+            "start_reshape_worker",
+            reshape_started_at.elapsed(),
+            format_args!(""),
+        );
 
-        let _t3 = std::time::Instant::now();
         let screen_h =
             self.editor_runtime.surface_size().map_or(600.0, |(_, height)| height as f32);
         // Clean up orphaned snapshot files once at startup
+        let cleanup_started_at = Instant::now();
         self.workspace_services.store().cleanup_snapshot_orphans();
-        if let Ok(Some(restored_snap)) = self.workspace_services.store().load_workspace() {
+        self.platform.log_startup_stage(
+            "cleanup_orphans",
+            cleanup_started_at.elapsed(),
+            format_args!(""),
+        );
+
+        let load_workspace_started_at = Instant::now();
+        let loaded_workspace = self.workspace_services.store().load_workspace();
+        self.platform.log_startup_stage(
+            "load_workspace",
+            load_workspace_started_at.elapsed(),
+            format_args!(" has_workspace={}", matches!(loaded_workspace, Ok(Some(_)))),
+        );
+
+        if let Ok(Some(restored_snap)) = loaded_workspace {
             let viewport = self.viewport_dimensions(screen_h);
+            let restore_started_at = Instant::now();
             if restore_workspace(
                 &mut self.editor_runtime,
                 restored_snap,
@@ -555,11 +610,34 @@ impl App {
             )
             .is_ok()
             {
-                eprintln!("[startup] workspace restored: {} tabs", self.editor_runtime.tab_count());
+                let tabs = self.editor_runtime.tab_count();
+                let dirty_tabs = self
+                    .editor_runtime
+                    .document_summaries()
+                    .iter()
+                    .filter(|summary| summary.dirty)
+                    .count();
+                let (active_lines, active_bytes) =
+                    self.active_tab_session().map_or((0, 0), |tab| {
+                        (tab.document().line_count(), tab.document().buffer_len())
+                    });
+                self.platform.log_startup_stage(
+                    "restore_workspace",
+                    restore_started_at.elapsed(),
+                    format_args!(
+                        " tabs={tabs} dirty_tabs={dirty_tabs} active_lines={active_lines} active_bytes={active_bytes}"
+                    ),
+                );
                 self.refresh_file_monitor_roots();
                 // Auto-scroll active tab into view after workspace restore
+                let layout_started_at = Instant::now();
                 let effect = self.update_entry_layout();
                 self.apply_effect(effect);
+                self.platform.log_startup_stage(
+                    "update_entry_layout",
+                    layout_started_at.elapsed(),
+                    format_args!(""),
+                );
                 // Clear file_path so we don't double-open
                 self.platform.clear_startup_file();
                 // Initialize display map for the active tab (needed for scroll_anchor restore)
@@ -569,25 +647,42 @@ impl App {
                     self.init_display_map(active_index);
                 }
             } else {
+                let load_file_started_at = Instant::now();
                 self.load_file();
+                self.platform.log_startup_stage(
+                    "load_startup_file",
+                    load_file_started_at.elapsed(),
+                    format_args!(" tabs={}", self.editor_runtime.tab_count()),
+                );
             }
         } else {
+            let load_file_started_at = Instant::now();
             self.load_file();
+            self.platform.log_startup_stage(
+                "load_startup_file",
+                load_file_started_at.elapsed(),
+                format_args!(" tabs={}", self.editor_runtime.tab_count()),
+            );
         }
-        eprintln!("[startup] load_file: {:?}", _t3.elapsed());
 
         let _t4 = std::time::Instant::now();
         if let Ok(paths) = self.workspace_services.store().load_pinned_paths() {
             self.restore_editor_pinned_paths(&paths);
         }
-        eprintln!("[startup] load_pinned: {:?}", _t4.elapsed());
+        self.platform.log_startup_stage("load_pinned", _t4.elapsed(), format_args!(""));
 
         // Ensure at least one document (untitled) when no file is opened
         if self.editor_is_empty() {
+            let untitled_started_at = Instant::now();
             let effect = self.new_untitled_doc();
             self.apply_effect(effect);
+            self.platform.log_startup_stage(
+                "new_untitled_doc",
+                untitled_started_at.elapsed(),
+                format_args!(""),
+            );
         }
-        eprintln!("[startup] init_window total: {:?}", _t0.elapsed());
+        self.platform.log_startup_stage("init_window_done", _t0.elapsed(), format_args!(""));
         Ok(())
     }
 }
@@ -622,6 +717,23 @@ mod build_shell_inputs_tests {
 
         assert!(hidden_position < adapter_position);
         assert!(adapter_position < visible_position);
+    }
+
+    #[test]
+    fn macos_titlebar_and_window_position_are_configured_before_window_becomes_visible() {
+        let source = include_str!("app_window.rs");
+        let fullsize_attr = ["with_fullsize_content_view(", "true)"].concat();
+        let outer_pos = ["window.", "set_outer_position("].concat();
+        let visible_window = ["window.set_visible(", "true)"].concat();
+
+        let fullsize_position =
+            source.find(&fullsize_attr).expect("macOS fullsize content view must be configured");
+        let outer_pos_position =
+            source.find(&outer_pos).expect("persisted outer position must be restored");
+        let visible_position = source.find(&visible_window).expect("window must become visible");
+
+        assert!(fullsize_position < visible_position);
+        assert!(outer_pos_position < visible_position);
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod editor_pointer;
 mod editor_reshape;
 #[allow(dead_code, reason = "ER4-4 wires file safety results into the App lifecycle")]
 mod file_safety_session;
+pub mod input_latency;
 #[allow(dead_code, reason = "ER2-2 wires the product-neutral input session into event routing")]
 mod input_session;
 mod model_session;
@@ -31,7 +32,8 @@ pub use document_save::{
 };
 pub use editor_frame::{
     EditorFrame, EmptyFrameTarget, RenderError, RenderResources, SurfaceFrameOptions,
-    SurfaceFramePreparation, SurfaceFrameSubmission, WindowCornerClip,
+    SurfaceFramePreparation, SurfaceFrameReport, SurfaceFrameSubmission, SurfaceSkipReason,
+    WindowCornerClip,
 };
 pub use editor_navigation::{
     apply_edit_hit_target, apply_target_to_document, set_wysiwyg_cursor_and_selection,
@@ -880,6 +882,10 @@ impl EditorRuntime {
 
     pub fn take_redraw_request(&mut self) -> bool {
         self.render_session.take_redraw_request()
+    }
+
+    pub fn has_redraw_request(&self) -> bool {
+        self.render_session.has_redraw_request()
     }
 
     pub fn keyboard_input_allowed(&self, context: EditorInputContext) -> bool {

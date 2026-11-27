@@ -25,14 +25,50 @@ fn rgba_image_midtones_and_transparency_survive_gpu_blending() {
     .expect("image readback device creation failed");
 
     for format in [wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureFormat::Rgba8UnormSrgb] {
-        let opaque = render_pixel(&device, &queue, format, [128, 64, 192, 255]);
-        assert_color_near(opaque, [128, 64, 192, 255], 2);
+        for sample_count in [1, 4] {
+            let frame = ReadbackPass {
+                sample_count,
+                store: wgpu::StoreOp::Discard,
+                right_edge: 1.0,
+                paint: IMAGE_PAINT,
+            };
+            let opaque = render_pixel(&device, &queue, format, [128, 64, 192, 255], frame);
+            assert_color_near(opaque, [128, 64, 192, 255], 2);
 
-        let translucent = render_pixel(&device, &queue, format, [64, 32, 96, 128]);
-        let expected = if format.is_srgb() { [92, 44, 140, 255] } else { [64, 32, 96, 255] };
-        assert_color_near(translucent, expected, 3);
+            let translucent = render_pixel(&device, &queue, format, [64, 32, 96, 128], frame);
+            let expected = if format.is_srgb() { [92, 44, 140, 255] } else { [64, 32, 96, 255] };
+            assert_color_near(translucent, expected, 3);
+        }
+    }
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let edge = ReadbackPass {
+        sample_count: 4,
+        store: wgpu::StoreOp::Store,
+        right_edge: 0.0,
+        paint: IMAGE_PAINT,
+    };
+    let stored = render_pixel(&device, &queue, format, [255; 4], edge);
+    let discarded = render_pixel(
+        &device,
+        &queue,
+        format,
+        [255; 4],
+        ReadbackPass { store: wgpu::StoreOp::Discard, ..edge },
+    );
+    assert_color_near(stored, [128, 128, 128, 255], 1);
+    assert_eq!(discarded, stored);
+
+    for format in [wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureFormat::Rgba8UnormSrgb] {
+        let color = [0.75, 0.25, 0.125, 0.5];
+        let sampled = ReadbackPass { paint: ([0.0; 2], color), ..edge };
+        let flat = ReadbackPass { paint: (GlyphVertex::SOLID_TEX_COORDS, color), ..edge };
+        let sampled_edge = render_pixel(&device, &queue, format, [255; 4], sampled);
+        assert!(sampled_edge[0] > 0);
+        assert_eq!(render_pixel(&device, &queue, format, [255; 4], flat), sampled_edge);
     }
 }
+
+const IMAGE_PAINT: ([f32; 2], [f32; 4]) = ([-1.5, 0.5], [1.0; 4]);
 
 fn assert_color_near(actual: [u8; 4], expected: [u8; 4], tolerance: u8) {
     for (actual, expected) in actual.into_iter().zip(expected) {
@@ -43,13 +79,22 @@ fn assert_color_near(actual: [u8; 4], expected: [u8; 4], tolerance: u8) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ReadbackPass {
+    sample_count: u32,
+    store: wgpu::StoreOp,
+    right_edge: f32,
+    paint: ([f32; 2], [f32; 4]),
+}
+
 fn render_pixel(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     format: wgpu::TextureFormat,
     premultiplied_pixel: [u8; 4],
+    frame: ReadbackPass,
 ) -> [u8; 4] {
-    let renderer = GlyphRenderer::new(device, format);
+    let renderer = GlyphRenderer::new_with_sample_count(device, format, frame.sample_count);
     let glyph_texture = texture(
         device,
         "glyph pixel",
@@ -106,13 +151,14 @@ fn render_pixel(
             },
         ],
     });
-    let vertex = |x, y| GlyphVertex { position: [x, y], tex_coords: [-1.5, 0.5], color: [1.0; 4] };
+    let (tex_coords, color) = frame.paint;
+    let vertex = |x, y| GlyphVertex { position: [x, y], tex_coords, color };
     let vertices = [
         vertex(-1.0, 1.0),
-        vertex(1.0, 1.0),
+        vertex(frame.right_edge, 1.0),
         vertex(-1.0, -1.0),
-        vertex(1.0, 1.0),
-        vertex(1.0, -1.0),
+        vertex(frame.right_edge, 1.0),
+        vertex(frame.right_edge, -1.0),
         vertex(-1.0, -1.0),
     ];
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -120,7 +166,13 @@ fn render_pixel(
         contents: bytemuck::cast_slice(&vertices),
         usage: wgpu::BufferUsages::VERTEX,
     });
-    let msaa = texture(device, "readback MSAA", format, 4, wgpu::TextureUsages::RENDER_ATTACHMENT);
+    let msaa = (frame.sample_count > 1).then(|| {
+        let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        if frame.store == wgpu::StoreOp::Discard {
+            usage |= wgpu::TextureUsages::TRANSIENT;
+        }
+        texture(device, "readback MSAA", format, frame.sample_count, usage)
+    });
     let resolved = texture(
         device,
         "readback resolved",
@@ -128,7 +180,8 @@ fn render_pixel(
         1,
         wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
     );
-    let msaa_view = msaa.create_view(&wgpu::TextureViewDescriptor::default());
+    let msaa_view =
+        msaa.map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
     let resolved_view = resolved.create_view(&wgpu::TextureViewDescriptor::default());
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback buffer"),
@@ -143,12 +196,12 @@ fn render_pixel(
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("readback pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &msaa_view,
+                view: msaa_view.as_ref().unwrap_or(&resolved_view),
                 depth_slice: None,
-                resolve_target: Some(&resolved_view),
+                resolve_target: msaa_view.as_ref().map(|_| &resolved_view),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
+                    store: msaa_view.as_ref().map_or(wgpu::StoreOp::Store, |_| frame.store),
                 },
             })],
             depth_stencil_attachment: None,

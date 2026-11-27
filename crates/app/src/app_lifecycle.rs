@@ -10,6 +10,8 @@ use appkit_shell::accessibility_adapter::{
     PlatformAccessibilityEvent, PlatformAccessibilityWindowEvent,
 };
 use appkit_shell::editor_runtime::PreeditUpdate;
+use appkit_shell::editor_runtime::input_latency::InputEventKind;
+use appkit_shell::frame_pacer::{FrameRequest, WindowFramePacer, input_frame_request};
 pub(crate) use appkit_shell::window_input::winit_key_to_keycode;
 use appkit_shell::window_input::{scroll_delta_pixels, ui_modifiers};
 use std::path::{Path, PathBuf};
@@ -29,13 +31,6 @@ use ui::core::overlay::OverlayAction;
 use ui::core::widget::{KeyCode, Modifiers, WidgetAction};
 
 const FALLBACK_LOCAL_DEVICE_SHORT_ID: &str = "local";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InputEventKind {
-    Key,
-    ImePreedit,
-    ImeCommit,
-}
 
 fn report_lifecycle_error(message: std::fmt::Arguments<'_>) {
     use std::io::Write;
@@ -386,7 +381,7 @@ impl App {
                 false
             }
             AppEvent::SaveResultsReady => self.drain_save_results(),
-            AppEvent::Accessibility(_) => false,
+            AppEvent::Accessibility(_) | AppEvent::DisplayTick => false,
         }
     }
 
@@ -462,23 +457,40 @@ impl App {
 
     /// Actual resumed logic, wrapped in catch_unwind by the trait method.
     fn do_resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.editor_runtime.window().is_none()
-            && let Err(_e) = self.init_window(event_loop)
-        {
-            event_loop.exit();
-            return;
+        let resumed_started_at = Instant::now();
+        if self.editor_runtime.window().is_none() {
+            self.platform.log_startup_point("resumed_enter", format_args!(""));
+            if let Err(_e) = self.init_window(event_loop) {
+                event_loop.exit();
+                return;
+            }
+            if let Some(window) = self.editor_runtime.window() {
+                self.platform.frame_pacer =
+                    WindowFramePacer::for_window(window, self.platform.event_loop_proxy().cloned());
+            }
         }
         // Build native menu bar after window creation (NSApp is ready)
         if self.native_menu().is_none() {
+            let menu_started_at = Instant::now();
             let summaries = self.editor_runtime.document_summaries();
             let paths: Vec<&std::path::Path> =
                 summaries.iter().filter_map(|summary| summary.path.as_deref()).collect();
             let workspace_root = compute_workspace_root(&paths);
             self.set_native_menu(NativeMenu::build_loading(self.product.edition()));
+            self.platform.log_startup_stage(
+                "native_menu",
+                menu_started_at.elapsed(),
+                format_args!(""),
+            );
             spawn_recent_file_loader(
                 self.product.event_sender(),
                 self.workspace_services.history().clone(),
                 workspace_root,
+            );
+            self.platform.log_startup_stage(
+                "do_resumed_done",
+                resumed_started_at.elapsed(),
+                format_args!(""),
             );
         }
     }
@@ -486,8 +498,12 @@ impl App {
     /// Actual window event logic, wrapped in catch_unwind by the trait method.
     fn do_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         let entered_at = self.platform.input_latency_enabled().then(Instant::now);
+        if matches!(&event, WindowEvent::Focused(false) | WindowEvent::Ime(Ime::Disabled))
+            && let Some(log) = self.platform.input_latency()
+        {
+            log.cancel_pending_preedit();
+        }
         let mut changed_input = None;
-        let mut redraw_measurement = None;
         if let Some(adapter) = self.platform.accessibility_mut()
             && let Some(window) = self.editor_runtime.window()
         {
@@ -517,68 +533,18 @@ impl App {
                 self.editor_runtime.set_input_modifiers(modifiers.state());
             }
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
-                let dpi = self.editor_runtime.scale_factor() as f32;
-                if self.ui_shell.active_overlay_is_modal() {
-                    let _ = self.ui_shell.forward_ime(
-                        ui::core::Event::ImePreedit { text, cursor },
-                        self.editor_runtime.theme(),
-                        dpi,
-                    );
-                    let _ = self.editor_runtime.update_preedit(
-                        self.editor_input_context(),
-                        String::new(),
-                        None,
-                    );
-                } else {
-                    let panel_event = ui::core::Event::ImePreedit { text: text.clone(), cursor };
-                    if inspector_panel_consumes_ime(&self.ui_shell, &panel_event) {
-                        let _ = self.editor_runtime.update_preedit(
-                            self.editor_input_context(),
-                            String::new(),
-                            None,
-                        );
-                        self.platform.schedule_redraw();
-                        return;
-                    }
-                    let action =
-                        self.ui_shell.forward_ime(panel_event, self.editor_runtime.theme(), dpi);
-                    if action.is_none() {
-                        let status = self.editor_runtime.update_preedit_with_status(
-                            self.editor_input_context(),
-                            text,
-                            cursor,
-                        );
-                        if entered_at.is_some() && status == PreeditUpdate::Changed {
-                            changed_input =
-                                self.active_tab_id().map(|tab| (tab, InputEventKind::ImePreedit));
-                        }
-                    } else {
-                        let _ = self.editor_runtime.update_preedit(
-                            self.editor_input_context(),
-                            String::new(),
-                            None,
-                        );
-                    }
-                }
-                self.platform.schedule_redraw();
+                changed_input = self.handle_ime_preedit(text, cursor);
             }
             WindowEvent::Ime(Ime::Enabled) => {
                 let dpi = self.editor_runtime.scale_factor() as f32;
-                let action = self.ui_shell.forward_ime(
+                self.ui_shell.forward_ime(
                     ui::core::Event::ImeEnable,
                     self.editor_runtime.theme(),
                     dpi,
                 );
-                if action.is_none() {
-                    let _ = self.editor_runtime.update_preedit(
-                        self.editor_input_context(),
-                        String::new(),
-                        None,
-                    );
-                }
-                self.platform.schedule_redraw();
             }
             WindowEvent::Ime(Ime::Disabled) => {
+                self.platform.ime_cursor_area.invalidate();
                 let dpi = self.editor_runtime.scale_factor() as f32;
                 let action = self.ui_shell.forward_ime(
                     ui::core::Event::ImeDisable,
@@ -721,34 +687,72 @@ impl App {
                 changed_input = self.changed_input(before, InputEventKind::Key);
             }
             WindowEvent::Focused(focused) => {
+                self.platform.ime_cursor_area.invalidate();
+                #[cfg(target_os = "macos")]
+                self.platform.set_latency_critical(focused);
+                if !self.editor_runtime.first_frame_presented() {
+                    self.platform.log_startup_point(
+                        "pre_first_frame_focused",
+                        format_args!(" focused={focused}"),
+                    );
+                }
                 let effect = self.handle_window_focus_changed(focused);
                 self.apply_effect(effect);
+            }
+            WindowEvent::Occluded(occluded) => {
+                self.handle_window_occluded(occluded);
             }
             WindowEvent::ThemeChanged(system_theme) => {
                 let mode = self.editor_runtime.settings().theme_mode;
                 if mode == ui::settings::ThemeMode::System {
                     self.rebuild_theme_state(system_theme);
                     self.platform.schedule_redraw();
-                    if let Some(w) = self.editor_runtime.window() {
-                        w.request_redraw();
-                    }
                 }
             }
             WindowEvent::Resized(physical_size) => {
-                if let appkit_shell::editor_runtime::ResizeOutcome::Applied {
-                    width_changed,
-                    height,
-                    ..
-                } = self.editor_runtime.request_resize(physical_size.width, physical_size.height)
-                {
-                    self.apply_resize_layout(height, width_changed);
-                }
-                if let Some(window) = self.editor_runtime.window() {
-                    crate::sys::macos_titlebar::align_traffic_lights(window);
+                let before_first_frame = !self.editor_runtime.first_frame_presented();
+                let resize_started_at = Instant::now();
+                let outcome =
+                    self.editor_runtime.request_resize(physical_size.width, physical_size.height);
+                let (applied, width_changed) = match outcome {
+                    appkit_shell::editor_runtime::ResizeOutcome::Applied {
+                        width_changed,
+                        height,
+                        ..
+                    } => {
+                        self.apply_resize_layout(height, width_changed);
+                        (true, width_changed)
+                    }
+                    appkit_shell::editor_runtime::ResizeOutcome::Deferred => {
+                        self.platform.schedule_redraw();
+                        (false, false)
+                    }
+                    _ => (false, false),
+                };
+                self.sync_window_chrome();
+                if before_first_frame {
+                    self.platform.log_startup_stage(
+                        "pre_first_frame_resized",
+                        resize_started_at.elapsed(),
+                        format_args!(
+                            " size={}x{} applied={applied} width_changed={width_changed}",
+                            physical_size.width, physical_size.height
+                        ),
+                    );
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let before_first_frame = !self.editor_runtime.first_frame_presented();
+                let scale_started_at = Instant::now();
+                self.platform.ime_cursor_area.invalidate();
                 self.handle_scale_factor_changed(scale_factor);
+                if before_first_frame {
+                    self.platform.log_startup_stage(
+                        "pre_first_frame_scale_changed",
+                        scale_started_at.elapsed(),
+                        format_args!(" scale_factor={scale_factor}"),
+                    );
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.ui_shell.active_overlay_is_modal() {
@@ -811,55 +815,143 @@ impl App {
             }
 
             WindowEvent::DroppedFile(path) => self.handle_dropped_file(&path),
-            WindowEvent::RedrawRequested => {
-                if entered_at.is_some() {
-                    let active_tab = self.active_tab_id();
-                    if let Some(log) = self.platform.input_latency() {
-                        log.retain_tab(active_tab);
-                    }
-                }
-                self.platform.clear_redraw();
-                self.flush_pending_resize();
-                let sidebar_mode = matches!(
-                    self.editor_runtime.settings().view_mode,
-                    ui::view_mode::ViewMode::Sidebar
-                );
-                if self.ui_shell.advance_sidebar_animation(std::time::Instant::now(), sidebar_mode)
-                {
-                    self.platform.schedule_redraw();
-                }
-                let submission = self.render();
-                let accessibility_started_at =
-                    self.platform.has_pending_input_sample().then(Instant::now);
-                self.publish_accessibility_tree();
-                if let (Some(redraw_started_at), Some(accessibility_started_at)) =
-                    (entered_at, accessibility_started_at)
-                {
-                    redraw_measurement =
-                        Some((redraw_started_at, submission, accessibility_started_at.elapsed()));
-                }
-            }
+            WindowEvent::RedrawRequested => self.request_paced_frame(FrameRequest::Immediate),
             _ => {}
         }
-        let ime_position_started_at = redraw_measurement.as_ref().map(|_| Instant::now());
-        self.update_ime_cursor_area();
-        if let Some(log) = self.platform.input_latency() {
-            if let (Some(entered_at), Some((tab, kind))) = (entered_at, changed_input) {
-                log.record(tab, kind, entered_at, Instant::now());
-            }
-            if let Some((redraw_started_at, submission, accessibility)) = redraw_measurement {
-                let finished_at = Instant::now();
-                let ime_position = ime_position_started_at
-                    .map_or(Duration::ZERO, |started_at| finished_at - started_at);
-                log.finish_redraw(
-                    redraw_started_at,
-                    submission,
-                    accessibility,
-                    ime_position,
-                    finished_at,
-                );
-            }
+        if let (Some(log), Some(entered_at), Some((tab, kind))) =
+            (self.platform.input_latency(), entered_at, changed_input)
+        {
+            log.record(tab, kind, entered_at, Instant::now());
         }
+    }
+
+    fn handle_ime_preedit(
+        &mut self,
+        text: String,
+        cursor: Option<(usize, usize)>,
+    ) -> Option<(appkit_core::tab_set::types::TabId, InputEventKind)> {
+        let dpi = self.editor_runtime.scale_factor() as f32;
+        let event = ui::core::Event::ImePreedit { text: text.clone(), cursor };
+        let widget_has_focus = if self.ui_shell.active_overlay_is_modal() {
+            self.ui_shell.forward_ime(event, self.editor_runtime.theme(), dpi);
+            true
+        } else {
+            inspector_panel_consumes_ime(&self.ui_shell, &event)
+                || self.ui_shell.forward_ime(event, self.editor_runtime.theme(), dpi).is_some()
+        };
+        if widget_has_focus {
+            self.editor_runtime.update_preedit(self.editor_input_context(), String::new(), None);
+            self.platform.schedule_redraw();
+            return None;
+        }
+        let status = self.editor_runtime.update_preedit_with_status(
+            self.editor_input_context(),
+            text,
+            cursor,
+        );
+        if status != PreeditUpdate::Changed {
+            return None;
+        }
+        self.platform.schedule_redraw();
+        self.active_tab_id().map(|tab| (tab, InputEventKind::ImePreedit))
+    }
+
+    fn frame_pacing_allowed(&self) -> bool {
+        self.editor_runtime.window().is_some() && !self.platform.redraw_is_occluded()
+    }
+
+    fn request_paced_frame(&mut self, request: FrameRequest) {
+        if self.frame_pacing_allowed() && self.platform.frame_pacer.request(request, Instant::now())
+        {
+            self.present_paced_frame();
+        }
+    }
+
+    fn present_on_display_tick(&mut self, now: Instant) {
+        if self.frame_pacing_allowed()
+            && self.platform.frame_pacer.take_tick(now, self.has_active_animation())
+        {
+            self.present_paced_frame();
+        }
+    }
+
+    fn present_paced_frame(&mut self) {
+        let started_at = self.platform.input_latency_enabled().then(Instant::now);
+        self.present_window_frame(started_at);
+    }
+
+    fn present_window_frame(&mut self, redraw_started_at: Option<Instant>) {
+        if !self.platform.begin_present() {
+            return;
+        }
+        let is_first_frame = !self.editor_runtime.first_frame_presented();
+        if is_first_frame {
+            self.platform.log_startup_point("redraw_enter", format_args!(""));
+        }
+        let active_tab = self.active_tab_id();
+        if let Some(log) = self.platform.input_latency() {
+            log.retain_tab(active_tab);
+        }
+        let resize_started_at = Instant::now();
+        self.flush_pending_resize();
+        if is_first_frame {
+            self.platform.log_startup_stage(
+                "redraw_flush_resize",
+                resize_started_at.elapsed(),
+                format_args!(""),
+            );
+        }
+        let sidebar_mode =
+            matches!(self.editor_runtime.settings().view_mode, ui::view_mode::ViewMode::Sidebar);
+        self.ui_shell.advance_sidebar_animation(Instant::now(), sidebar_mode);
+        let submission = self.render();
+        self.finish_presented_frame(redraw_started_at, is_first_frame, submission);
+        self.platform.finish_present();
+    }
+
+    fn finish_presented_frame(
+        &mut self,
+        redraw_started_at: Option<Instant>,
+        is_first_frame: bool,
+        submission: Option<appkit_shell::editor_runtime::SurfaceFrameSubmission>,
+    ) {
+        let first_frame_presented = is_first_frame && submission.is_some();
+        let has_input_sample = self.platform.has_pending_input_sample();
+        let accessibility_started_at =
+            (first_frame_presented || has_input_sample).then(Instant::now);
+        self.publish_accessibility_tree();
+        let accessibility =
+            accessibility_started_at.map_or(Duration::ZERO, |start| start.elapsed());
+        if first_frame_presented {
+            self.platform.log_startup_stage(
+                "first_frame_a11y_publish",
+                accessibility,
+                format_args!(""),
+            );
+        }
+        let ime_started_at = has_input_sample.then(Instant::now);
+        if submission.is_some() {
+            if let Some(visible) = self.editor_cursor_visibility() {
+                self.platform.record_presented_cursor_visibility(visible);
+            }
+            self.update_ime_cursor_area();
+        }
+        if let (Some(started_at), Some(log)) = (redraw_started_at, self.platform.input_latency()) {
+            let finished_at = Instant::now();
+            let ime_position = ime_started_at.map_or(Duration::ZERO, |start| finished_at - start);
+            log.finish_redraw(started_at, submission, accessibility, ime_position, finished_at);
+        }
+    }
+
+    fn editor_cursor_visibility(&self) -> Option<bool> {
+        if !self.editor_runtime.window_focused()
+            || self.ui_shell.active_overlay_is_modal()
+            || self.ui_shell.search_bar_has_keyboard_focus()
+            || !self.active_needs_cursor_blink_wakeup()
+        {
+            return None;
+        }
+        self.active_tab_session().map(|tab| compute_cursor_phase(tab.cursor_blink_instant()).0)
     }
 
     fn editor_revision_for_input(&self) -> Option<(appkit_core::tab_set::types::TabId, u32)> {
@@ -877,6 +969,17 @@ impl App {
         let (tab, generation) = before?;
         let (current_tab, current_generation) = self.editor_revision_for_input()?;
         (current_tab == tab && current_generation != generation).then_some((tab, kind))
+    }
+
+    pub(crate) fn handle_window_occluded(&mut self, occluded: bool) {
+        if !self.editor_runtime.first_frame_presented() {
+            self.platform.log_startup_point(
+                "pre_first_frame_occluded",
+                format_args!(" occluded={occluded} state={:?}", self.platform.redraw_state()),
+            );
+        }
+        self.platform
+            .handle_occlusion_changed(occluded, !self.editor_runtime.first_frame_presented());
     }
 
     fn handle_window_focus_changed(&mut self, focused: bool) -> crate::app_effect::AppEffect {
@@ -1132,6 +1235,7 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
+            AppEvent::DisplayTick => self.present_on_display_tick(Instant::now()),
             AppEvent::Accessibility(event) => {
                 self.handle_accessibility_event(&event, event_loop);
             }
@@ -1143,13 +1247,27 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.platform.frame_pacer.stop();
+        #[cfg(target_os = "macos")]
+        self.platform.set_latency_critical(false);
+    }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // SAFETY: catch_unwind prevents panic from crossing the extern "C" boundary
         // in winit's macOS objc2 callbacks (Rust 2024 edition aborts on unwind).
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let pointer_captured = self.editor_runtime.pointer_capture()
+                != appkit_shell::editor_runtime::MouseCapture::None
+                || self.ui_shell.scrollbar_is_dragging();
+            let request = input_frame_request(&event, pointer_captured);
+            let previous_redraw = self.platform.redraw_revision();
             self.do_window_event(event_loop, event);
+            if let Some(request) = request
+                && self.platform.redraw_revision() != previous_redraw
+            {
+                self.request_paced_frame(request);
+            }
         }));
         if result.is_err() {
             event_loop.exit();
@@ -1177,16 +1295,7 @@ impl ApplicationHandler<AppEvent> for App {
 
         self.submit_file_safety_checks();
 
-        // 检测光标闪烁 phase 变化 → 触发渲染
-        // 窗口未激活时不闪烁；搜索框焦点时跳过（TextBox 自己管理闪烁）
-        // 预览模式没有可见光标，跳过闪烁检测
-        if self.editor_runtime.window_focused()
-            && !self.ui_shell.active_overlay_is_modal()
-            && !self.ui_shell.search_bar_has_keyboard_focus()
-            && self.active_needs_cursor_blink_wakeup()
-            && let Some(tab) = self.active_tab_session()
-        {
-            let (visible, _) = compute_cursor_phase(tab.cursor_render_state().cursor_blink_instant);
+        if let Some(visible) = self.editor_cursor_visibility() {
             self.platform.update_cursor_visibility(visible);
         }
 
@@ -1201,20 +1310,17 @@ impl ApplicationHandler<AppEvent> for App {
             self.platform.schedule_redraw();
         }
 
-        // 检测动画 → 触发渲染
         if self.has_active_animation() {
-            self.platform.schedule_redraw();
+            self.request_paced_frame(FrameRequest::Continuous);
+        } else if self.platform.redraw_pending() || self.editor_runtime.has_redraw_request() {
+            self.request_paced_frame(FrameRequest::Deferred);
         }
 
-        // 仅在有需要时 request_redraw（不再无条件刷新）
-        if self.platform.redraw_pending()
-            && let Some(window) = self.editor_runtime.window()
-        {
-            window.request_redraw();
-        }
-
-        // 设置 ControlFlow — 精确调度下一次唤醒
-        let next_wake = self.compute_next_wake_time();
+        self.present_on_display_tick(Instant::now());
+        let next_wake = [self.compute_next_wake_time(), self.platform.frame_pacer.deadline()]
+            .into_iter()
+            .flatten()
+            .min();
         match next_wake {
             Some(deadline) => {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
@@ -1223,8 +1329,6 @@ impl ApplicationHandler<AppEvent> for App {
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
         }
-
-        self.update_ime_cursor_area();
     }
 }
 
@@ -1543,6 +1647,26 @@ mod tests {
         assert!(!has_direct_native_menu_field_access(
             "self.set_native_menu(NativeMenu::build_loading())"
         ));
+    }
+
+    #[test]
+    fn empty_ime_preedit_defers_to_commit() {
+        use super::{FrameRequest, Ime, WindowEvent, input_frame_request};
+        use appkit_shell::frame_pacer::FramePacer;
+
+        let mut pacer = FramePacer::default();
+        let empty = WindowEvent::Ime(Ime::Preedit(String::new(), None));
+        let commit = WindowEvent::Ime(Ime::Commit("你".into()));
+        let request =
+            input_frame_request(&empty, false).expect("empty preedit can clear the caret");
+        assert!(!pacer.request(request));
+        let request = input_frame_request(&commit, false).expect("commit should change the frame");
+        assert!(pacer.request(request));
+        assert!(!pacer.tick(false));
+
+        let preedit = WindowEvent::Ime(Ime::Preedit("ni".into(), Some((2, 2))));
+        assert!(input_frame_request(&preedit, false) == Some(FrameRequest::Immediate));
+        assert!(input_frame_request(&WindowEvent::Ime(Ime::Enabled), false).is_none());
     }
 
     #[test]
@@ -2674,5 +2798,21 @@ mod tests {
                 if delta == 0.25 && screen_anchor == ui::canvas::CanvasPoint::new(320.0, 240.0)
         ));
         assert!(canvas_pinch_action(f64::NAN, (320.0, 240.0)).is_none());
+    }
+
+    #[test]
+    fn window_unoccluded_schedules_redraw_for_deferred_or_pending_first_frame() {
+        let mut app = App::new(None);
+        app.platform.clear_redraw();
+        app.platform.defer_redraw_until_unoccluded();
+        assert!(!app.platform.redraw_pending());
+
+        app.handle_window_occluded(false);
+        assert!(app.platform.redraw_pending());
+
+        app.platform.clear_redraw();
+        assert!(!app.platform.redraw_pending());
+        app.handle_window_occluded(false);
+        assert!(app.platform.redraw_pending());
     }
 }

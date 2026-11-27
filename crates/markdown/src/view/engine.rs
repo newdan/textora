@@ -225,7 +225,7 @@ impl<S: BlockSource> BlockViewLayout<S> {
             .then(|| self.lazy.take())
             .flatten();
         if let Some(previous_layout) = previous_layout {
-            lazy.reuse_unchanged_blocks_from(previous_layout);
+            lazy.reuse_unchanged_blocks_from(previous_layout, self.scroll_y, viewport_h);
         }
         if full_layout {
             // Editing mode: materialize all blocks with full shaping.
@@ -354,6 +354,8 @@ impl<S: BlockSource> BlockViewLayout<S> {
         let mut perf_build_doc_us = 0;
         let mut perf_rebuild_us = 0;
         let mut perf_cursor_us = 0;
+        let mut perf_query_precision_us = 0;
+        let mut perf_query_index_us = 0;
         let mut render_path = "draw";
         self.rendered_body_font_size = style.body_font_size;
         self.rendered_line_height = style.line_height;
@@ -407,8 +409,10 @@ impl<S: BlockSource> BlockViewLayout<S> {
         }
 
         if self.dirty == EngineDirty::QueryLayoutReady {
+            render_path = "query";
             let selection_range = self.byte_selection_range().map(|(start, end)| start..end);
             if let Some(lazy) = self.lazy.as_mut() {
+                let query_precision_started_at = perf_logging_enabled().then(Instant::now);
                 if let Some(active_shaper) = shaper.as_deref_mut() {
                     lazy.refresh_precise_range(
                         self.scroll_y,
@@ -419,8 +423,13 @@ impl<S: BlockSource> BlockViewLayout<S> {
                         doc_view,
                     );
                 }
+                perf_query_precision_us =
+                    query_precision_started_at.map_or(0, |start| start.elapsed().as_micros());
+                let query_index_started_at = perf_logging_enabled().then(Instant::now);
                 lazy.set_selection_range(selection_range);
                 lazy.build_flat_lines(doc_view);
+                perf_query_index_us =
+                    query_index_started_at.map_or(0, |start| start.elapsed().as_micros());
                 self.content_height = lazy.total_height;
             }
             self.dirty = EngineDirty::Clean;
@@ -582,12 +591,14 @@ impl<S: BlockSource> BlockViewLayout<S> {
         let elapsed_us = perf_total_started_at.elapsed().as_micros();
         if should_log_perf(elapsed_us) {
             eprintln!(
-                "[perf:md_engine] path={} total={}us build_doc={}us rebuild={}us cursor={}us precision={}us draw={}us blocks={} visible_blocks={} flat_lines={} cmds={} viewport=({:.0}x{:.0}) scroll_y={:.1} full_flat={} full_layout={}",
+                "[perf:md_engine] path={} total={}us build_doc={}us rebuild={}us cursor={}us query_precision={}us query_index={}us precision={}us draw={}us blocks={} visible_blocks={} flat_lines={} cmds={} viewport=({:.0}x{:.0}) scroll_y={:.1} full_flat={} full_layout={}",
                 render_path,
                 elapsed_us,
                 perf_build_doc_us,
                 perf_rebuild_us,
                 perf_cursor_us,
+                perf_query_precision_us,
+                perf_query_index_us,
                 perf_precision_us,
                 perf_draw_us,
                 block_count,

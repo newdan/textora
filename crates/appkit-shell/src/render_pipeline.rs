@@ -508,6 +508,7 @@ fn shape_source_run(
 struct LineCacheInput<'a> {
     doc_index: usize,
     doc_offset: usize,
+    highlight_anchor: Option<usize>,
     bytes: &'a [u8],
     spacing: TextSpacingMode,
     preedit_on_cursor_line: bool,
@@ -533,7 +534,7 @@ fn lookup_or_prepare_cached_line(
     );
     let layout_hash = content_hash_for_layout(
         line.bytes,
-        line.doc_offset,
+        line.highlight_anchor,
         viewport_width,
         font_size,
         line.spacing,
@@ -1227,6 +1228,7 @@ impl<'resources, 'options> SourceRenderFrame<'resources, 'options> {
                 LineCacheInput {
                     doc_index,
                     doc_offset,
+                    highlight_anchor: self.document.language.map(|_| doc_offset),
                     bytes: &bytes,
                     spacing,
                     preedit_on_cursor_line,
@@ -1314,12 +1316,12 @@ impl<'resources, 'options> SourceRenderFrame<'resources, 'options> {
         let subset_started_at = std::time::Instant::now();
         let subset_entry =
             map_entry.filter(|_| !is_placeholder && line.length > MAX_SYNC_SHAPE_BYTES);
-        let cursor_offset = subset_entry.and_then(|entry| {
+        let cursor_offset = subset_entry.and_then(|_| {
             (self.viewport.cursor_relative_line == Some(line.relative_line))
                 .then(|| {
                     cursor_relative_offset_for_line(
                         self.document.cursor().offset.to_usize(),
-                        self.document.line_byte_offset(doc_index).unwrap_or(entry.byte_offset),
+                        line.doc_offset,
                     )
                 })
                 .flatten()

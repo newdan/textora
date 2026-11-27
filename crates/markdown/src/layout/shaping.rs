@@ -1,6 +1,7 @@
 //! Shaping and style segment computation.
 
 use shaping::Shaper;
+use std::ops::Range;
 use std::sync::Arc;
 
 use super::types::{LaidOutBlock, LaidOutBlockKind, LaidOutLine, StyleSegment};
@@ -64,10 +65,37 @@ pub(crate) fn shape_line(
     (shaped, text_layout)
 }
 
+pub(crate) struct ClusterLookup<'a> {
+    clusters: &'a [shaping::GlyphCluster],
+    source_ordered: bool,
+}
+
+impl<'a> ClusterLookup<'a> {
+    pub(crate) fn new(shaped: &'a shaping::ShapedRun, visual_line_count: usize) -> Self {
+        // Bidirectional runs can have descending source offsets in visual order.
+        let source_ordered = visual_line_count > 1
+            && shaped.clusters.windows(2).all(|pair| {
+                pair[0].byte_range.start <= pair[1].byte_range.start
+                    && pair[0].byte_range.end <= pair[1].byte_range.end
+            });
+        Self { clusters: &shaped.clusters, source_ordered }
+    }
+
+    pub(crate) fn candidates(&self, bytes: Range<usize>) -> &'a [shaping::GlyphCluster] {
+        if !self.source_ordered {
+            return self.clusters;
+        }
+        let start = self.clusters.partition_point(|cluster| cluster.byte_range.end <= bytes.start);
+        let remaining = &self.clusters[start..];
+        let end = remaining.partition_point(|cluster| cluster.byte_range.start < bytes.end);
+        &remaining[..end]
+    }
+}
+
 /// Create a UiTextLayout for a byte-range segment of a pre-shaped input line.
 /// Avoids re-shaping by extracting the relevant clusters from the full shaped run.
 pub(crate) fn segment_text_layout(
-    full_shaped: &shaping::ShapedRun,
+    candidate_clusters: &[shaping::GlyphCluster],
     seg_byte_start: usize,
     seg_byte_end: usize,
     seg_text: &str,
@@ -80,7 +108,7 @@ pub(crate) fn segment_text_layout(
     }
     let mut clusters = Vec::new();
     let mut width: f32 = 0.0;
-    for cluster in &full_shaped.clusters {
+    for cluster in candidate_clusters {
         // Skip clusters outside the segment
         if cluster.byte_range.end <= seg_byte_start || cluster.byte_range.start >= seg_byte_end {
             continue;
@@ -450,6 +478,35 @@ fn effective_segment_shape(base_weight: shaping::Weight, style: &InlineStyle) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shaped_clusters(byte_ranges: impl IntoIterator<Item = Range<usize>>) -> shaping::ShapedRun {
+        let clusters = byte_ranges
+            .into_iter()
+            .map(|byte_range| shaping::GlyphCluster {
+                byte_range,
+                glyph_id: 0,
+                font_id: shaping::FontId::dummy(),
+                advance: 1.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            })
+            .collect::<Vec<_>>();
+        shaping::ShapedRun { width: clusters.len() as f32, clusters }
+    }
+
+    #[test]
+    fn source_ordered_clusters_only_visit_the_wrapped_line() {
+        let shaped = shaped_clusters([0..1, 1..3, 1..3, 3..4, 4..5]);
+        let lookup = ClusterLookup::new(&shaped, 3);
+        assert_eq!(lookup.candidates(1..4), &shaped.clusters[1..4]);
+        assert!(lookup.candidates(5..6).is_empty());
+    }
+
+    #[test]
+    fn bidirectional_clusters_preserve_visual_order() {
+        let shaped = shaped_clusters([0..1, 5..7, 3..5, 1..3, 7..8]);
+        assert_eq!(ClusterLookup::new(&shaped, 3).candidates(3..7), &shaped.clusters);
+    }
 
     #[test]
     fn shape_line_no_shaper_returns_none() {

@@ -1,5 +1,8 @@
+use std::time::Instant;
+
 use appkit_shell::ShellEvent;
 use appkit_shell::editor_runtime::{EditorCursorBlinkPhase, EditorRuntime};
+use appkit_shell::frame_pacer::WindowFramePacer;
 use winit::event_loop::EventLoopProxy;
 use winit::window::CursorIcon;
 
@@ -52,6 +55,10 @@ pub(super) struct WindowRuntime {
     last_editor_cursor_visible: bool,
     redraw_requested: bool,
     event_loop_proxy: Option<EventLoopProxy<ShellEvent>>,
+    pub(super) frame_pacer: WindowFramePacer,
+    pub(super) occluded: bool,
+    #[cfg(target_os = "macos")]
+    latency_critical_activity: Option<appkit_shell::macos::LatencyCriticalActivity>,
 }
 
 impl WindowRuntime {
@@ -64,6 +71,10 @@ impl WindowRuntime {
             last_editor_cursor_visible: true,
             redraw_requested: true,
             event_loop_proxy: None,
+            frame_pacer: WindowFramePacer::default(),
+            occluded: false,
+            #[cfg(target_os = "macos")]
+            latency_critical_activity: None,
         }
     }
 
@@ -88,6 +99,13 @@ impl WindowRuntime {
     pub(super) fn set_focused(&mut self, focused: bool, editor_runtime: &mut EditorRuntime) {
         self.focused = focused;
         editor_runtime.set_window_focus(focused);
+        #[cfg(target_os = "macos")]
+        if focused && editor_runtime.window().is_some() {
+            self.latency_critical_activity
+                .get_or_insert_with(appkit_shell::macos::LatencyCriticalActivity::begin);
+        } else {
+            self.latency_critical_activity = None;
+        }
     }
 
     pub(super) fn is_focused(&self) -> bool {
@@ -172,10 +190,17 @@ impl WindowRuntime {
             || editor_cursor_blink_due
     }
 
-    pub(super) fn request_window_redraw(&self, editor_runtime: &EditorRuntime) {
-        if let Some(window) = editor_runtime.window() {
-            window.request_redraw();
+    pub(super) fn set_occluded(&mut self, occluded: bool) {
+        self.occluded = occluded;
+        if occluded {
+            self.frame_pacer.stop();
+        } else {
+            self.schedule_redraw();
         }
+    }
+
+    pub(super) fn pacing_deadline(&self) -> Option<Instant> {
+        self.frame_pacer.deadline()
     }
 
     pub(super) fn set_cursor(&self, editor_runtime: &EditorRuntime, cursor_icon: CursorIcon) {

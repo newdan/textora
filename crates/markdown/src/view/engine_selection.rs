@@ -333,6 +333,9 @@ impl<S: BlockSource> BlockViewEngine<S> {
     }
 
     pub fn set_sel_cursor_byte(&mut self, byte: Option<usize>) {
+        if byte.is_none() && self.sel_cursor_byte.is_none() && self.sel.cursor.is_none() {
+            return;
+        }
         if let Some(b) = byte {
             self.sel_cursor_byte = Some(b);
             self.sel.cursor = self.find_flat_and_grapheme_for_byte(b);
@@ -344,6 +347,9 @@ impl<S: BlockSource> BlockViewEngine<S> {
     }
 
     pub fn set_sel_anchor_byte(&mut self, byte: Option<usize>) {
+        if byte.is_none() && self.sel_anchor_byte.is_none() && self.sel.anchor.is_none() {
+            return;
+        }
         if let Some(b) = byte {
             self.sel_anchor_byte = Some(b);
             self.sel.anchor = self.find_flat_and_grapheme_for_byte(b);
@@ -352,5 +358,35 @@ impl<S: BlockSource> BlockViewEngine<S> {
             self.sel_anchor_byte = None;
         }
         self.mark_selection_changed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synchronizing_empty_selection_keeps_clean_markdown_layout() {
+        let mut layout = BlockViewEngine::<crate::builder::MarkdownDoc>::new();
+        layout.dirty = EngineDirty::Clean;
+
+        layout.set_sel_anchor_byte(None);
+        layout.set_sel_cursor_byte(None);
+
+        assert_eq!(layout.dirty, EngineDirty::Clean);
+    }
+
+    #[test]
+    fn clearing_existing_byte_selection_marks_layout_dirty() {
+        let mut layout = BlockViewEngine::<crate::builder::MarkdownDoc>::new();
+        layout.set_sel_anchor_byte(Some(0));
+        layout.set_sel_cursor_byte(Some(4));
+        layout.dirty = EngineDirty::Clean;
+
+        layout.set_sel_anchor_byte(None);
+        layout.set_sel_cursor_byte(None);
+
+        assert_eq!(layout.dirty, EngineDirty::SelectionChanged);
+        assert_eq!(layout.selection_source_range(), None);
     }
 }

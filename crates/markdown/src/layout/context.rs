@@ -374,17 +374,17 @@ impl<'a> LayoutCtx<'a> {
                     self.style.body_font_family.first().map(|family| family.as_str()),
                 );
                 let line_styles = style_spans_for_line(styles, input_offset, input_line.len());
-                let mut shaped = if line_styles.is_empty() {
-                    shaper.shape(input_line).ok()
-                } else {
-                    super::shaping::shape_styled_run(
+                let mut shaped = match (line_styles.is_empty(), self.edit_ctx.is_some()) {
+                    (true, true) => shaper.shape_editing_line(input_line).ok(),
+                    (true, false) => shaper.shape(input_line).ok(),
+                    (false, _) => super::shaping::shape_styled_run(
                         input_line,
                         &line_styles,
                         font_size,
                         font_weight,
                         self.style.body_font_family.first().map(String::as_str),
                         shaper,
-                    )
+                    ),
                 };
                 if let Some(shaped) = shaped.as_mut() {
                     for span in &line_styles {

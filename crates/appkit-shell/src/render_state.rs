@@ -6,12 +6,20 @@
 use crate::gpu::{GpuContext, GpuError};
 use crate::image_atlas::ImageAtlas;
 use crate::render_cache::PreviewRenderCache;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 /// Atlas texture size for glyph caching.
 pub const ATLAS_SIZE: u32 = 4096;
 const _: () = assert!(ATLAS_SIZE > 0);
+
+const INITIAL_VERTEX_BUFFER_BYTES: u64 =
+    1024 * 6 * std::mem::size_of::<render::GlyphVertex>() as u64;
+const MAPPED_VERTEX_SLOTS: usize = 3;
 
 /// GPU resources for a single window.
 pub struct GpuState {
@@ -29,8 +37,7 @@ pub struct TextState {
     #[allow(dead_code)] // kept alive for bind group reference
     atlas_view: wgpu::TextureView,
     pub bind_group: wgpu::BindGroup,
-    pub vertex_buffer: wgpu::Buffer,
-    pub vertex_capacity: u32,
+    pub(crate) frame_vertices: FrameVertexBuffers,
     /// Gamma correction uniform buffer (updated on theme change).
     gamma_buffer: wgpu::Buffer,
     /// Last written gamma values, for dedup (avoids per-frame write_buffer).
@@ -49,7 +56,11 @@ impl TextState {
         font_family: &str,
     ) -> Result<Self, GpuError> {
         let initialization_started_at = Instant::now();
-        let renderer = render::GlyphRenderer::new(&gpu.ctx.device, gpu.ctx.format);
+        let renderer = render::GlyphRenderer::new_with_sample_count(
+            &gpu.ctx.device,
+            gpu.ctx.format,
+            gpu.ctx.antialiasing.sample_count(),
+        );
         let renderer_elapsed = initialization_started_at.elapsed();
 
         let glyph_atlas_started_at = Instant::now();
@@ -123,13 +134,7 @@ impl TextState {
             ],
         });
 
-        let vertex_capacity = 1024 * 6; // 1024 glyphs * 6 vertices each
-        let vertex_buffer = gpu.ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vertex buffer"),
-            size: (vertex_capacity as usize * std::mem::size_of::<render::GlyphVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let frame_vertices = FrameVertexBuffers::new(&gpu.ctx.device);
         let bindings_elapsed = bindings_started_at.elapsed();
 
         let shaper_started_at = Instant::now();
@@ -140,8 +145,7 @@ impl TextState {
             renderer,
             shaper,
             bind_group,
-            vertex_buffer,
-            vertex_capacity,
+            frame_vertices,
             atlas: render::GlyphAtlas::new(ATLAS_SIZE, ATLAS_SIZE, 8192, 1),
             atlas_texture,
             image_atlas,
@@ -186,5 +190,137 @@ impl TextState {
 
     pub fn atlas_generation(&self) -> u64 {
         self.atlas.generation()
+    }
+}
+
+pub(crate) struct FrameVertexBuffers {
+    mapped: Option<[MappedVertexSlot; MAPPED_VERTEX_SLOTS]>,
+    staged: Option<wgpu::Buffer>,
+}
+
+impl FrameVertexBuffers {
+    fn new(device: &wgpu::Device) -> Self {
+        let mapped =
+            device.features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS).then(|| {
+                std::array::from_fn(|_| MappedVertexSlot::new(device, INITIAL_VERTEX_BUFFER_BYTES))
+            });
+        Self { mapped, staged: None }
+    }
+
+    pub(crate) fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &wgpu::CommandEncoder,
+        vertices: &[u8],
+    ) -> &wgpu::Buffer {
+        if let Some(slots) = &mut self.mapped {
+            // Poll without waiting if all shared slots are still in flight.
+            if !slots.iter().any(MappedVertexSlot::is_ready) {
+                let _ = device.poll(wgpu::PollType::Poll);
+            }
+            if let Some(slot) = slots.iter_mut().find(|slot| slot.is_ready()) {
+                return slot.write(device, encoder, vertices);
+            }
+        }
+        let size = vertices.len() as u64;
+        if self.staged.as_ref().is_none_or(|buffer| buffer.size() < size) {
+            self.staged = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("staged editor vertex buffer"),
+                size: size.next_power_of_two().max(INITIAL_VERTEX_BUFFER_BYTES),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let buffer = self.staged.as_ref().expect("the staged vertex buffer was allocated above");
+        queue.write_buffer(buffer, 0, vertices);
+        buffer
+    }
+}
+
+struct MappedVertexSlot {
+    buffer: wgpu::Buffer,
+    mapped: Arc<AtomicBool>,
+}
+
+impl MappedVertexSlot {
+    fn new(device: &wgpu::Device, size: u64) -> Self {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shared editor vertex buffer"),
+            size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::MAP_WRITE,
+            mapped_at_creation: true,
+        });
+        Self { buffer, mapped: Arc::new(AtomicBool::new(true)) }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.mapped.load(Ordering::Acquire)
+    }
+
+    fn write(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &wgpu::CommandEncoder,
+        vertices: &[u8],
+    ) -> &wgpu::Buffer {
+        let size = vertices.len() as u64;
+        if self.buffer.size() < size {
+            *self = Self::new(device, size.next_power_of_two());
+        }
+        self.buffer.slice(..size).get_mapped_range_mut().copy_from_slice(vertices);
+        self.buffer.unmap();
+        self.mapped.store(false, Ordering::Release);
+        let mapped = Arc::clone(&self.mapped);
+        encoder.map_buffer_on_submit(&self.buffer, wgpu::MapMode::Write, .., move |result| {
+            mapped.store(result.is_ok(), Ordering::Release);
+        });
+        &self.buffer
+    }
+}
+
+#[cfg(test)]
+mod frame_vertex_tests {
+    use super::*;
+
+    #[test]
+    fn shared_vertex_slots_are_reused_only_after_the_submission_releases_them() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            eprintln!("skipping mapped vertex test: no GPU adapter");
+            return;
+        };
+        let feature = wgpu::Features::MAPPABLE_PRIMARY_BUFFERS;
+        if !adapter.features().contains(feature) {
+            eprintln!("skipping mapped vertex test: adapter has no primary mapping support");
+            return;
+        }
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: feature,
+            ..Default::default()
+        }))
+        .expect("adapter advertises primary mapping support");
+
+        let mut uploads = FrameVertexBuffers::new(&device);
+        let mut pending = Vec::new();
+        let vertex_bytes = [42; std::mem::size_of::<render::GlyphVertex>()];
+        for _ in 0..MAPPED_VERTEX_SLOTS {
+            let encoder = device.create_command_encoder(&Default::default());
+            let buffer = uploads.upload(&device, &queue, &encoder, &vertex_bytes).clone();
+            assert!(buffer.usage().contains(wgpu::BufferUsages::MAP_WRITE));
+            assert!(!pending.iter().any(|(previous, _)| previous == &buffer));
+            pending.push((buffer, encoder.finish()));
+        }
+
+        let encoder = device.create_command_encoder(&Default::default());
+        let staged = uploads.upload(&device, &queue, &encoder, &vertex_bytes);
+        assert!(!staged.usage().contains(wgpu::BufferUsages::MAP_WRITE));
+
+        let (first, commands) = pending.remove(0);
+        let submitted = queue.submit(std::iter::once(commands));
+        device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submitted), timeout: None })
+            .expect("empty test submission with remapping must complete");
+        assert_eq!(uploads.upload(&device, &queue, &encoder, &vertex_bytes), &first);
     }
 }

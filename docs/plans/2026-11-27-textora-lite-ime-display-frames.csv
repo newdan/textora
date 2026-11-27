@@ -1,0 +1,985 @@
+trial,selection,key_id,kind,submitted_acq,first_zero,callback_ms,app_match_us,outcome,presented_acq,submit_to_display_ms,appkit_to_display_ms,trace_swap_s,trace_frame,source_surface,scan_surface,match_error_ms,reason
+ime-native-codes-1,1,17,ImePreedit,55,0,2.817,-19,direct,55,43.289625,49.333375,7.68178925,38,337,337,0.232,
+ime-native-codes-1,1,18,ImePreedit,56,0,2.891,-18,composited,56,44.019666,49.314833,7.781788375,39,809,11,0.232,display rejected
+ime-native-codes-1,1,19,ImePreedit,57,0,3.588,-15,composited,57,42.3835,49.319291,7.881787375,40,337,11,0.232,display rejected
+ime-native-codes-1,1,20,ImePreedit,58,0,4.384,-16,composited,58,38.94175,49.275833,7.998452958,41,809,13,0.232,display rejected
+ime-native-codes-1,1,21,ImePreedit,59,0,2.601,-13,composited,59,42.905833,49.319625,8.098452125,42,337,13,0.232,display rejected
+ime-native-codes-1,1,22,ImeCommit,60,0,3.986,-9,composited,60,43.414166,49.231624,8.198451083,43,809,13,0.232,display rejected
+ime-native-codes-1,1,25,ImePreedit,63,0,4.23,-15,direct,63,39.855667,49.199667,8.498448625,46,337,337,0.232,
+ime-native-codes-1,1,26,ImePreedit,64,0,1.664,-20,composited,64,45.715042,49.315209,8.598449166,47,809,14,0.232,display rejected
+ime-native-codes-1,1,27,ImePreedit,65,0,2.423,-12,composited,65,43.774125,49.287375,8.698446583,48,337,14,0.232,display rejected
+ime-native-codes-1,1,28,ImePreedit,66,0,4.271,-17,composited,66,38.268334,49.199417,8.798445541,49,809,14,0.232,display rejected
+ime-native-codes-1,1,29,ImePreedit,67,0,2.69,-9,composited,67,42.354542,49.241625,8.898444708,50,337,14,0.232,display rejected
+ime-native-codes-1,1,30,ImeCommit,68,0,4.138,-20,composited,68,42.919416,49.264291,8.998443708,51,809,14,0.232,display rejected
+ime-native-codes-1,1,33,ImePreedit,71,0,1.925,-19,direct,71,45.035334,49.359292,9.315107541,54,337,337,0.232,
+ime-native-codes-1,1,34,ImePreedit,72,0,3.219,-17,composited,72,43.232416,49.289916,9.415106541,55,809,11,0.232,display rejected
+ime-native-codes-1,1,35,ImePreedit,73,0,3.309,-11,composited,73,42.527666,49.321666,9.515107208,56,337,11,0.232,display rejected
+ime-native-codes-1,1,36,ImePreedit,74,0,2.406,-14,composited,74,42.98375,49.278042,9.631771166,57,809,13,0.232,display rejected
+ime-native-codes-1,1,37,ImePreedit,75,0,2.69,-9,composited,75,39.225083,49.295667,9.73177025,58,337,13,0.232,display rejected
+ime-native-codes-1,1,38,ImeCommit,76,0,2.482,-11,composited,76,45.743333,49.367708,9.831769375,59,809,13,0.232,display rejected
+ime-native-codes-1,1,41,ImePreedit,79,0,3.313,-10,direct,79,24.199208,32.559208,10.131766583,62,337,337,0.232,
+ime-native-codes-1,1,42,ImePreedit,80,0,3.156,-7,composited,80,6.189166,11.909249,10.211072291,63,809,14,0.232,display rejected
+ime-native-codes-1,1,43,ImePreedit,81,0,3.566,-10,composited,81,8.409166,16.204208,10.306498875,64,337,13,0.232,display rejected
+ime-native-codes-1,1,44,ImePreedit,82,0,4.587,-7,composited,82,13.483042,24.900625,10.417206666,65,809,14,0.232,display rejected
+ime-native-codes-1,1,45,ImePreedit,83,0,3.164,-10,composited,83,21.659499,30.474708,10.531777458,66,337,14,0.232,display rejected
+ime-native-codes-1,1,46,ImeCommit,84,0,2.751,-12,composited,84,5.915333,10.277375,10.62613725,67,809,14,0.232,display rejected
+ime-native-codes-1,1,49,ImePreedit,87,0,2.005,-18,direct,87,3.290042,7.741208,10.922955041,70,337,337,0.232,
+ime-native-codes-1,1,50,ImePreedit,88,0,2.916,-13,composited,88,4.558958,9.659416,11.025445083,71,809,11,0.232,display rejected
+ime-native-codes-1,1,51,ImePreedit,90,0,2.355,-10,composited,90,6.726791,11.851791,11.139824458,73,809,13,0.232,display rejected
+ime-native-codes-1,1,52,ImePreedit,91,0,3.672,-14,composited,91,6.029,13.494583,11.245313875,74,337,14,0.232,display rejected
+ime-native-codes-1,1,53,ImePreedit,92,0,4.922,-3,composited,92,6.793917,19.47125,11.348058125,75,809,14,0.232,display rejected
+ime-native-codes-1,1,54,ImeCommit,93,0,4.945,-10,composited,93,6.137333,13.403833,11.461060625,76,337,14,0.232,display rejected
+ime-native-codes-1,1,57,ImePreedit,96,0,2.151,-16,direct,96,3.684208,9.260542,11.758337416,79,809,809,0.232,
+ime-native-codes-1,1,58,ImePreedit,97,0,2.434,-5,composited,97,17.495917,22.165333,11.871315166,80,337,11,0.232,display rejected
+ime-native-codes-1,1,59,ImePreedit,98,0,2.492,-10,composited,98,27.130042,32.69875,11.981769875,81,809,13,0.232,display rejected
+ime-native-codes-1,1,60,ImePreedit,99,0,2.103,-14,composited,99,25.936458,31.463875,12.081769,82,337,13,0.232,display rejected
+ime-native-codes-1,1,61,ImePreedit,100,0,4.962,6,composited,100,12.028917,24.848417,12.190724083,83,809,11,0.232,display rejected
+ime-native-codes-1,1,62,ImeCommit,101,0,4.11,-12,composited,101,5.401417,11.944875,12.270164083,84,337,11,0.232,display rejected
+ime-native-codes-1,1,65,ImePreedit,104,0,4.62,-8,direct,104,3.665958,13.714584,12.579577416,87,809,809,0.232,
+ime-native-codes-1,1,66,ImePreedit,105,0,2.461,-9,composited,105,16.935625,22.078625,12.6817575,88,337,14,0.232,display rejected
+ime-native-codes-1,1,67,ImePreedit,106,0,2.056,-11,composited,106,6.011541,11.287541,12.777035125,89,809,11,0.232,display rejected
+ime-native-codes-1,1,68,ImePreedit,107,0,2.694,-8,composited,107,7.998042,14.444167,12.880467791,90,337,11,0.232,display rejected
+ime-native-codes-1,1,69,ImePreedit,108,0,4.172,-9,composited,108,7.261084,17.443959,12.998421208,91,809,11,0.232,display rejected
+ime-native-codes-1,1,70,ImeCommit,109,0,4.421,-9,composited,109,5.813458,12.162917,13.093239875,92,337,11,0.232,display rejected
+ime-native-codes-1,1,73,ImePreedit,112,0,2.198,-8,direct,112,3.8335,10.727042,13.393261791,95,809,809,0.232,
+ime-native-codes-1,1,74,ImePreedit,113,0,3.051,-8,composited,113,5.055875,10.764417,13.490711958,96,337,14,0.232,display rejected
+ime-native-codes-1,1,75,ImePreedit,114,0,4.232,9,composited,114,5.790667,14.873375,13.598415541,97,809,13,0.232,display rejected
+ime-native-codes-1,1,76,ImePreedit,115,0,3.639,-6,composited,115,5.508,12.94475,13.700968375,98,337,14,0.232,display rejected
+ime-native-codes-1,1,77,ImePreedit,116,0,2.094,-13,composited,116,6.299292,13.298833,13.81493125,99,809,11,0.232,display rejected
+ime-native-codes-1,1,78,ImeCommit,117,0,3.211,-4,composited,117,5.769208,10.727541,13.9261065,100,337,11,0.232,display rejected
+ime-native-codes-1,1,81,ImePreedit,120,0,4.756,-4,direct,120,5.588917,15.905209,14.23174225,103,809,809,0.232,
+ime-native-codes-1,1,82,ImePreedit,121,0,3.081,3,composited,121,15.713708,21.715833,14.337499916,104,337,14,0.232,display rejected
+ime-native-codes-1,1,83,ImePreedit,122,0,4.61,0,composited,122,36.780959,46.2935,14.4650595,105,809,11,0.232,display rejected
+ime-native-codes-1,1,84,ImePreedit,123,0,4.338,-1,composited,123,21.155375,32.526417,14.56507325,106,337,14,0.232,display rejected
+ime-native-codes-1,1,85,ImePreedit,124,0,4.623,-8,composited,124,5.899542,18.419958,14.650959541,107,809,14,0.232,display rejected
+ime-native-codes-1,1,86,ImeCommit,125,0,4.981,2,composited,125,5.754125,13.298792,14.748404875,108,337,14,0.232,display rejected
+ime-native-codes-1,1,89,ImePreedit,128,0,2.4,-4,direct,128,14.535792,19.798459,15.065067791,111,809,809,0.232,
+ime-native-codes-1,1,90,ImePreedit,130,0,2.882,-2,composited,130,5.659334,10.805833,15.159887291,113,809,14,0.232,display rejected
+ime-native-codes-1,1,91,ImePreedit,131,0,3.939,-4,composited,131,6.536833,15.003416,15.264008333,114,337,13,0.232,display rejected
+ime-native-codes-1,1,92,ImePreedit,132,0,3.742,-1,composited,132,5.753375,14.763,15.362630583,115,809,13,0.232,display rejected
+ime-native-codes-1,1,93,ImePreedit,133,0,4.135,-4,composited,133,5.627,17.693166,15.476551,116,337,11,0.232,display rejected
+ime-native-codes-1,1,94,ImeCommit,134,0,4.467,-4,composited,134,5.501667,12.398792,15.573566958,117,809,11,0.232,display rejected
+ime-native-codes-1,1,97,ImePreedit,137,0,1.184,-11,direct,137,3.462083,8.387791,15.890722833,120,337,337,0.232,
+ime-native-codes-1,1,98,ImePreedit,138,0,1.316,-10,composited,138,10.937917,14.610126,15.988172958,121,809,11,0.232,display rejected
+ime-native-codes-1,1,99,ImePreedit,139,0,1.919,-7,composited,139,44.81975,49.360833,16.131710625,122,337,13,0.232,display rejected
+ime-native-codes-1,1,100,ImePreedit,140,0,3.98,-7,composited,140,21.849667,32.590042,16.215063958,123,809,11,0.232,display rejected
+ime-native-codes-1,1,101,ImePreedit,141,0,4.564,-6,composited,141,7.022292,19.305625,16.301862041,124,337,11,0.232,display rejected
+ime-native-codes-1,1,102,ImeCommit,142,0,4.291,-5,composited,142,4.984541,11.140708,16.397101708,125,809,11,0.232,display rejected
+ime-native-codes-1,1,105,ImePreedit,145,0,2.599,-8,direct,145,3.381542,10.351375,16.70852075,128,337,337,0.232,
+ime-native-codes-1,1,106,ImePreedit,146,0,4.072,-1,composited,146,21.025001,28.138626,16.817147083,129,809,14,0.232,display rejected
+ime-native-codes-1,1,107,ImePreedit,147,0,2.07,-5,composited,147,27.369958,32.682792,16.931717875,130,337,13,0.232,display rejected
+ime-native-codes-1,1,108,ImePreedit,148,0,3.396,-2,composited,148,5.164208,13.454333,17.011467875,131,809,14,0.232,display rejected
+ime-native-codes-1,1,109,ImePreedit,150,0,4.857,2,composited,150,8.67175,19.405792,17.123323,133,809,11,0.232,display rejected
+ime-native-codes-1,1,110,ImeCommit,151,0,4.354,4,composited,151,6.750125,12.782917,17.221494875,134,337,11,0.232,display rejected
+ime-native-codes-1,1,113,ImePreedit,154,0,3.543,4,direct,154,3.627834,12.599417,17.528392416,137,809,809,0.232,
+ime-native-codes-1,1,114,ImePreedit,155,0,3.289,7,composited,155,5.901458,11.650333,17.644106916,138,337,11,0.232,display rejected
+ime-native-codes-1,1,115,ImePreedit,156,0,3.386,0,composited,156,8.551583,16.058417,17.736550416,139,809,11,0.232,display rejected
+ime-native-codes-1,1,116,ImePreedit,157,0,2.53,2,composited,157,5.034083,11.431374,17.838844208,140,337,14,0.232,display rejected
+ime-native-codes-1,1,117,ImePreedit,158,0,2.285,-3,composited,158,5.833167,13.245917,17.9534445,141,809,14,0.232,display rejected
+ime-native-codes-1,1,118,ImeCommit,159,0,4.746,-1,composited,159,5.922833,12.328667,18.067135458,142,337,14,0.232,display rejected
+ime-native-codes-1,1,121,ImePreedit,162,0,3.796,1,direct,162,39.630167,49.201875,18.39835625,145,809,809,0.232,
+ime-native-codes-1,1,122,ImePreedit,163,0,2.988,2,composited,163,43.904916,49.322292,18.498355333,146,337,14,0.232,display rejected
+ime-native-codes-1,1,123,ImePreedit,164,0,3.669,5,composited,164,42.489959,49.298875,18.615020916,147,809,11,0.232,display rejected
+ime-native-codes-1,1,124,ImePreedit,165,0,2.799,7,composited,165,42.247875,49.299417,18.715024125,148,337,11,0.232,display rejected
+ime-native-codes-1,1,125,ImePreedit,166,0,4.028,10,composited,166,38.296666,49.223333,18.815019125,149,809,11,0.232,display rejected
+ime-native-codes-1,1,126,ImeCommit,167,0,3.719,2,composited,167,43.995834,49.3035,18.915018208,150,337,11,0.232,display rejected
+ime-native-codes-1,1,129,ImePreedit,170,0,4.74,3,direct,170,38.59575,49.222125,19.231681916,153,809,809,0.232,
+ime-native-codes-1,1,130,ImePreedit,171,0,3.164,6,composited,171,43.676249,49.31175,19.331680916,154,337,13,0.232,display rejected
+ime-native-codes-1,1,131,ImePreedit,172,0,3.264,7,composited,172,42.779625,49.312334,19.431679958,155,809,13,0.232,display rejected
+ime-native-codes-1,1,132,ImePreedit,173,0,4.021,1,composited,173,40.448292,49.272792,19.531679125,156,337,13,0.232,display rejected
+ime-native-codes-1,1,133,ImePreedit,174,0,3.335,12,composited,174,39.262292,49.161,19.648344583,157,809,11,0.232,display rejected
+ime-native-codes-1,1,134,ImeCommit,175,0,3.29,4,composited,175,44.373583,49.297875,19.748343708,158,337,11,0.232,display rejected
+ime-native-codes-1,1,137,ImePreedit,178,0,2.297,4,direct,178,43.862792,49.331084,20.065007416,161,809,809,0.232,
+ime-native-codes-1,1,138,ImePreedit,179,0,3.279,10,composited,179,43.341958,49.258875,20.1650065,162,337,11,0.232,display rejected
+ime-native-codes-1,1,139,ImePreedit,180,0,3.726,5,composited,180,42.129291,49.312666,20.265005541,163,809,11,0.232,display rejected
+ime-native-codes-1,1,140,ImePreedit,181,0,2.571,2,composited,181,40.802958,49.143166,20.365004625,164,337,11,0.232,display rejected
+ime-native-codes-1,1,141,ImePreedit,182,0,4.905,12,composited,182,19.678584,32.525667,20.448337166,165,809,14,0.232,display rejected
+ime-native-codes-1,1,142,ImeCommit,183,0,4.579,7,composited,183,6.249208,12.130333,20.527183916,166,337,14,0.232,display rejected
+ime-native-codes-1,1,145,ImePreedit,186,0,3.79,7,direct,186,22.954708,32.550333,20.865013875,169,809,809,0.232,
+ime-native-codes-1,1,146,ImePreedit,187,0,1.45,-3,composited,187,34.935292,38.13575,20.965013708,170,337,14,0.232,display rejected
+ime-native-codes-1,1,147,ImePreedit,188,0,2.121,1,composited,188,28.024542,32.740666,21.06501275,171,809,13,0.232,display rejected
+ime-native-codes-1,1,148,ImePreedit,190,0,4.349,14,composited,190,6.767125,16.085667,21.151128541,173,809,11,0.232,display rejected
+ime-native-codes-1,1,149,ImePreedit,191,0,3.024,11,composited,191,22.418375,31.064792,21.265010833,174,337,11,0.232,display rejected
+ime-native-codes-1,1,150,ImeCommit,192,0,4.414,9,composited,192,22.858458,29.353917,21.36501,175,809,11,0.232,display rejected
+ime-native-codes-1,1,153,ImePreedit,195,0,3.033,3,direct,195,9.738542,15.949166,21.665006458,178,337,337,0.232,
+ime-native-codes-1,1,154,ImePreedit,196,0,3.395,18,composited,196,26.812,32.615875,21.79833925,179,809,13,0.232,display rejected
+ime-native-codes-1,1,155,ImePreedit,197,0,3.597,14,composited,197,14.24025,21.771,21.881657208,180,337,14,0.232,display rejected
+ime-native-codes-1,1,156,ImePreedit,198,0,4.784,7,composited,198,21.807542,32.831459,21.998344083,181,809,14,0.232,display rejected
+ime-native-codes-1,1,157,ImePreedit,199,0,2.192,3,composited,199,7.197917,16.676792,22.0856005,182,337,14,0.232,display rejected
+ime-native-codes-1,1,158,ImeCommit,200,0,4.997,13,composited,200,6.638583,13.964,22.1862795,183,809,14,0.232,display rejected
+ime-native-codes-1,1,161,ImePreedit,203,0,2.64,4,direct,203,25.158333,32.721792,22.5149985,186,337,337,0.232,
+ime-native-codes-1,1,162,ImePreedit,204,0,2.896,12,composited,204,4.981667,10.119459,22.592463041,187,809,11,0.232,display rejected
+ime-native-codes-1,1,163,ImePreedit,205,0,3.159,10,composited,205,34.746,41.781708,22.714997375,188,337,11,0.232,display rejected
+ime-native-codes-1,1,164,ImePreedit,206,0,3.756,17,composited,206,5.109667,13.310333,22.795665291,189,809,11,0.232,display rejected
+ime-native-codes-1,1,165,ImePreedit,207,0,4.779,11,composited,207,21.654041,34.280041,22.915002958,190,337,11,0.232,display rejected
+ime-native-codes-1,1,166,ImeCommit,208,0,4.933,18,composited,208,17.145417,24.447959,22.998328083,191,809,11,0.232,display rejected
+ime-native-codes-1,1,169,ImePreedit,211,0,4.288,7,direct,211,3.361625,12.774166,23.295226458,194,337,337,0.232,
+ime-native-codes-1,1,170,ImePreedit,212,0,4.255,9,composited,212,9.604458,16.892458,23.388104083,195,809,13,0.232,display rejected
+ime-native-codes-1,1,171,ImePreedit,213,0,2.416,13,composited,213,39.854751,45.270959,23.514975291,196,337,13,0.232,display rejected
+ime-native-codes-1,1,172,ImePreedit,214,0,4.299,23,composited,214,37.916667,49.2055,23.631642416,197,809,11,0.232,display rejected
+ime-native-codes-1,1,173,ImePreedit,215,0,4.953,16,composited,215,19.882376,32.599834,23.714988041,198,337,11,0.232,display rejected
+ime-native-codes-1,1,174,ImeCommit,216,0,4.36,16,composited,216,6.56275,13.238209,23.778989458,199,809,11,0.232,display rejected
+ime-native-codes-1,1,177,ImePreedit,219,0,2.346,15,direct,219,10.630792,15.953333,24.098317,202,337,337,0.232,
+ime-native-codes-1,1,178,ImePreedit,220,0,3.329,12,composited,220,5.987667,12.336834,24.211400875,203,809,14,0.232,display rejected
+ime-native-codes-1,1,179,ImePreedit,221,0,4.444,9,composited,221,4.830042,13.882125,24.298315916,204,337,13,0.232,display rejected
+ime-native-codes-1,1,180,ImePreedit,222,0,4.742,16,composited,222,6.029584,18.005917,24.42623825,205,809,14,0.232,display rejected
+ime-native-codes-1,1,181,ImePreedit,223,0,4.18,15,composited,223,4.992166,15.451625,24.525778333,206,337,14,0.232,display rejected
+ime-native-codes-1,1,182,ImeCommit,224,0,4.847,19,composited,224,6.575708,13.553833,24.623482708,207,809,14,0.232,display rejected
+ime-native-codes-1,1,185,ImePreedit,227,0,4.434,36,direct,227,3.663667,13.910667,24.929691875,210,337,337,0.232,
+ime-native-codes-1,1,186,ImePreedit,228,0,2.688,14,composited,228,25.686958,30.916708,25.031642458,211,809,14,0.232,display rejected
+ime-native-codes-1,1,187,ImePreedit,230,0,16.049,12,composited,230,46.903916,65.985208,25.164959875,213,809,13,0.232,display rejected
+ime-native-codes-1,1,188,ImePreedit,231,0,2.648,13,composited,231,42.43425,49.292666,25.248292458,214,337,14,0.232,display rejected
+ime-native-codes-1,1,189,ImePreedit,232,0,2.828,15,composited,232,24.273916,32.517416,25.331625,215,809,11,0.232,display rejected
+ime-native-codes-1,1,190,ImeCommit,233,0,5.283,17,composited,233,6.743708,14.361,25.430121416,216,337,11,0.232,display rejected
+ime-native-codes-1,1,193,ImePreedit,236,0,4.476,14,direct,236,5.901375,15.928291,25.731635208,219,809,809,0.232,
+ime-native-codes-1,1,194,ImePreedit,237,0,3.019,16,composited,237,17.19925,22.204459,25.83785175,220,337,14,0.232,display rejected
+ime-native-codes-1,1,195,ImePreedit,238,0,1.362,9,composited,238,28.610916,32.505249,25.943800166,221,809,14,0.232,display rejected
+ime-native-codes-1,1,196,ImePreedit,239,0,4.853,18,composited,239,11.789167,22.111625,26.031633125,222,337,11,0.232,display rejected
+ime-native-codes-1,1,197,ImePreedit,240,0,4.079,17,composited,240,4.970626,15.882292,26.131632166,223,809,11,0.232,display rejected
+ime-native-codes-1,1,198,ImeCommit,241,0,2.073,19,composited,241,5.305125,8.976833,26.224615166,224,337,11,0.232,display rejected
+ime-native-codes-1,1,201,ImePreedit,244,0,3.481,15,direct,244,3.354917,12.429917,26.528079166,227,809,809,0.232,
+ime-native-codes-1,1,202,ImePreedit,245,0,3.251,16,composited,245,27.93425,34.26025,26.633722291,228,337,14,0.232,display rejected
+ime-native-codes-1,1,203,ImePreedit,246,0,4.361,15,composited,246,24.973542,32.650958,26.731612,229,809,14,0.232,display rejected
+ime-native-codes-1,1,204,ImePreedit,247,0,3.666,22,composited,247,22.648292,32.503917,26.831611041,230,337,14,0.232,display rejected
+ime-native-codes-1,1,205,ImePreedit,248,0,3.85,14,composited,248,5.830166,15.88775,26.914958208,231,809,14,0.232,display rejected
+ime-native-codes-1,1,206,ImeCommit,249,0,3.457,23,composited,249,6.44675,12.473166,27.01160425,232,337,14,0.232,display rejected
+ime-native-codes-1,1,209,ImePreedit,253,0,3.279,21,direct,253,24.622624,32.545625,27.331627166,236,337,337,0.232,
+ime-native-codes-1,1,210,ImePreedit,254,0,3.531,27,composited,254,8.146292,14.687584,27.413665791,237,809,11,0.232,display rejected
+ime-native-codes-1,1,211,ImePreedit,255,0,2.356,19,composited,255,6.231916,10.945458,27.50610925,238,337,13,0.232,display rejected
+ime-native-codes-1,1,212,ImePreedit,256,0,3.177,17,composited,256,5.61825,14.191416,27.61068075,239,809,14,0.232,display rejected
+ime-native-codes-1,1,213,ImePreedit,257,0,2.65,22,composited,257,12.820041,20.271999,27.717045541,240,337,14,0.232,display rejected
+ime-native-codes-1,1,214,ImeCommit,258,0,2.676,20,composited,258,13.073875,17.045916,27.814949833,241,809,14,0.232,display rejected
+ime-native-codes-2,1,17,ImePreedit,54,0,4.172,-19,direct,54,3.707833,13.736875,7.477452125,37,905,905,-0.501,
+ime-native-codes-2,1,18,ImePreedit,55,0,1.692,-18,composited,55,18.206375,21.374167,7.568494083,38,551,13,-0.5,display rejected
+ime-native-codes-2,1,19,ImePreedit,56,0,3.557,-18,composited,56,6.1915,14.674292,7.678343458,39,905,13,-0.501,display rejected
+ime-native-codes-2,1,20,ImePreedit,57,0,4.574,-20,composited,57,10.999374,21.920749,7.770098541,40,551,11,-0.501,display rejected
+ime-native-codes-2,1,21,ImePreedit,58,0,3.321,-21,composited,58,18.496458,28.261208,7.879629458,41,905,14,-0.501,display rejected
+ime-native-codes-2,1,22,ImeCommit,59,0,5.102,-16,composited,59,6.28575,13.655791,7.977422833,42,551,11,-0.501,display rejected
+ime-native-codes-2,1,25,ImePreedit,62,0,3.867,-18,direct,62,3.636333,13.267125,8.276076541,45,905,905,-0.5,
+ime-native-codes-2,1,26,ImePreedit,63,0,1.797,-22,composited,63,37.641875,41.224334,8.398386166,46,551,11,-0.501,display rejected
+ime-native-codes-2,1,27,ImePreedit,64,0,3.573,-19,composited,64,26.100624,32.721999,8.496297416,47,905,13,-0.501,display rejected
+ime-native-codes-2,1,28,ImePreedit,65,0,3.161,-9,composited,65,5.672625,13.466417,8.570779666,48,551,11,-0.501,display rejected
+ime-native-codes-2,1,29,ImePreedit,66,0,2.238,-17,composited,66,5.716,11.915042,8.677645916,49,905,11,-0.5,display rejected
+ime-native-codes-2,1,30,ImeCommit,67,0,4.815,-1,composited,67,6.7205,13.844333,8.79224625,50,551,11,-0.501,display rejected
+ime-native-codes-2,1,33,ImePreedit,71,0,4.058,-19,direct,71,3.304292,12.616667,9.092965166,54,551,551,-0.501,
+ime-native-codes-2,1,34,ImePreedit,72,0,4.084,-14,composited,72,7.829792,14.959,9.188809041,55,905,11,-0.501,display rejected
+ime-native-codes-2,1,35,ImePreedit,73,0,4.091,-13,composited,73,6.7525,15.984833,9.296283125,56,551,13,-0.501,display rejected
+ime-native-codes-2,1,36,ImePreedit,74,0,3.368,-9,composited,74,6.021875,14.253209,9.399294916,57,905,11,-0.501,display rejected
+ime-native-codes-2,1,37,ImePreedit,75,0,2.721,-10,composited,75,5.821583,13.085916,9.512798875,58,551,11,-0.501,display rejected
+ime-native-codes-2,1,38,ImeCommit,76,0,2.922,-8,composited,76,6.60675,11.391626,9.607996041,59,905,11,-0.501,display rejected
+ime-native-codes-2,1,41,ImePreedit,79,0,3.416,-10,direct,79,3.839542,10.034792,9.92261925,62,551,551,-0.501,
+ime-native-codes-2,1,42,ImePreedit,80,0,3.555,-13,composited,80,26.702499,32.506833,10.031704541,63,905,14,-0.501,display rejected
+ime-native-codes-2,1,43,ImePreedit,81,0,2.627,-11,composited,81,27.205,32.678792,10.146275375,64,551,13,-0.501,display rejected
+ime-native-codes-2,1,44,ImePreedit,82,0,3.14,-13,composited,82,34.015,41.231167,10.24836925,65,905,11,-0.501,display rejected
+ime-native-codes-2,1,45,ImePreedit,83,0,4.237,-7,composited,83,6.859959,18.978917,10.332619666,66,551,14,-0.501,display rejected
+ime-native-codes-2,1,46,ImeCommit,84,0,4.483,-14,composited,84,7.07575,13.842125,10.431700875,67,905,14,-0.501,display rejected
+ime-native-codes-2,1,49,ImePreedit,87,0,3.635,-10,direct,87,3.650833,11.31275,10.739507875,70,551,551,-0.5,
+ime-native-codes-2,1,50,ImePreedit,88,0,2.831,-10,composited,88,16.819792,21.5825,10.85179725,71,905,11,-0.501,display rejected
+ime-native-codes-2,1,51,ImePreedit,89,0,2.709,-17,composited,89,14.817708,20.660458,10.967545,72,551,11,-0.5,display rejected
+ime-native-codes-2,1,52,ImePreedit,91,0,2.262,-19,composited,91,4.863333,12.363333,11.052942833,74,551,11,-0.501,display rejected
+ime-native-codes-2,1,53,ImePreedit,92,0,4.447,-15,composited,92,6.404583,17.299125,11.17098525,75,905,11,-0.501,display rejected
+ime-native-codes-2,1,54,ImeCommit,93,0,2.797,-17,composited,93,5.780417,10.809667,11.265026541,76,551,11,-0.5,display rejected
+ime-native-codes-2,1,57,ImePreedit,96,0,3.528,-11,direct,96,7.807292,16.0315,11.579594708,79,905,905,-0.501,
+ime-native-codes-2,1,58,ImePreedit,97,0,2.505,0,composited,97,13.412999,18.125749,11.681689333,80,551,13,-0.501,display rejected
+ime-native-codes-2,1,59,ImePreedit,98,0,2.488,-11,composited,98,7.00625,12.291834,11.776011083,81,905,13,-0.501,display rejected
+ime-native-codes-2,1,60,ImePreedit,99,0,2.788,-12,composited,99,21.924667,28.948917,11.899042416,82,551,14,-0.501,display rejected
+ime-native-codes-2,1,61,ImePreedit,100,0,3.304,-6,composited,100,6.49475,17.974875,11.985120125,83,905,14,-0.501,display rejected
+ime-native-codes-2,1,62,ImeCommit,101,0,4.684,-11,composited,101,6.428291,13.619458,12.083521416,84,551,14,-0.501,display rejected
+ime-native-codes-2,1,65,ImePreedit,104,0,3.186,-9,direct,104,4.206333,12.523666,12.396253833,87,905,905,-0.501,
+ime-native-codes-2,1,66,ImePreedit,105,0,3.373,-8,composited,105,16.421084,22.231125,12.502470458,88,551,11,-0.5,display rejected
+ime-native-codes-2,1,67,ImePreedit,106,0,4.66,-9,composited,106,40.398291,49.317458,12.629571125,89,905,11,-0.501,display rejected
+ime-native-codes-2,1,68,ImePreedit,107,0,3.061,5,composited,107,39.786834,49.222584,12.746241166,90,551,13,-0.501,display rejected
+ime-native-codes-2,1,69,ImePreedit,108,0,2.788,-7,composited,108,25.183958,32.655083,12.82956925,91,905,13,-0.501,display rejected
+ime-native-codes-2,1,70,ImeCommit,109,0,5.482,8,composited,109,6.473417,14.185334,12.911169708,92,551,11,-0.5,display rejected
+ime-native-codes-2,1,73,ImePreedit,113,0,2.984,-13,direct,113,3.324917,11.687709,13.208675916,96,551,551,-0.501,
+ime-native-codes-2,1,74,ImePreedit,114,0,3.958,-2,composited,114,27.11775,34.699208,13.331674041,97,905,14,-0.5,display rejected
+ime-native-codes-2,1,75,ImePreedit,115,0,2.84,-4,composited,115,26.787584,32.684083,13.446244625,98,551,13,-0.501,display rejected
+ime-native-codes-2,1,76,ImePreedit,116,0,3.421,-8,composited,116,7.032958,16.322083,13.520045541,99,905,13,-0.501,display rejected
+ime-native-codes-2,1,77,ImePreedit,117,0,4.035,-7,composited,117,6.366667,17.554667,13.6337365,100,551,11,-0.501,display rejected
+ime-native-codes-2,1,78,ImeCommit,118,0,4.66,-4,composited,118,6.872166,13.857041,13.731670333,101,905,11,-0.5,display rejected
+ime-native-codes-2,1,81,ImePreedit,121,0,2.087,-12,direct,121,3.386833,8.294,14.038567958,104,551,551,-0.501,
+ime-native-codes-2,1,82,ImePreedit,122,0,3.634,-5,composited,122,16.562375,22.99575,14.152914083,105,905,14,-0.501,display rejected
+ime-native-codes-2,1,83,ImePreedit,123,0,3.52,-2,composited,123,25.589292,32.641125,14.279555791,106,551,11,-0.5,display rejected
+ime-native-codes-2,1,84,ImePreedit,124,0,4.66,-5,composited,124,20.508958,32.580833,14.379569458,107,905,14,-0.501,display rejected
+ime-native-codes-2,1,85,ImePreedit,125,0,4.708,-9,composited,125,6.5215,19.172917,14.466144208,108,551,14,-0.501,display rejected
+ime-native-codes-2,1,86,ImeCommit,126,0,2.804,1,composited,126,6.151708,10.765125,14.560924875,109,905,14,-0.501,display rejected
+ime-native-codes-2,1,89,ImePreedit,129,0,1.934,-9,direct,129,3.390333,8.271208,14.8718935,112,551,551,-0.501,
+ime-native-codes-2,1,90,ImePreedit,130,0,4.442,-9,composited,130,22.038875,29.214583,14.986239625,113,905,11,-0.5,display rejected
+ime-native-codes-2,1,91,ImePreedit,132,0,2.742,-5,composited,132,5.634833,11.708167,15.075292041,115,905,11,-0.501,display rejected
+ime-native-codes-2,1,92,ImePreedit,133,0,3.981,-3,composited,133,5.707042,16.35225,15.179183583,116,551,14,-0.501,display rejected
+ime-native-codes-2,1,93,ImePreedit,134,0,4.785,3,composited,134,7.621126,17.983417,15.298322416,117,905,14,-0.5,display rejected
+ime-native-codes-2,1,94,ImeCommit,135,0,4.168,-6,composited,135,5.299417,11.409875,15.394709375,118,551,14,-0.501,display rejected
+ime-native-codes-2,1,97,ImePreedit,138,0,4.524,0,direct,138,5.696542,15.91925,15.712889666,121,905,905,-0.5,
+ime-native-codes-2,1,98,ImePreedit,139,0,2.313,-6,composited,139,5.583292,9.504375,15.806332291,122,551,13,-0.5,display rejected
+ime-native-codes-2,1,99,ImePreedit,140,0,3.767,-4,composited,140,8.837834,17.497917,15.907019791,123,905,14,-0.501,display rejected
+ime-native-codes-2,1,100,ImePreedit,141,0,4.337,10,composited,141,15.827084,23.692125,16.012887625,124,551,14,-0.501,display rejected
+ime-native-codes-2,1,101,ImePreedit,142,0,3.364,-2,composited,142,5.669292,15.906917,16.112886666,125,905,14,-0.501,display rejected
+ime-native-codes-2,1,102,ImeCommit,143,0,4.21,-6,composited,143,5.562875,11.498166,16.208385333,126,551,14,-0.501,display rejected
+ime-native-codes-2,1,105,ImePreedit,146,0,3.68,1,direct,146,3.729291,12.883875,16.526450583,129,905,905,-0.5,
+ime-native-codes-2,1,106,ImePreedit,147,0,4.002,0,composited,147,18.176583,24.602166,16.6295485,130,551,14,-0.5,display rejected
+ime-native-codes-2,1,107,ImePreedit,148,0,2.632,-1,composited,148,43.33075,49.313,16.762865958,131,905,11,-0.501,display rejected
+ime-native-codes-2,1,108,ImePreedit,149,0,2.634,3,composited,149,41.741376,49.27075,16.862865041,132,551,11,-0.501,display rejected
+ime-native-codes-2,1,109,ImePreedit,150,0,2.052,-8,composited,150,6.413125,15.950167,16.946212208,133,905,11,-0.501,display rejected
+ime-native-codes-2,1,110,ImeCommit,152,0,10.092,1,direct,152,37.126376,49.255542,17.079529666,135,905,905,-0.501,
+ime-native-codes-2,1,113,ImePreedit,155,0,2.497,0,direct,155,3.82175,9.896625,17.3440275,138,551,551,-0.5,
+ime-native-codes-2,1,114,ImePreedit,156,0,3.221,2,composited,156,26.514083,32.609291,17.479525958,139,905,14,-0.501,display rejected
+ime-native-codes-2,1,115,ImePreedit,157,0,2.446,-1,composited,157,6.006333,11.443791,17.553800291,140,551,13,-0.5,display rejected
+ime-native-codes-2,1,116,ImePreedit,158,0,2.263,-2,composited,158,4.858333,11.79825,17.653569875,141,905,11,-0.501,display rejected
+ime-native-codes-2,1,117,ImePreedit,159,0,4.802,0,composited,159,6.596792,19.47,17.773669,142,551,11,-0.5,display rejected
+ime-native-codes-2,1,118,ImeCommit,160,0,5.032,1,composited,160,6.758209,14.176292,17.870922916,143,905,11,-0.501,display rejected
+ime-native-codes-2,1,121,ImePreedit,163,0,4.685,-1,direct,163,3.621709,14.202042,18.177812041,146,551,551,-0.5,
+ime-native-codes-2,1,122,ImePreedit,164,0,3.085,10,composited,164,5.513417,10.85475,18.274352791,147,905,14,-0.501,display rejected
+ime-native-codes-2,1,123,ImePreedit,165,0,3.458,1,composited,165,5.628292,13.685,18.378924291,148,551,13,-0.501,display rejected
+ime-native-codes-2,1,124,ImePreedit,166,0,2.363,2,composited,166,5.133667,11.200042,18.482543916,149,905,11,-0.5,display rejected
+ime-native-codes-2,1,125,ImePreedit,167,0,1.229,-6,composited,167,7.1525,12.435667,18.596047916,150,551,11,-0.501,display rejected
+ime-native-codes-2,1,126,ImeCommit,168,0,1.88,-4,composited,168,11.433541,14.431708,18.694908083,151,905,11,-0.5,display rejected
+ime-native-codes-2,1,129,ImePreedit,171,0,2.35,-2,direct,171,3.794709,9.264333,19.006097666,154,551,551,-0.501,
+ime-native-codes-2,1,130,ImePreedit,173,0,3.047,4,composited,173,16.421209,22.211917,19.119075458,156,551,11,-0.501,display rejected
+ime-native-codes-2,1,131,ImePreedit,174,0,2.688,1,composited,174,26.687708,32.694834,19.2295255,157,905,13,-0.501,display rejected
+ime-native-codes-2,1,132,ImePreedit,175,0,4.56,12,composited,175,6.523083,17.150708,19.314951583,158,551,11,-0.501,display rejected
+ime-native-codes-2,1,133,ImePreedit,176,0,3.445,2,composited,176,5.641125,13.531792,19.429143958,159,905,11,-0.501,display rejected
+ime-native-codes-2,1,134,ImeCommit,177,0,3.572,1,composited,177,6.417334,11.842083,19.525021,160,551,11,-0.501,display rejected
+ime-native-codes-2,1,137,ImePreedit,180,0,4.154,10,direct,180,8.978792,18.427084,19.846184416,163,905,905,-0.501,
+ime-native-codes-2,1,138,ImePreedit,181,0,2.223,2,composited,181,17.711125,21.581292,19.951712583,164,551,14,-0.5,display rejected
+ime-native-codes-2,1,139,ImePreedit,182,0,2.202,1,composited,182,15.816208,20.53725,20.046168666,165,905,11,-0.501,display rejected
+ime-native-codes-2,1,140,ImePreedit,183,0,4.132,11,composited,183,16.412542,27.1105,20.150342375,166,551,11,-0.501,display rejected
+ime-native-codes-2,1,141,ImePreedit,184,0,4.598,5,composited,184,15.402208,28.349042,20.262848,167,905,13,-0.501,display rejected
+ime-native-codes-2,1,142,ImeCommit,185,0,2.704,8,composited,185,5.915708,10.376375,20.340541208,168,551,11,-0.501,display rejected
+ime-native-codes-2,1,145,ImePreedit,188,0,4.583,5,direct,188,5.62375,15.941625,20.662843416,171,905,905,-0.5,
+ime-native-codes-2,1,146,ImePreedit,189,0,2.879,7,composited,189,17.407167,22.505,20.769289541,172,551,14,-0.501,display rejected
+ime-native-codes-2,1,147,ImePreedit,190,0,3.732,5,composited,190,41.717084,49.318501,20.896160708,173,905,14,-0.501,display rejected
+ime-native-codes-2,1,148,ImePreedit,191,0,2.686,7,composited,191,4.85875,11.650375,20.975236958,174,551,11,-0.501,display rejected
+ime-native-codes-2,1,149,ImePreedit,193,0,1.618,-1,composited,193,5.639875,13.941916,21.06493525,176,551,14,-0.501,display rejected
+ime-native-codes-2,1,150,ImeCommit,194,0,4.346,8,composited,194,5.926499,11.714708,21.176841416,177,905,14,-0.501,display rejected
+ime-native-codes-2,1,153,ImePreedit,197,0,3.573,10,direct,197,3.736292,12.691917,21.476183416,180,551,551,-0.501,
+ime-native-codes-2,1,154,ImePreedit,198,0,3.437,8,composited,198,5.817375,11.735541,21.591897875,181,905,14,-0.501,display rejected
+ime-native-codes-2,1,155,ImePreedit,199,0,3.877,16,composited,199,29.835709,37.61775,21.712834416,182,551,13,-0.501,display rejected
+ime-native-codes-2,1,156,ImePreedit,200,0,3.274,3,composited,200,4.85525,11.763709,21.792354916,183,905,14,-0.501,display rejected
+ime-native-codes-2,1,157,ImePreedit,201,0,4.227,11,composited,201,7.513416,17.091416,21.910167875,184,551,14,-0.5,display rejected
+ime-native-codes-2,1,158,ImeCommit,202,0,3.267,10,composited,202,5.992834,11.044542,22.004438583,185,905,14,-0.5,display rejected
+ime-native-codes-2,1,161,ImePreedit,205,0,4.194,14,direct,205,3.726958,13.522667,22.310418291,188,551,551,-0.501,
+ime-native-codes-2,1,162,ImePreedit,206,0,2.759,5,composited,206,19.992625,25.23025,22.412827833,189,905,14,-0.501,display rejected
+ime-native-codes-2,1,163,ImePreedit,207,0,4.893,14,composited,207,38.827459,49.257584,22.546145291,190,551,11,-0.501,display rejected
+ime-native-codes-2,1,164,ImePreedit,208,0,3.877,10,composited,208,39.237625,49.213416,22.646144333,191,905,11,-0.5,display rejected
+ime-native-codes-2,1,165,ImePreedit,209,0,2.858,11,composited,209,5.703292,15.926375,22.712825,192,551,11,-0.501,display rejected
+ime-native-codes-2,1,166,ImeCommit,210,0,3.173,18,composited,210,5.59825,10.559209,22.807414291,193,905,11,-0.5,display rejected
+ime-native-codes-2,1,169,ImePreedit,214,0,2.719,9,direct,214,3.769041,10.202541,23.10697725,197,905,905,-0.5,
+ime-native-codes-2,1,170,ImePreedit,215,0,4.412,9,composited,215,21.101834,28.431792,23.214915166,198,551,11,-0.501,display rejected
+ime-native-codes-2,1,171,ImePreedit,216,0,4.65,15,composited,216,23.960792,32.660208,23.329471291,199,905,11,-0.5,display rejected
+ime-native-codes-2,1,172,ImePreedit,217,0,3.512,15,composited,217,22.638125,32.614209,23.429490666,200,551,13,-0.501,display rejected
+ime-native-codes-2,1,173,ImePreedit,218,0,4.29,11,composited,218,5.754333,14.585,23.51152975,201,905,11,-0.501,display rejected
+ime-native-codes-2,1,174,ImeCommit,219,0,4.629,13,composited,219,6.890625,13.611001,23.609234083,202,551,11,-0.5,display rejected
+ime-native-codes-2,1,177,ImePreedit,222,0,3.604,10,direct,222,3.81225,11.3075,23.908117125,205,905,905,-0.501,
+ime-native-codes-2,1,178,ImePreedit,223,0,4.005,21,composited,223,25.605458,32.624625,24.04613125,206,551,14,-0.501,display rejected
+ime-native-codes-2,1,179,ImePreedit,224,0,2.175,7,composited,224,27.292208,32.705333,24.146145,207,905,13,-0.501,display rejected
+ime-native-codes-2,1,180,ImePreedit,225,0,4.703,16,composited,225,6.075709,18.245292,24.24485625,208,551,11,-0.501,display rejected
+ime-native-codes-2,1,181,ImePreedit,226,0,4.647,10,composited,226,4.622875,17.212042,24.346143083,209,905,11,-0.501,display rejected
+ime-native-codes-2,1,182,ImeCommit,227,0,4.619,12,composited,227,6.126042,13.06575,24.44164175,210,551,11,-0.5,display rejected
+ime-native-codes-2,1,185,ImePreedit,230,0,2.69,20,direct,230,3.741375,9.90225,24.740065875,213,905,905,-0.501,
+ime-native-codes-2,1,186,ImePreedit,231,0,3.484,16,composited,231,26.297042,32.184958,24.848233208,214,551,14,-0.5,display rejected
+ime-native-codes-2,1,187,ImePreedit,232,0,4.433,20,composited,232,22.61025,32.664625,24.962789375,215,905,11,-0.501,display rejected
+ime-native-codes-2,1,188,ImePreedit,233,0,4.245,19,composited,233,24.041917,32.651584,25.046121916,216,551,14,-0.501,display rejected
+ime-native-codes-2,1,189,ImePreedit,235,0,1.886,10,composited,235,7.249042,15.815042,25.129320166,218,551,14,-0.501,display rejected
+ime-native-codes-2,1,190,ImeCommit,236,0,4.973,15,composited,236,6.589499,14.090333,25.244158458,219,905,14,-0.5,display rejected
+ime-native-codes-2,1,193,ImePreedit,239,0,4.118,17,direct,239,3.613542,13.697583,25.559019583,222,551,551,-0.501,
+ime-native-codes-2,1,194,ImePreedit,240,0,2.52,12,composited,240,28.020708,32.709166,25.6627975,223,905,13,-0.501,display rejected
+ime-native-codes-2,1,195,ImePreedit,241,0,3.828,20,composited,241,19.259625,26.807333,25.75280575,224,551,11,-0.501,display rejected
+ime-native-codes-2,1,196,ImePreedit,242,0,3.903,12,composited,242,40.52225,49.317,25.87944875,225,905,13,-0.501,display rejected
+ime-native-codes-2,1,197,ImePreedit,243,0,1.617,10,composited,243,27.25575,32.720917,25.962794666,226,551,13,-0.501,display rejected
+ime-native-codes-2,1,198,ImeCommit,244,0,4.28,20,composited,244,5.748209,12.168625,26.042315208,227,905,11,-0.5,display rejected
+ime-native-codes-2,1,201,ImePreedit,247,0,3.481,14,direct,247,3.505709,12.447042,26.342575083,230,551,551,-0.5,
+ime-native-codes-2,1,202,ImePreedit,248,0,3.074,16,composited,248,25.957167,32.562291,26.448218208,231,905,11,-0.501,display rejected
+ime-native-codes-2,1,203,ImePreedit,249,0,2.68,14,composited,249,27.112125,32.688875,26.562789041,232,551,13,-0.501,display rejected
+ime-native-codes-2,1,204,ImePreedit,250,0,4.381,21,composited,250,10.293459,20.010958,26.63269725,233,905,11,-0.501,display rejected
+ime-native-codes-2,1,205,ImePreedit,251,0,4.607,16,composited,251,18.558125,29.32975,26.746120583,234,551,11,-0.501,display rejected
+ime-native-codes-2,1,206,ImeCommit,252,0,4.818,22,composited,252,6.656083,13.873458,26.827018041,235,905,11,-0.501,display rejected
+ime-native-codes-2,1,209,ImePreedit,256,0,4.07,17,direct,256,3.815167,13.540875,27.127039916,239,905,905,-0.501,
+ime-native-codes-2,1,210,ImePreedit,257,0,1.536,10,composited,257,20.72875,24.074583,27.234977833,240,551,14,-0.501,display rejected
+ime-native-codes-2,1,211,ImePreedit,258,0,4.606,22,composited,258,8.258709,18.090709,27.331543291,241,905,13,-0.501,display rejected
+ime-native-codes-2,1,212,ImePreedit,259,0,4.348,22,composited,259,13.224,23.958583,27.435664416,242,551,14,-0.5,display rejected
+ime-native-codes-2,1,213,ImePreedit,260,0,4.307,22,composited,260,6.978833,19.532291,27.539097041,243,905,14,-0.501,display rejected
+ime-native-codes-2,1,214,ImeCommit,261,0,4.598,22,composited,261,9.294542,16.409916,27.639096083,244,551,14,-0.501,display rejected
+ime-native-long,1,17,ImePreedit,54,0,4.573,-60,direct,54,5.292459,15.921792,7.4410235,37,970,970,-0.414,
+ime-native-long,1,18,ImePreedit,55,0,3.151,-60,composited,55,5.534584,11.068626,7.536072541,38,490,14,-0.414,display rejected
+ime-native-long,1,19,ImePreedit,56,0,1.473,-68,composited,56,4.569625,9.678958,7.628516,39,970,11,-0.414,display rejected
+ime-native-long,1,20,ImePreedit,57,0,4.717,-63,composited,57,12.5575,24.249917,7.743116333,40,490,14,-0.413,display rejected
+ime-native-long,1,21,ImePreedit,58,0,4.9,-56,composited,58,16.902833,30.463042,7.857687166,41,970,14,-0.414,display rejected
+ime-native-long,1,22,ImeCommit,59,0,2.305,-62,composited,59,5.996084,9.681708,7.934692,42,490,14,-0.414,display rejected
+ime-native-long,1,25,ImePreedit,62,0,3.166,-65,direct,62,7.168333,15.974125,8.241016083,45,970,970,-0.413,
+ime-native-long,1,26,ImePreedit,63,0,3.275,-54,composited,63,5.85075,11.751125,8.336745041,46,490,14,-0.414,display rejected
+ime-native-long,1,27,ImePreedit,64,0,4.615,-57,composited,64,13.774208,23.175542,8.450436,47,970,11,-0.414,display rejected
+ime-native-long,1,28,ImePreedit,65,0,2.636,-57,composited,65,6.535542,14.002542,8.555704458,48,490,11,-0.414,display rejected
+ime-native-long,1,29,ImePreedit,66,0,1.926,-65,composited,66,6.930584,16.048125,8.6557035,49,970,11,-0.413,display rejected
+ime-native-long,1,30,ImeCommit,67,0,4.181,-62,composited,67,5.680041,12.203625,8.752039541,50,490,11,-0.414,display rejected
+ime-native-long,1,33,ImePreedit,71,0,3.296,-57,direct,71,3.581625,10.180291,9.051831958,54,490,490,-0.413,
+ime-native-long,1,34,ImePreedit,72,0,3.4,-55,composited,72,14.292709,21.384917,9.16503925,55,970,11,-0.413,display rejected
+ime-native-long,1,35,ImePreedit,73,0,3.063,-62,composited,73,26.035958,32.682833,9.290992541,56,490,14,-0.414,display rejected
+ime-native-long,1,36,ImePreedit,74,0,3.468,-60,composited,74,22.30975,32.608125,9.391006208,57,970,11,-0.413,display rejected
+ime-native-long,1,37,ImePreedit,75,0,4.708,-60,composited,75,6.831209,20.069292,9.495165375,58,490,11,-0.414,display rejected
+ime-native-long,1,38,ImeCommit,76,0,5.028,-59,composited,76,5.879292,13.405875,9.591004375,59,970,11,-0.413,display rejected
+ime-native-long,1,41,ImePreedit,79,0,4.208,-54,direct,79,3.519458,13.747042,9.888820625,62,490,490,-0.414,
+ime-native-long,1,42,ImePreedit,80,0,3.065,-61,composited,80,8.346541,14.287583,9.985361375,63,970,13,-0.414,display rejected
+ime-native-long,1,43,ImePreedit,81,0,3.024,-57,composited,81,8.285708,15.017875,10.089941458,64,490,14,-0.413,display rejected
+ime-native-long,1,44,ImePreedit,82,0,4.498,-50,composited,82,11.048834,21.430125,10.199501875,65,970,14,-0.414,display rejected
+ime-native-long,1,45,ImePreedit,83,0,4.341,-46,composited,83,6.471417,18.893458,10.318921083,66,490,14,-0.414,display rejected
+ime-native-long,1,46,ImeCommit,84,0,4.389,-42,composited,84,9.330083,15.880709,10.417543333,67,970,14,-0.413,display rejected
+ime-native-long,1,49,ImePreedit,87,0,1.94,-64,direct,87,3.325792,9.939917,10.718253708,70,490,490,-0.414,
+ime-native-long,1,50,ImePreedit,88,0,2.339,-56,composited,88,30.23875,34.772459,10.843087541,71,970,14,-0.414,display rejected
+ime-native-long,1,51,ImePreedit,89,0,4.024,-52,composited,89,25.013125,32.65725,10.940977166,72,490,14,-0.414,display rejected
+ime-native-long,1,52,ImePreedit,90,0,4.224,-47,composited,90,4.551625,15.9225,11.024324333,73,970,11,-0.414,display rejected
+ime-native-long,1,53,ImePreedit,91,0,4.34,-49,composited,91,7.74325,18.064958,11.143084833,74,490,11,-0.414,display rejected
+ime-native-long,1,54,ImeCommit,92,0,3.985,-58,composited,92,5.890249,12.025458,11.238324416,75,970,11,-0.414,display rejected
+ime-native-long,1,57,ImePreedit,95,0,3.584,-57,direct,95,3.326666,12.619625,11.554332958,78,490,490,-0.413,
+ime-native-long,1,58,ImePreedit,96,0,4.258,-52,composited,96,18.948084,26.743667,11.657651916,79,970,13,-0.414,display rejected
+ime-native-long,1,59,ImePreedit,97,0,2.165,-52,composited,97,7.728958,13.478791,11.751782166,80,490,11,-0.414,display rejected
+ime-native-long,1,60,ImePreedit,98,0,2.235,-60,composited,98,48.533333,54.773791,11.890968375,81,970,11,-0.414,display rejected
+ime-native-long,1,61,ImePreedit,99,0,4.412,-46,composited,99,20.619542,32.567875,11.974315625,82,490,13,-0.413,display rejected
+ime-native-long,1,62,ImeCommit,100,0,3.582,-57,composited,100,6.506333,12.7625,12.054524541,83,970,11,-0.414,display rejected
+ime-native-long,1,65,ImePreedit,103,0,3.035,-55,direct,103,10.001959,17.545417,12.374311083,86,490,490,-0.414,
+ime-native-long,1,66,ImePreedit,104,0,2.861,-38,composited,104,16.825792,22.215667,12.480527708,87,970,14,-0.414,display rejected
+ime-native-long,1,67,ImePreedit,105,0,2.931,-55,composited,105,43.428292,49.355959,12.607628333,88,490,14,-0.414,display rejected
+ime-native-long,1,68,ImePreedit,106,0,3.945,-55,composited,106,38.738625,49.277333,12.707631166,89,970,14,-0.414,display rejected
+ime-native-long,1,69,ImePreedit,107,0,2.321,-58,composited,107,23.019583,32.670833,12.790974666,90,490,14,-0.414,display rejected
+ime-native-long,1,70,ImeCommit,108,0,3.478,-55,composited,108,6.347084,11.478917,12.86980675,91,970,14,-0.414,display rejected
+ime-native-long,1,73,ImePreedit,112,0,2.567,-51,direct,112,9.89825,15.763292,13.178259708,95,970,970,-0.414,
+ime-native-long,1,74,ImePreedit,113,0,3.117,-49,composited,113,17.7665,23.619,13.298563625,96,490,11,-0.414,display rejected
+ime-native-long,1,75,ImePreedit,114,0,5.541,-28,composited,114,6.108042,16.077333,13.38555925,97,970,13,-0.413,display rejected
+ime-native-long,1,76,ImePreedit,115,0,2.529,-44,composited,115,5.07425,13.259333,13.486697166,98,490,14,-0.414,display rejected
+ime-native-long,1,77,ImePreedit,116,0,3.513,-54,composited,116,5.762542,17.036583,13.603592208,99,970,11,-0.414,display rejected
+ime-native-long,1,78,ImeCommit,117,0,4.801,-49,composited,117,6.633499,14.042083,13.700846125,100,490,11,-0.413,display rejected
+ime-native-long,1,81,ImePreedit,120,0,3.859,-51,direct,120,3.492667,13.471292,14.021886,103,970,970,-0.414,
+ime-native-long,1,82,ImePreedit,121,0,3.123,-41,composited,121,6.765792,13.965126,14.114304791,104,490,11,-0.414,display rejected
+ime-native-long,1,83,ImePreedit,122,0,3.241,-40,composited,122,42.46825,49.188417,14.257613,105,970,13,-0.414,display rejected
+ime-native-long,1,84,ImePreedit,123,0,4.209,-51,composited,123,40.599791,49.303166,14.357612041,106,490,13,-0.414,display rejected
+ime-native-long,1,85,ImePreedit,124,0,4.261,-49,composited,124,19.793,32.575917,14.457625791,107,970,13,-0.413,display rejected
+ime-native-long,1,86,ImeCommit,125,0,4.923,-51,composited,125,7.056667,14.627376,14.539670541,108,490,11,-0.414,display rejected
+ime-native-long,1,89,ImePreedit,128,0,2.225,-54,direct,128,9.56,16.015416,14.857621291,111,970,970,-0.414,
+ime-native-long,1,90,ImePreedit,129,0,2.829,-47,composited,129,5.751833,11.011375,14.952670208,112,490,14,-0.414,display rejected
+ime-native-long,1,91,ImePreedit,131,0,3.472,-42,composited,131,21.647167,29.477792,15.059714958,114,490,14,-0.413,display rejected
+ime-native-long,1,92,ImePreedit,132,0,2.607,-35,composited,132,16.738083,22.833417,15.159714,115,970,14,-0.414,display rejected
+ime-native-long,1,93,ImePreedit,133,0,4.395,-48,composited,133,6.789583,19.578167,15.263146666,116,490,14,-0.414,display rejected
+ime-native-long,1,94,ImeCommit,134,0,3.012,-52,composited,134,5.762625,10.425041,15.356329541,117,970,14,-0.414,display rejected
+ime-native-long,1,97,ImePreedit,137,0,2.06,-51,direct,137,8.371834,15.931667,15.67428025,120,490,490,-0.414,
+ime-native-long,1,98,ImePreedit,138,0,3.492,-46,composited,138,6.696959,12.660875,15.787593583,121,970,14,-0.414,display rejected
+ime-native-long,1,99,ImePreedit,139,0,1.99,-52,composited,139,8.789126,13.504292,15.885306416,122,490,14,-0.414,display rejected
+ime-native-long,1,100,ImePreedit,140,0,1.187,-51,composited,140,11.300667,17.2295,15.977749916,123,970,14,-0.414,display rejected
+ime-native-long,1,101,ImePreedit,141,0,4.402,-48,composited,141,5.588792,16.95775,16.089197083,124,490,14,-0.413,display rejected
+ime-native-long,1,102,ImeCommit,142,0,4.621,-47,composited,142,5.502709,11.6405,16.183926791,125,970,14,-0.413,display rejected
+ime-native-long,1,105,ImePreedit,145,0,3.275,-51,direct,145,3.450459,12.011459,16.486931875,128,490,490,-0.414,
+ime-native-long,1,106,ImePreedit,146,0,3.065,-46,composited,146,6.292333,11.969208,16.603564208,129,970,14,-0.413,display rejected
+ime-native-long,1,107,ImePreedit,147,0,2.198,-49,composited,147,11.888209,16.688042,16.6932625,130,490,14,-0.413,display rejected
+ime-native-long,1,108,ImePreedit,148,0,4.634,-45,composited,148,12.526167,24.383584,16.807603875,131,970,14,-0.414,display rejected
+ime-native-long,1,109,ImePreedit,149,0,2.121,-48,composited,149,5.573416,11.722833,16.903561416,132,490,14,-0.414,display rejected
+ime-native-long,1,110,ImeCommit,150,0,2.395,-45,composited,150,6.889333,11.105,17.016334458,133,970,14,-0.413,display rejected
+ime-native-long,1,113,ImePreedit,153,0,3.843,-51,direct,153,6.42025,15.950542,17.324264833,136,490,490,-0.414,
+ime-native-long,1,114,ImePreedit,154,0,2.021,-48,composited,154,5.597876,9.262917,17.417478125,137,970,14,-0.414,display rejected
+ime-native-long,1,115,ImePreedit,155,0,3.872,-46,composited,155,6.347791,15.338208,17.523655916,138,490,13,-0.414,display rejected
+ime-native-long,1,116,ImePreedit,156,0,4.139,-43,composited,156,5.506666,16.031041,17.628643916,139,970,14,-0.413,display rejected
+ime-native-long,1,117,ImePreedit,157,0,2.997,-45,composited,157,6.303751,14.550709,17.743941125,140,490,14,-0.414,display rejected
+ime-native-long,1,118,ImeCommit,158,0,3.175,-44,composited,158,5.29575,10.163709,17.838033375,141,970,14,-0.413,display rejected
+ime-native-long,1,121,ImePreedit,161,0,2.358,-46,direct,161,3.75825,9.236541,18.150829291,144,490,490,-0.414,
+ime-native-long,1,122,ImePreedit,162,0,3.81,-41,composited,162,19.282333,26.37575,18.259685083,145,970,14,-0.414,display rejected
+ime-native-long,1,123,ImePreedit,163,0,2.805,-49,composited,163,27.093833,32.680875,18.374255833,146,490,13,-0.413,display rejected
+ime-native-long,1,124,ImePreedit,164,0,2.792,-46,composited,164,4.51825,11.950291,18.450342833,147,970,14,-0.413,display rejected
+ime-native-long,1,125,ImePreedit,165,0,4.546,-37,composited,165,6.659833,19.142166,18.562886375,148,490,14,-0.414,display rejected
+ime-native-long,1,126,ImeCommit,166,0,4.506,-43,composited,166,5.233876,11.783667,18.674253,149,970,14,-0.414,display rejected
+ime-native-long,1,129,ImePreedit,169,0,2.149,-43,direct,169,11.173667,16.013084,18.990915958,152,490,490,-0.413,
+ime-native-long,1,130,ImePreedit,171,0,3.154,-40,composited,171,5.849,11.928125,19.086874375,154,490,11,-0.414,display rejected
+ime-native-long,1,131,ImePreedit,172,0,4.082,-46,composited,172,6.774458,15.510083,19.181612583,155,970,13,-0.414,display rejected
+ime-native-long,1,132,ImePreedit,173,0,4.442,-41,composited,173,5.149,16.534417,19.290535583,156,490,11,-0.414,display rejected
+ime-native-long,1,133,ImePreedit,174,0,4.632,-38,composited,174,7.337792,18.886208,19.404914916,157,970,11,-0.414,display rejected
+ime-native-long,1,134,ImeCommit,175,0,4.527,-34,composited,175,5.915167,12.964709,19.501939333,158,490,11,-0.414,display rejected
+ime-native-long,1,137,ImePreedit,178,0,2.621,-46,direct,178,8.785626,15.96775,19.807575041,161,970,970,-0.414,
+ime-native-long,1,138,ImePreedit,179,0,2.281,-43,composited,179,5.721083,9.906125,19.918143166,162,490,13,-0.414,display rejected
+ime-native-long,1,139,ImePreedit,180,0,2.341,-36,composited,180,5.298667,10.32025,20.003532458,163,970,14,-0.414,display rejected
+ime-native-long,1,140,ImePreedit,181,0,2.405,-31,composited,181,5.110292,11.19275,20.11035625,164,490,11,-0.413,display rejected
+ime-native-long,1,141,ImePreedit,182,0,4.52,-40,composited,182,6.785583,18.59225,20.224238583,165,970,11,-0.413,display rejected
+ime-native-long,1,142,ImeCommit,183,0,4.214,-43,composited,183,5.3705,12.109459,20.318598416,166,490,11,-0.414,display rejected
+ime-native-long,1,145,ImePreedit,186,0,2.228,-45,direct,186,3.441084,8.152667,20.616334125,169,970,970,-0.413,
+ime-native-long,1,146,ImePreedit,187,0,3.543,-40,composited,187,10.840792,17.759625,20.73068025,170,490,11,-0.414,display rejected
+ime-native-long,1,147,ImePreedit,188,0,3.5,-39,composited,188,25.786667,32.688125,20.857566083,171,970,13,-0.414,display rejected
+ime-native-long,1,148,ImePreedit,189,0,4.284,-39,composited,189,5.226375,13.935833,20.934800375,172,490,11,-0.413,display rejected
+ime-native-long,1,149,ImePreedit,191,0,2.203,-42,composited,191,4.785542,10.556875,21.039150958,174,490,14,-0.414,display rejected
+ime-native-long,1,150,ImeCommit,192,0,1.554,-46,composited,192,4.680791,7.412416,21.130217541,175,970,14,-0.413,display rejected
+ime-native-long,1,153,ImePreedit,195,0,2.91,-35,direct,195,3.472083,11.064416,21.452634333,178,490,490,-0.413,
+ime-native-long,1,154,ImePreedit,196,0,3.013,-42,composited,196,5.197416,10.198541,21.546880333,179,970,11,-0.414,display rejected
+ime-native-long,1,155,ImePreedit,197,0,3.713,-36,composited,197,5.938292,13.775208,21.659653375,180,490,11,-0.413,display rejected
+ime-native-long,1,156,ImePreedit,198,0,1.223,-46,composited,198,5.724416,12.612791,21.776318958,181,970,14,-0.413,display rejected
+ime-native-long,1,157,ImePreedit,199,0,1.13,-46,composited,199,7.207125,13.96275,21.874223291,182,490,14,-0.414,display rejected
+ime-native-long,1,158,ImeCommit,200,0,1.725,-41,composited,200,5.521167,8.33,21.966517791,183,970,14,-0.414,display rejected
+ime-native-long,1,161,ImePreedit,203,0,4.659,-31,direct,203,3.453542,13.5385,22.288475541,186,490,490,-0.414,
+ime-native-long,1,162,ImePreedit,204,0,2.832,-34,composited,204,16.900917,22.045292,22.380435375,187,970,13,-0.414,display rejected
+ime-native-long,1,163,ImePreedit,205,0,3.755,-36,composited,205,40.615417,49.318375,22.507536041,188,490,13,-0.414,display rejected
+ime-native-long,1,164,ImePreedit,206,0,4.677,-37,composited,206,38.609834,49.310792,22.624201583,189,970,11,-0.414,display rejected
+ime-native-long,1,165,ImePreedit,207,0,4.325,-33,composited,207,20.437417,32.5415,22.707548833,190,490,11,-0.413,display rejected
+ime-native-long,1,166,ImeCommit,208,0,4.354,-26,composited,208,6.167083,12.996959,22.78798725,191,970,11,-0.414,display rejected
+ime-native-long,1,169,ImePreedit,212,0,2.55,-37,direct,212,4.433625,11.680042,23.076331541,195,970,970,-0.413,
+ime-native-long,1,170,ImePreedit,213,0,2.585,-35,composited,213,5.26825,10.142125,23.168342333,196,490,14,-0.414,display rejected
+ime-native-long,1,171,ImePreedit,214,0,4.159,-32,composited,214,7.366625,16.046125,23.276305,197,970,11,-0.414,display rejected
+ime-native-long,1,172,ImePreedit,215,0,2.3,-36,composited,215,5.025333,10.771833,23.367652083,198,490,11,-0.414,display rejected
+ime-native-long,1,173,ImePreedit,216,0,4.706,-36,composited,216,7.221084,19.850209,23.47315,199,970,14,-0.414,display rejected
+ime-native-long,1,174,ImeCommit,217,0,5.087,-32,composited,217,6.380875,13.964833,23.569936416,200,490,14,-0.414,display rejected
+ime-native-long,1,177,ImePreedit,220,0,4.502,-29,direct,220,5.432334,15.949334,23.890870375,203,970,970,-0.414,
+ime-native-long,1,178,ImePreedit,221,0,3.44,-24,composited,221,15.886542,22.229042,23.997086958,204,490,11,-0.413,display rejected
+ime-native-long,1,179,ImePreedit,222,0,2.855,-35,composited,222,20.123875,26.521791,24.096627041,205,970,11,-0.414,display rejected
+ime-native-long,1,180,ImePreedit,223,0,1.847,-38,composited,223,5.595624,11.743124,24.206017541,206,490,11,-0.414,display rejected
+ime-native-long,1,181,ImePreedit,224,0,2.372,-37,composited,224,5.815,14.621125,24.32176525,207,970,11,-0.414,display rejected
+ime-native-long,1,182,ImeCommit,225,0,2.483,-35,composited,225,6.291375,10.191458,24.416953833,208,490,11,-0.414,display rejected
+ime-native-long,1,185,ImePreedit,228,0,2.879,-30,direct,228,3.742333,11.717875,24.703292458,211,970,970,-0.414,
+ime-native-long,1,186,ImePreedit,229,0,3.913,-22,composited,229,15.656458,22.661,24.809624,212,490,11,-0.414,display rejected
+ime-native-long,1,187,ImePreedit,230,0,4.856,-22,composited,230,7.824583,18.003292,24.905552083,213,970,13,-0.413,display rejected
+ime-native-long,1,188,ImePreedit,231,0,2.954,-31,composited,231,19.074125,26.418041,25.009622166,214,490,11,-0.414,display rejected
+ime-native-long,1,189,ImePreedit,233,0,3.218,-32,composited,233,5.393792,13.770625,25.107526375,216,490,11,-0.414,display rejected
+ime-native-long,1,190,ImeCommit,234,0,1.906,-40,composited,234,5.047083,8.468083,25.216716958,217,970,11,-0.413,display rejected
+ime-native-long,1,193,ImePreedit,237,0,4.558,-32,direct,237,3.440792,13.511001,25.52177875,220,490,490,-0.413,
+ime-native-long,1,194,ImePreedit,238,0,3.094,-25,composited,238,21.599584,26.811,25.6306345,221,970,13,-0.413,display rejected
+ime-native-long,1,195,ImePreedit,239,0,3.53,-32,composited,239,54.058375,61.543834,25.757505708,222,490,13,-0.414,display rejected
+ime-native-long,1,196,ImePreedit,240,0,4.36,-34,composited,240,39.074375,49.276708,25.857504791,223,970,13,-0.413,display rejected
+ime-native-long,1,197,ImePreedit,241,0,4.326,-35,composited,241,19.951625,32.564376,25.940851916,224,490,11,-0.413,display rejected
+ime-native-long,1,198,ImeCommit,242,0,3.489,-31,composited,242,5.271125,10.95225,26.019233666,225,970,11,-0.413,display rejected
+ime-native-long,1,201,ImePreedit,245,0,2.174,-31,direct,245,10.780666,16.059042,26.307514458,228,490,490,-0.414,
+ime-native-long,1,202,ImePreedit,246,0,2.706,-27,composited,246,5.811,11.064542,26.402563375,229,970,11,-0.414,display rejected
+ime-native-long,1,203,ImePreedit,247,0,3.754,-32,composited,247,6.795375,14.173291,26.499808833,230,490,13,-0.414,display rejected
+ime-native-long,1,204,ImePreedit,248,0,4.741,-21,composited,248,17.458458,29.088917,26.612581833,231,970,14,-0.414,display rejected
+ime-native-long,1,205,ImePreedit,249,0,4.133,-33,composited,249,18.221458,27.574958,26.724177958,232,490,14,-0.414,display rejected
+ime-native-long,1,206,ImeCommit,250,0,2.695,-27,composited,250,6.57775,11.861708,26.803469041,233,970,14,-0.414,display rejected
+ime-native-long,1,209,ImePreedit,254,0,2.72,-32,direct,254,3.471917,10.956042,27.102581583,237,970,970,-0.414,
+ime-native-long,1,210,ImePreedit,255,0,4.492,-32,composited,255,19.633375,27.80025,27.209601541,238,490,14,-0.414,display rejected
+ime-native-long,1,211,ImePreedit,256,0,2.476,-32,composited,256,27.443834,32.704542,27.324172375,239,970,13,-0.414,display rejected
+ime-native-long,1,212,ImePreedit,257,0,2.927,-26,composited,257,6.758583,13.043791,27.395907791,240,490,13,-0.414,display rejected
+ime-native-long,1,213,ImePreedit,258,0,4.935,-23,composited,258,7.335709,18.912959,27.517154333,241,970,14,-0.414,display rejected
+ime-native-long,1,214,ImeCommit,259,0,2.414,-34,composited,259,5.883792,9.817,27.59361975,242,490,14,-0.413,display rejected
+ime-native-long,1,217,ImePreedit,262,0,2.087,-30,direct,262,10.92875,16.023834,27.9074995,245,970,970,-0.413,
+ime-native-long,1,218,ImePreedit,263,0,2.44,-24,composited,263,6.044876,10.849459,28.002318916,246,490,14,-0.414,display rejected
+ime-native-long,1,219,ImePreedit,264,0,3.23,-21,composited,264,7.95375,16.198375,28.101400083,247,970,13,-0.413,display rejected
+ime-native-long,1,220,ImePreedit,265,0,2.092,-29,composited,265,8.84725,15.202792,28.212337375,248,490,14,-0.414,display rejected
+ime-native-long,1,221,ImePreedit,266,0,2.386,-24,composited,266,5.758875,11.946083,28.307496458,249,970,14,-0.414,display rejected
+ime-native-long,1,222,ImeCommit,267,0,2.239,-29,composited,267,6.119875,10.187417,28.400020458,250,490,14,-0.414,display rejected
+ime-native-long,1,225,ImePreedit,270,0,2.739,-25,direct,270,8.673375,15.951209,28.707491958,253,970,970,-0.414,
+ime-native-long,1,226,ImePreedit,271,0,3.978,-20,composited,271,6.384292,13.094417,28.821264166,254,490,14,-0.414,display rejected
+ime-native-long,1,227,ImePreedit,272,0,3.582,-20,composited,272,12.74075,20.298292,28.9146255,255,970,14,-0.414,display rejected
+ime-native-long,1,228,ImePreedit,273,0,4.437,-20,composited,273,9.992458,19.026958,29.014624583,256,490,14,-0.413,display rejected
+ime-native-long,1,229,ImePreedit,275,0,4.048,-24,composited,275,6.159667,15.198333,29.121261375,258,490,11,-0.414,display rejected
+ime-native-long,1,230,ImeCommit,276,0,4.018,-25,composited,276,6.504583,12.280583,29.219654125,259,970,11,-0.414,display rejected
+ime-native-long,1,233,ImePreedit,279,0,3.458,-25,direct,279,3.590375,12.612208,29.520831875,262,490,490,-0.414,
+ime-native-long,1,234,ImePreedit,280,0,3.202,-26,composited,280,5.113458,10.593458,29.635407458,263,970,14,-0.414,display rejected
+ime-native-long,1,235,ImePreedit,281,0,3.801,-24,composited,281,9.41675,17.539416,29.747721541,264,490,14,-0.414,display rejected
+ime-native-long,1,236,ImePreedit,282,0,4.492,-15,composited,282,15.470333,27.27125,29.857481958,265,970,14,-0.414,display rejected
+ime-native-long,1,237,ImePreedit,283,0,4.225,-21,composited,283,6.39925,18.02325,29.959575791,266,490,14,-0.414,display rejected
+ime-native-long,1,238,ImeCommit,284,0,5.05,-18,composited,284,6.064708,13.651916,30.057331125,267,970,14,-0.414,display rejected
+ime-native-long,1,241,ImePreedit,287,0,3.069,-24,direct,287,3.701958,11.3195,30.352092166,270,490,490,-0.414,
+ime-native-long,1,242,ImePreedit,288,0,2.615,-16,composited,288,17.18425,22.145709,30.463693125,271,970,11,-0.414,display rejected
+ime-native-long,1,243,ImePreedit,289,0,3.985,-24,composited,289,40.453917,49.356542,30.590793708,272,490,11,-0.414,display rejected
+ime-native-long,1,244,ImePreedit,290,0,4.156,-27,composited,290,21.907667,32.58325,30.6908095,273,970,11,-0.414,display rejected
+ime-native-long,1,245,ImePreedit,291,0,4.921,-16,composited,291,5.833208,18.477625,30.769639583,274,490,14,-0.414,display rejected
+ime-native-long,1,246,ImeCommit,292,0,4.776,-19,composited,292,6.916458,14.061708,30.884477875,275,970,14,-0.414,display rejected
+ime-native-long,1,249,ImePreedit,296,0,2.197,-21,direct,296,3.564042,9.086292,31.187253458,279,970,970,-0.414,
+ime-native-long,1,250,ImePreedit,297,0,3.331,-18,composited,297,6.391667,12.766792,31.280352083,280,490,11,-0.414,display rejected
+ime-native-long,1,251,ImePreedit,298,0,3.725,-21,composited,298,6.373166,15.565333,31.390422458,281,970,13,-0.414,display rejected
+ime-native-long,1,252,ImePreedit,299,0,2.065,-27,composited,299,12.528749,20.590208,31.494271541,282,490,11,-0.414,display rejected
+ime-native-long,1,253,ImePreedit,300,0,4.088,-22,composited,300,6.504917,16.632251,31.59518,283,970,11,-0.414,display rejected
+ime-native-long,1,254,ImeCommit,301,0,3.325,-25,composited,301,5.731875,11.051791,31.707464583,284,490,11,-0.414,display rejected
+ime-native-long,1,257,ImePreedit,304,0,3.399,-23,direct,304,6.926208,15.934208,32.024127458,287,970,970,-0.414,
+ime-native-long,1,258,ImePreedit,305,0,2.49,-23,composited,305,4.981167,9.856209,32.118029083,288,490,14,-0.414,display rejected
+ime-native-long,1,259,ImePreedit,306,0,4.191,-21,composited,306,8.483,16.505416,32.218487083,289,970,14,-0.414,display rejected
+ime-native-long,1,260,ImePreedit,307,0,2.228,-22,composited,307,25.552541,32.595791,32.340795291,290,490,13,-0.414,display rejected
+ime-native-long,1,261,ImePreedit,308,0,4.445,-21,composited,308,6.47475,18.036875,32.426219291,291,970,11,-0.414,display rejected
+ime-native-long,1,262,ImeCommit,309,0,2.46,-17,composited,309,5.988084,9.696126,32.520311541,292,490,11,-0.413,display rejected
+ime-native-long,1,265,ImePreedit,312,0,3.533,-19,direct,312,3.59475,10.185375,32.834484333,295,970,970,-0.414,
+ime-native-long,1,266,ImePreedit,313,0,4.074,-17,composited,313,22.647542,30.020042,32.942881083,296,490,14,-0.414,display rejected
+ime-native-long,1,267,ImePreedit,314,0,2.905,-13,composited,314,25.959125,32.627333,33.057451916,297,970,13,-0.413,display rejected
+ime-native-long,1,268,ImePreedit,315,0,3.249,-24,composited,315,5.467792,12.791375,33.1321705,298,490,14,-0.414,display rejected
+ime-native-long,1,269,ImePreedit,316,0,4.364,-10,composited,316,8.329292,19.149167,33.249745458,299,970,11,-0.414,display rejected
+ime-native-long,1,270,ImeCommit,317,0,5.109,-13,composited,317,6.388375,14.001875,33.346769875,300,490,11,-0.414,display rejected
+ime-native-long,1,273,ImePreedit,320,0,4.013,-13,direct,320,3.565167,12.866709,33.654347333,303,970,970,-0.414,
+ime-native-long,1,274,ImePreedit,321,0,3.653,-15,composited,321,6.664667,13.884042,33.746766166,304,490,11,-0.414,display rejected
+ime-native-long,1,275,ImePreedit,322,0,3.791,-10,composited,322,6.914167,15.564875,33.857065958,305,970,13,-0.414,display rejected
+ime-native-long,1,276,ImePreedit,323,0,5.143,-16,composited,323,7.239667,19.664333,33.9611445,306,490,11,-0.414,display rejected
+ime-native-long,1,277,ImePreedit,324,0,2.053,-18,composited,324,5.05675,10.344459,34.072132791,307,970,11,-0.414,display rejected
+ime-native-long,1,278,ImeCommit,325,0,4.12,-21,composited,325,8.906833,15.663916,34.173279208,308,490,11,-0.413,display rejected
+ime-native-long,1,281,ImePreedit,328,0,4.14,-15,direct,328,3.338541,13.27225,34.488131791,311,970,970,-0.414,
+ime-native-long,1,282,ImePreedit,329,0,2.312,-14,composited,329,6.882583,12.407291,34.580091666,312,490,13,-0.413,display rejected
+ime-native-long,1,283,ImePreedit,330,0,4.15,-13,composited,330,41.278667,49.31075,34.724088208,313,970,11,-0.414,display rejected
+ime-native-long,1,284,ImePreedit,331,0,3.301,-11,composited,331,24.325499,32.614124,34.824109,314,490,11,-0.413,display rejected
+ime-native-long,1,285,ImePreedit,332,0,3.07,-8,composited,332,6.929208,15.739958,34.907285541,315,970,11,-0.414,display rejected
+ime-native-long,1,286,ImeCommit,333,0,4.475,-6,composited,333,6.445958,13.41475,35.004768916,316,490,11,-0.414,display rejected
+ime-native-long,1,289,ImePreedit,337,0,3.842,-17,direct,337,3.475041,13.240333,35.321457291,320,490,490,-0.414,
+ime-native-long,1,290,ImePreedit,338,0,3.795,-18,composited,338,33.712583,39.4655,35.442857583,321,970,11,-0.414,display rejected
+ime-native-long,1,291,ImePreedit,339,0,2.962,-14,composited,339,26.612708,32.66625,35.540761791,322,490,13,-0.414,display rejected
+ime-native-long,1,292,ImePreedit,340,0,2.259,-14,composited,340,5.823709,11.627209,35.612497291,323,970,13,-0.413,display rejected
+ime-native-long,1,293,ImePreedit,341,0,4.586,-6,composited,341,6.588291,19.33975,35.732367041,324,490,14,-0.414,display rejected
+ime-native-long,1,294,ImeCommit,342,0,3.499,-6,composited,342,6.584125,12.011084,35.827793625,325,970,14,-0.414,display rejected
+ime-native-long,1,297,ImePreedit,345,0,3.469,-11,direct,345,3.554374,12.395208,36.137206875,328,490,490,-0.414,
+ime-native-long,1,298,ImePreedit,346,0,3.711,-15,composited,346,14.928208,21.065875,36.248119416,329,970,11,-0.414,display rejected
+ime-native-long,1,299,ImePreedit,347,0,3.405,-6,composited,347,25.805083,32.654917,36.374087291,330,490,13,-0.413,display rejected
+ime-native-long,1,300,ImePreedit,348,0,4.197,-4,composited,348,10.020958,21.210499,36.451780625,331,970,11,-0.414,display rejected
+ime-native-long,1,301,ImePreedit,349,0,4.228,-5,composited,349,6.334959,18.873292,36.554754291,332,490,11,-0.414,display rejected
+ime-native-long,1,302,ImeCommit,350,0,1.64,-6,composited,350,5.888334,8.883125,36.646509333,333,970,11,-0.413,display rejected
+ime-native-long,1,305,ImePreedit,353,0,3.857,-12,direct,353,8.756584,15.951167,36.957414333,336,490,490,-0.413,
+ime-native-long,1,306,ImePreedit,355,0,2.856,-8,composited,355,6.289959,11.689542,37.069809791,338,490,13,-0.414,display rejected
+ime-native-long,1,307,ImePreedit,356,0,3.831,-11,composited,356,20.380334,28.247709,37.1725625,339,970,11,-0.414,display rejected
+ime-native-long,1,308,ImePreedit,357,0,2.093,-11,composited,357,17.780208,24.446541,37.276173583,340,490,14,-0.413,display rejected
+ime-native-long,1,309,ImePreedit,358,0,4.616,-3,composited,358,6.776583,19.748334,37.378008458,341,970,11,-0.414,display rejected
+ime-native-long,1,310,ImeCommit,359,0,4.041,-9,composited,359,5.476375,11.721666,37.472559708,342,490,11,-0.414,display rejected
+ime-native-long,1,313,ImePreedit,362,0,3.919,-15,direct,362,6.323709,15.948584,37.790739875,345,970,970,-0.414,
+ime-native-long,1,314,ImePreedit,363,0,3.092,-9,composited,363,5.588333,10.642917,37.885329833,346,490,14,-0.414,display rejected
+ime-native-long,1,315,ImePreedit,364,0,2.731,-8,composited,364,5.075791,11.044041,37.985787875,347,970,14,-0.414,display rejected
+ime-native-long,1,316,ImePreedit,365,0,4.388,-3,composited,365,6.019375,17.33675,38.098560916,348,490,13,-0.414,display rejected
+ime-native-long,1,317,ImePreedit,366,0,2.672,-10,composited,366,6.501084,12.988417,38.207403375,349,970,11,-0.413,display rejected
+ime-native-long,1,318,ImeCommit,367,0,1.134,-16,composited,367,4.696833,6.778041,38.314766583,350,490,11,-0.413,display rejected
+ime-native-long,1,321,ImePreedit,370,0,4.689,-5,direct,370,3.463166,13.988041,38.622114625,353,970,970,-0.414,
+ime-native-long,1,322,ImePreedit,371,0,1.826,-15,composited,371,7.987833,12.422042,38.713615458,354,490,11,-0.414,display rejected
+ime-native-long,1,323,ImePreedit,372,0,3.522,-1,composited,372,40.697709,49.242542,38.857382625,355,970,13,-0.414,display rejected
+ime-native-long,1,324,ImePreedit,373,0,3.492,-6,composited,373,41.149375,49.27675,38.957381625,356,490,13,-0.414,display rejected
+ime-native-long,1,325,ImePreedit,374,0,4.957,-4,composited,374,19.366417,32.570375,39.057395375,357,970,13,-0.414,display rejected
+ime-native-long,1,326,ImeCommit,375,0,3.97,-12,composited,375,5.18225,11.011751,39.135777041,358,490,11,-0.414,display rejected
+ime-native-long,1,329,ImePreedit,378,0,4.176,-3,direct,378,3.603126,13.730375,39.455210583,361,970,970,-0.414,
+ime-native-long,1,330,ImePreedit,379,0,3.785,-7,composited,379,8.156291,15.266708,39.546711416,362,490,13,-0.414,display rejected
+ime-native-long,1,331,ImePreedit,380,0,2.874,-3,composited,380,8.61175,14.689458,39.656101916,363,970,13,-0.414,display rejected
+ime-native-long,1,332,ImePreedit,381,0,2.213,-10,composited,381,4.773917,11.422,39.747168541,364,490,13,-0.414,display rejected
+ime-native-long,1,333,ImePreedit,382,0,4.859,-8,composited,382,7.174041,19.574125,39.863145666,365,970,11,-0.414,display rejected
+ime-native-long,1,334,ImeCommit,383,0,4.905,-1,composited,383,6.423249,13.931708,39.959940625,366,490,11,-0.413,display rejected
+ime-native-long,1,337,ImePreedit,386,0,4.235,-5,direct,386,3.641583,13.710458,40.271869583,369,970,970,-0.414,
+ime-native-long,1,338,ImePreedit,387,0,4.004,-5,composited,387,13.632666,19.916374,40.380266416,370,490,13,-0.413,display rejected
+ime-native-long,1,339,ImePreedit,388,0,2.693,-6,composited,388,40.515709,46.659334,40.507367041,371,970,13,-0.414,display rejected
+ime-native-long,1,340,ImePreedit,389,0,4.554,4,composited,389,38.312792,49.300208,40.624032583,372,490,11,-0.414,display rejected
+ime-native-long,1,341,ImePreedit,390,0,4.379,-6,composited,390,20.006166,32.52825,40.707379791,373,970,11,-0.414,display rejected
+ime-native-long,1,342,ImeCommit,391,0,2.599,-3,composited,391,6.651999,10.807541,40.785532041,374,490,11,-0.414,display rejected
+ime-native-long,1,345,ImePreedit,395,0,3.507,-2,direct,395,3.606167,12.574167,41.09512375,378,490,490,-0.413,
+ime-native-long,1,346,ImePreedit,396,0,2.447,-7,composited,396,28.554084,32.711125,41.224026958,379,970,11,-0.414,display rejected
+ime-native-long,1,347,ImePreedit,397,0,2.801,-6,composited,397,15.388208,22.122583,41.307374166,380,490,14,-0.413,display rejected
+ime-native-long,1,348,ImePreedit,398,0,1.977,-8,composited,398,4.73575,10.107875,41.401504458,381,970,14,-0.413,display rejected
+ime-native-long,1,349,ImePreedit,399,0,4.883,4,composited,399,6.839459,18.446917,41.515195333,382,490,14,-0.414,display rejected
+ime-native-long,1,350,ImeCommit,400,0,2.685,0,composited,400,6.056959,10.416542,41.609695583,383,970,14,-0.414,display rejected
+ime-native-long,1,353,ImePreedit,403,0,4.265,-4,direct,403,3.5575,13.500041,41.921624541,386,490,490,-0.414,
+ime-native-long,1,354,ImePreedit,404,0,3.692,1,composited,404,11.540625,18.051875,42.026128833,387,970,13,-0.414,display rejected
+ime-native-long,1,355,ImePreedit,405,0,2.564,-3,composited,405,37.8165,44.053458,42.157351541,388,490,14,-0.414,display rejected
+ime-native-long,1,356,ImePreedit,406,0,2.602,-1,composited,406,27.463708,32.731791,42.257365166,389,970,11,-0.413,display rejected
+ime-native-long,1,357,ImePreedit,407,0,4.209,2,composited,407,6.686375,19.129666,42.343939916,390,490,11,-0.414,display rejected
+ime-native-long,1,358,ImeCommit,408,0,4.714,-1,composited,408,5.6925,12.681959,42.440696791,391,970,11,-0.414,display rejected
+ime-native-long,1,361,ImePreedit,411,0,3.353,-4,direct,411,7.082541,15.97225,42.757359708,394,490,490,-0.413,
+ime-native-long,1,362,ImePreedit,412,0,2.395,-4,composited,412,5.255167,9.932501,42.851261291,395,970,14,-0.414,display rejected
+ime-native-long,1,363,ImePreedit,413,0,3.354,5,composited,413,14.645917,21.1915,42.947597333,396,490,11,-0.414,display rejected
+ime-native-long,1,364,ImePreedit,414,0,6.042,8,composited,414,6.879125,20.276251,43.047825875,397,970,14,-0.414,display rejected
+ime-native-long,1,365,ImePreedit,415,0,3.72,12,composited,415,6.231583,17.115291,43.148054333,398,490,11,-0.413,display rejected
+ime-native-long,1,366,ImeCommit,416,0,5.023,4,composited,416,6.857792,14.5285,43.246676583,399,970,11,-0.414,display rejected
+ime-native-long,1,369,ImePreedit,419,0,6.702,4,direct,419,3.854292,13.609208,43.538276,402,490,490,-0.414,
+ime-native-long,1,370,ImePreedit,420,0,2.748,-1,composited,420,17.098708,22.184249,43.646902291,403,970,11,-0.413,display rejected
+ime-native-long,1,371,ImePreedit,421,0,4.216,1,composited,421,40.176166,49.330042,43.774002916,404,490,11,-0.414,display rejected
+ime-native-long,1,372,ImePreedit,422,0,2.089,-2,composited,422,41.1295,49.349334,43.874002,405,970,11,-0.414,display rejected
+ime-native-long,1,373,ImePreedit,423,0,2.54,-3,composited,423,24.994833,32.667333,43.957334541,406,490,11,-0.414,display rejected
+ime-native-long,1,374,ImeCommit,424,0,4.494,-1,composited,424,6.065208,12.605167,44.037328666,407,970,11,-0.413,display rejected
+ime-native-long,1,377,ImePreedit,427,0,3.865,2,direct,427,3.80925,13.514083,44.354934958,410,490,490,-0.414,
+ime-native-long,1,378,ImePreedit,428,0,2.357,0,composited,428,8.438416,13.014958,44.450328333,411,970,13,-0.413,display rejected
+ime-native-long,1,379,ImePreedit,429,0,2.788,-1,composited,429,5.1355,10.766042,44.551474791,412,490,14,-0.414,display rejected
+ime-native-long,1,380,ImePreedit,430,0,4.076,11,composited,430,6.386958,16.367333,44.684806833,413,970,14,-0.414,display rejected
+ime-native-long,1,381,ImePreedit,431,0,4.382,5,composited,431,6.304625,18.992667,44.7882395,414,490,14,-0.414,display rejected
+ime-native-long,1,382,ImeCommit,432,0,1.803,-3,composited,432,6.134542,9.55375,44.879765041,415,970,14,-0.414,display rejected
+ime-native-long,1,385,ImePreedit,436,0,2.627,-2,direct,436,11.210917,17.959417,45.179328,419,970,970,-0.414,
+ime-native-long,1,386,ImePreedit,437,0,2.224,0,composited,437,30.541667,34.767125,45.29276475,420,490,14,-0.414,display rejected
+ime-native-long,1,387,ImePreedit,438,0,3.403,8,composited,438,25.573334,32.679167,45.390669,421,970,13,-0.414,display rejected
+ime-native-long,1,388,ImePreedit,439,0,4.716,13,composited,439,28.146291,39.655833,45.490653416,422,490,11,-0.414,display rejected
+ime-native-long,1,389,ImePreedit,440,0,2.57,7,composited,440,23.377084,32.590875,45.5906525,423,970,13,-0.414,display rejected
+ime-native-long,1,390,ImeCommit,441,0,4.987,7,composited,441,6.6065,13.536459,45.688231,424,490,11,-0.414,display rejected
+ime-native-long,1,393,ImePreedit,444,0,2.136,0,direct,444,10.619125,16.032958,45.990662541,427,970,970,-0.414,
+ime-native-long,1,394,ImePreedit,445,0,4.154,13,composited,445,13.009,20.780083,46.095502375,428,490,11,-0.413,display rejected
+ime-native-long,1,395,ImePreedit,446,0,4.389,7,composited,446,40.724625,49.363875,46.223982666,429,970,13,-0.414,display rejected
+ime-native-long,1,396,ImePreedit,447,0,4.584,11,composited,447,40.389167,49.37725,46.323981875,430,490,13,-0.414,display rejected
+ime-native-long,1,397,ImePreedit,448,0,3.056,8,composited,448,25.779917,32.601167,46.407311458,431,970,13,-0.414,display rejected
+ime-native-long,1,398,ImeCommit,449,0,4.549,16,composited,449,6.452042,13.420792,46.4882235,432,490,11,-0.413,display rejected
+ime-native-long,1,401,ImePreedit,452,0,3.411,4,direct,452,9.464291,15.940791,46.773988541,435,970,970,-0.414,
+ime-native-long,1,402,ImePreedit,453,0,3.006,13,composited,453,17.147291,22.696625,46.880664083,436,490,14,-0.413,display rejected
+ime-native-long,1,403,ImePreedit,454,0,1.986,1,composited,454,43.324333,49.380583,47.007305833,437,970,14,-0.413,display rejected
+ime-native-long,1,404,ImePreedit,456,0,13.213,2,composited,456,47.382041,66.032833,47.12397275,439,970,13,-0.414,display rejected
+ime-native-long,1,405,ImePreedit,457,0,2.924,9,composited,457,23.117041,32.583875,47.190651958,440,490,11,-0.414,display rejected
+ime-native-long,1,406,ImeCommit,458,0,4.259,11,composited,458,6.465708,13.235791,47.271319916,441,970,11,-0.414,display rejected
+ime-native-long,1,409,ImePreedit,461,0,2.506,7,direct,461,9.648834,15.90075,47.573981041,444,490,490,-0.413,
+ime-native-long,1,410,ImePreedit,462,0,2.858,12,composited,462,16.834834,22.009209,47.679968125,445,970,14,-0.414,display rejected
+ime-native-long,1,411,ImePreedit,463,0,4.73,7,composited,463,31.917208,41.333,47.790631708,446,490,14,-0.413,display rejected
+ime-native-long,1,412,ImePreedit,464,0,4.599,15,composited,464,37.287208,49.190667,47.907302125,447,970,14,-0.413,display rejected
+ime-native-long,1,413,ImePreedit,465,0,1.968,3,composited,465,7.318791,16.037833,47.973977958,448,490,14,-0.414,display rejected
+ime-native-long,1,414,ImeCommit,466,0,2.092,7,composited,466,4.800541,7.881666,48.065813583,449,970,14,-0.414,display rejected
+ime-native-long,1,417,ImePreedit,469,0,3.642,11,direct,469,3.689834,12.838875,48.370875333,452,490,490,-0.414,
+ime-native-long,1,418,ImePreedit,470,0,3.716,4,composited,470,28.417917,34.724334,48.492734583,453,970,14,-0.414,display rejected
+ime-native-long,1,419,ImePreedit,471,0,4.416,9,composited,471,24.863126,32.66775,48.590624166,454,490,14,-0.414,display rejected
+ime-native-long,1,420,ImePreedit,472,0,4.533,19,composited,472,22.677042,32.620625,48.690637958,455,970,13,-0.414,display rejected
+ime-native-long,1,421,ImePreedit,473,0,4.44,7,composited,473,6.94775,19.334292,48.777442083,456,490,11,-0.414,display rejected
+ime-native-long,1,422,ImeCommit,474,0,7.186,13,composited,474,6.195042,15.663667,48.877211666,457,970,11,-0.414,display rejected
+ime-native-long,1,425,ImePreedit,478,0,2.043,4,direct,478,6.978875,12.843875,49.170867791,461,970,970,-0.414,
+ime-native-long,1,426,ImePreedit,479,0,3.133,13,composited,479,14.861167,20.224583,49.279723583,462,490,13,-0.413,display rejected
+ime-native-long,1,427,ImePreedit,480,0,2.985,11,composited,480,25.923083,32.622541,49.407303833,463,970,13,-0.414,display rejected
+ime-native-long,1,428,ImePreedit,481,0,4.222,14,composited,481,5.809958,17.107166,49.481098541,464,490,13,-0.414,display rejected
+ime-native-long,1,429,ImePreedit,482,0,4.469,14,composited,482,6.087667,18.784417,49.596846208,465,970,11,-0.414,display rejected
+ime-native-long,1,430,ImeCommit,483,0,4.167,17,composited,483,6.252959,13.044459,49.694100125,466,490,11,-0.414,display rejected
+ime-native-long,1,433,ImePreedit,486,0,4.015,19,direct,486,3.689459,13.510501,50.00488175,469,970,970,-0.414,
+ime-native-long,1,434,ImePreedit,487,0,2.246,6,composited,487,25.602126,30.417084,50.109386041,470,490,14,-0.414,display rejected
+ime-native-long,1,435,ImePreedit,488,0,2.433,9,composited,488,28.108875,32.745667,50.22395675,471,970,13,-0.413,display rejected
+ime-native-long,1,436,ImePreedit,489,0,3.583,16,composited,489,23.1645,33.431959,50.32394125,472,490,14,-0.414,display rejected
+ime-native-long,1,437,ImePreedit,490,0,2.395,10,composited,490,26.092625,32.58075,50.440606791,473,970,13,-0.413,display rejected
+ime-native-long,1,438,ImeCommit,491,0,4.475,14,composited,491,6.291542,13.214125,50.521289333,474,490,11,-0.414,display rejected
+ime-native-long,1,441,ImePreedit,494,0,2.491,16,direct,494,3.683291,8.982,50.816279875,477,970,970,-0.414,
+ime-native-long,1,442,ImePreedit,495,0,3.077,20,composited,495,16.573209,22.398042,50.9303965,478,490,11,-0.413,display rejected
+ime-native-long,1,443,ImePreedit,496,0,3.613,19,composited,496,4.882041,10.8065,51.018768958,479,970,14,-0.413,display rejected
+ime-native-long,1,444,ImePreedit,498,0,1.688,7,composited,498,6.375291,13.124042,51.126043166,481,970,11,-0.414,display rejected
+ime-native-long,1,445,ImePreedit,499,0,3.737,13,composited,499,5.373542,16.371042,51.238408208,482,490,11,-0.414,display rejected
+ime-native-long,1,446,ImeCommit,500,0,2.349,17,composited,500,5.828625,9.382667,51.347518208,483,970,11,-0.414,display rejected
+ime-native-long,1,449,ImePreedit,503,0,3.523,18,direct,503,3.6015,12.809167,51.654177833,486,490,490,-0.413,
+ime-native-long,1,450,ImePreedit,504,0,3.943,19,composited,504,17.03825,23.971459,51.759370541,487,970,13,-0.413,display rejected
+ime-native-long,1,451,ImePreedit,505,0,4.451,12,composited,505,6.865583,15.855958,51.853462791,488,490,13,-0.414,display rejected
+ime-native-long,1,452,ImePreedit,506,0,3.581,20,composited,506,5.34975,15.252667,51.961884291,489,970,14,-0.414,display rejected
+ime-native-long,1,453,ImePreedit,507,0,4.381,25,composited,507,6.490084,18.57025,52.07603425,490,490,14,-0.413,display rejected
+ime-native-long,1,454,ImeCommit,508,0,2.45,17,composited,508,4.737625,8.761958,52.168069708,491,970,14,-0.414,display rejected
+ime-native-long,1,457,ImePreedit,511,0,3.421,13,direct,511,3.534125,12.578083,52.487282333,494,490,490,-0.414,
+ime-native-long,1,458,ImePreedit,512,0,3.372,15,composited,512,18.739126,24.851459,52.59060125,495,970,13,-0.414,display rejected
+ime-native-long,1,459,ImePreedit,513,0,2.41,13,composited,513,5.508917,10.792333,52.689541958,496,490,11,-0.414,display rejected
+ime-native-long,1,460,ImePreedit,514,0,2.883,15,composited,514,5.541375,12.116084,52.7938415,497,970,14,-0.414,display rejected
+ime-native-long,1,461,ImePreedit,515,0,2.61,21,composited,515,8.375916,15.001958,52.892693166,498,490,14,-0.414,display rejected
+ime-native-long,1,462,ImeCommit,516,0,2.796,21,composited,516,7.144042,11.465584,52.987932833,499,970,14,-0.414,display rejected
+ime-native-long,1,465,ImePreedit,520,0,3.32,20,direct,520,3.858166,13.071875,53.304391791,503,970,970,-0.413,
+ime-native-long,1,466,ImePreedit,521,0,4.361,15,composited,521,21.365333,28.472541,53.409355,504,490,14,-0.414,display rejected
+ime-native-long,1,467,ImePreedit,522,0,2.456,15,composited,522,27.005126,32.681334,53.523931125,505,970,13,-0.414,display rejected
+ime-native-long,1,468,ImePreedit,523,0,2.19,16,composited,523,6.409666,11.96175,53.598414958,506,490,14,-0.414,display rejected
+ime-native-long,1,469,ImePreedit,524,0,3.609,21,composited,524,6.386,15.482209,53.713933166,507,970,11,-0.414,display rejected
+ime-native-long,1,470,ImeCommit,525,0,3.66,15,composited,525,6.325626,11.359875,53.80935125,508,490,11,-0.414,display rejected
+ime-native-long,1,473,ImePreedit,528,0,3.955,19,direct,528,6.152874,15.939333,54.123919375,511,970,970,-0.414,
+ime-native-long,1,474,ImePreedit,529,0,2.32,21,composited,529,5.435958,9.907375,54.217820958,512,490,13,-0.414,display rejected
+ime-native-long,1,475,ImePreedit,530,0,3.064,17,composited,530,32.217292,38.779959,54.357236666,513,970,11,-0.414,display rejected
+ime-native-long,1,476,ImePreedit,531,0,3.953,16,composited,531,38.941417,49.235334,54.47390225,514,490,11,-0.414,display rejected
+ime-native-long,1,477,ImePreedit,532,0,4.843,39,composited,532,19.7855,32.597041,54.557249416,515,970,11,-0.414,display rejected
+ime-native-long,1,478,ImeCommit,533,0,2.126,14,composited,533,5.60025,8.725459,54.633336375,516,490,11,-0.414,display rejected
+ime-native-long,1,481,ImePreedit,536,0,3.764,22,direct,536,3.596,13.059833,54.95437625,519,970,970,-0.414,
+ime-native-long,1,482,ImePreedit,537,0,2.643,21,composited,537,17.131417,21.978708,55.05724475,520,490,11,-0.413,display rejected
+ime-native-long,1,483,ImePreedit,538,0,4.258,22,composited,538,41.442334,49.361084,55.190562125,521,970,14,-0.414,display rejected
+ime-native-long,1,484,ImePreedit,539,0,2.561,21,composited,539,42.643959,49.324708,55.307227708,522,490,13,-0.414,display rejected
+ime-native-long,1,485,ImePreedit,540,0,4.433,18,composited,540,20.154916,32.510833,55.390574916,523,970,13,-0.414,display rejected
+ime-native-long,1,486,ImeCommit,541,0,4.677,17,composited,541,5.815417,12.358,55.470324916,524,490,11,-0.413,display rejected
+ime-native-long,1,489,ImePreedit,544,0,4.248,23,direct,544,3.492791,12.186458,55.786792333,527,970,970,-0.414,
+ime-native-long,1,490,ImePreedit,545,0,3.335,22,composited,545,21.512042,27.684583,55.890570166,528,490,13,-0.414,display rejected
+ime-native-long,1,491,ImePreedit,546,0,1.839,16,composited,546,17.749208,23.034625,55.990190833,529,970,14,-0.414,display rejected
+ime-native-long,1,492,ImePreedit,547,0,2.094,22,composited,547,11.585166,17.972958,56.086526833,530,490,14,-0.413,display rejected
+ime-native-long,1,493,ImePreedit,548,0,3.303,22,composited,548,5.302208,16.710083,56.203651375,531,970,14,-0.413,display rejected
+ime-native-long,1,494,ImeCommit,549,0,2.032,19,composited,549,5.234,8.700083,56.295406375,532,490,14,-0.414,display rejected
+ime-native-long,1,497,ImePreedit,552,0,3.163,22,direct,552,8.053958,15.977458,56.607229375,535,970,970,-0.414,
+ime-native-long,1,498,ImePreedit,553,0,3.82,30,composited,553,5.721083,13.153416,56.721001583,536,490,11,-0.414,display rejected
+ime-native-long,1,499,ImePreedit,554,0,2.843,23,composited,554,6.68475,13.004499,56.809552541,537,970,11,-0.414,display rejected
+ime-native-long,1,500,ImePreedit,555,0,3.819,23,composited,555,16.945791,24.472041,56.920081791,538,490,14,-0.413,display rejected
+ime-native-long,1,501,ImePreedit,556,0,5.101,28,composited,556,7.053167,19.671959,57.023892875,539,970,14,-0.414,display rejected
+ime-native-long,1,502,ImeCommit,558,0,4.462,23,composited,558,5.551084,12.208667,57.127822541,541,970,11,-0.414,display rejected
+ime-native-long,1,505,ImePreedit,561,0,2.707,24,direct,561,3.758042,10.777292,57.4187335,544,490,490,-0.414,
+ime-native-long,1,506,ImePreedit,562,0,3.118,28,composited,562,5.365875,11.024375,57.535603833,545,970,14,-0.414,display rejected
+ime-native-long,1,507,ImePreedit,563,0,4.539,27,composited,563,6.305208,15.877375,57.62826825,546,490,11,-0.414,display rejected
+ime-native-long,1,508,ImePreedit,564,0,1.471,18,composited,564,5.649458,10.320083,57.732389333,547,970,14,-0.414,display rejected
+ime-native-long,1,509,ImePreedit,565,0,1.38,18,composited,565,7.026416,14.703958,57.848604416,548,490,14,-0.414,display rejected
+ime-native-long,1,510,ImeCommit,566,0,2.135,20,composited,566,9.284459,13.021167,57.94653825,549,970,14,-0.414,display rejected
+ime-native-long,1,513,ImePreedit,569,0,2.014,24,direct,569,3.342,8.527292,58.24976425,552,490,490,-0.414,
+ime-native-long,1,514,ImePreedit,570,0,2.356,30,composited,570,17.460125,21.982541,58.363201,553,970,11,-0.414,display rejected
+ime-native-long,1,515,ImePreedit,571,0,3.71,25,composited,571,25.545417,32.682042,58.490531125,554,490,14,-0.413,display rejected
+ime-native-long,1,516,ImePreedit,572,0,4.158,30,composited,572,4.875875,15.914583,58.573878291,555,970,11,-0.414,display rejected
+ime-native-long,1,517,ImePreedit,573,0,4.229,35,composited,573,12.16225,24.381209,58.682380375,556,490,11,-0.413,display rejected
+ime-native-long,1,518,ImeCommit,574,0,2.965,28,composited,574,6.797999,12.217708,58.778716375,557,970,11,-0.414,display rejected
+ime-native-long,1,521,ImePreedit,578,0,2.335,27,direct,578,3.616875,8.779416,59.08331925,561,970,970,-0.414,
+ime-native-long,1,522,ImePreedit,579,0,2.322,25,composited,579,17.043125,21.351875,59.195838083,562,490,11,-0.414,display rejected
+ime-native-long,1,523,ImePreedit,580,0,3.842,27,composited,580,25.138917,32.670208,59.307190125,563,970,11,-0.413,display rejected
+ime-native-long,1,524,ImePreedit,581,0,2.288,22,composited,581,24.452834,32.701834,59.407205541,564,490,13,-0.413,display rejected
+ime-native-long,1,525,ImePreedit,582,0,4.36,45,composited,582,5.807083,15.949833,59.507202875,565,970,11,-0.414,display rejected
+ime-native-long,1,526,ImeCommit,583,0,3.614,26,composited,583,6.661583,12.813417,59.604078291,566,490,11,-0.414,display rejected
+ime-native-long,1,529,ImePreedit,586,0,3.941,31,direct,586,5.812583,15.916875,59.923864791,569,970,970,-0.414,
+ime-native-long,1,530,ImePreedit,587,0,2.645,30,composited,587,5.974875,10.821083,60.018684333,570,490,14,-0.413,display rejected
+ime-native-long,1,531,ImePreedit,588,0,2.26,26,composited,588,6.378916,12.410083,60.112955041,571,970,14,-0.413,display rejected
+ime-native-long,1,532,ImePreedit,589,0,4.254,31,composited,589,27.596,37.200084,60.240514625,572,490,11,-0.414,display rejected
+ime-native-long,1,533,ImePreedit,590,0,4.592,27,composited,590,11.906833,24.491291,60.340528375,573,970,11,-0.414,display rejected
+ime-native-long,1,534,ImeCommit,591,0,2.58,30,composited,591,5.780709,9.685625,60.434199666,574,490,11,-0.414,display rejected
+ime-native-long,1,537,ImePreedit,594,0,3.84,30,direct,594,6.417583,15.970417,60.740523833,577,970,970,-0.414,
+ime-native-long,1,538,ImePreedit,595,0,3.162,36,composited,595,6.463417,12.200417,60.853378125,578,490,11,-0.414,display rejected
+ime-native-long,1,539,ImePreedit,596,0,1.394,25,composited,596,29.7635,33.853583,60.967528,579,970,11,-0.414,display rejected
+ime-native-long,1,540,ImePreedit,597,0,2.65,30,composited,597,5.000667,11.319333,61.040143333,580,490,11,-0.414,display rejected
+ime-native-long,1,541,ImePreedit,599,0,4.691,27,composited,599,5.570125,16.471792,61.149941708,582,490,11,-0.414,display rejected
+ime-native-long,1,542,ImeCommit,600,0,2.612,29,composited,600,5.47425,9.565416,61.260199041,583,970,11,-0.414,display rejected
+ime-native-long,1,545,ImePreedit,603,0,3.996,29,direct,603,3.417875,12.666542,61.553863708,586,490,490,-0.413,
+ime-native-long,1,546,ImePreedit,604,0,2.071,30,composited,604,4.84775,8.56825,61.666374083,587,970,13,-0.414,display rejected
+ime-native-long,1,547,ImePreedit,605,0,3.702,38,composited,605,7.114042,15.527292,61.77369925,588,490,13,-0.413,display rejected
+ime-native-long,1,548,ImePreedit,606,0,4.421,40,composited,606,5.6345,16.660209,61.872559458,589,970,11,-0.414,display rejected
+ime-native-long,1,549,ImePreedit,607,0,2.68,34,composited,607,5.560917,14.327542,61.971411166,590,490,11,-0.414,display rejected
+ime-native-long,1,550,ImeCommit,608,0,4.442,40,composited,608,6.088916,12.9515,62.0688945,591,970,11,-0.414,display rejected
+ime-native-long,1,553,ImePreedit,611,0,3.743,31,direct,611,3.655,13.053875,62.387639666,594,490,490,-0.414,
+ime-native-long,1,554,ImePreedit,612,0,2.352,34,composited,612,16.0785,20.587459,62.492602875,595,970,13,-0.414,display rejected
+ime-native-long,1,555,ImePreedit,613,0,3.49,30,composited,613,35.780458,43.011333,62.623826333,596,490,11,-0.414,display rejected
+ime-native-long,1,556,ImePreedit,614,0,3.089,39,composited,614,23.014875,32.614292,62.723839875,597,970,14,-0.414,display rejected
+ime-native-long,1,557,ImePreedit,615,0,3.848,42,composited,615,7.386001,18.016584,62.809266625,598,490,14,-0.414,display rejected
+ime-native-long,1,558,ImeCommit,616,0,3.353,37,composited,616,6.725958,12.547875,62.905883041,599,970,14,-0.414,display rejected
+ime-native-long,1,561,ImePreedit,620,0,3.929,35,direct,620,3.907167,12.825166,63.220735666,603,970,970,-0.414,
+ime-native-long,1,562,ImePreedit,621,0,2.602,33,composited,621,25.633749,30.095708,63.323833541,604,490,11,-0.414,display rejected
+ime-native-long,1,563,ImePreedit,622,0,2.988,45,composited,622,56.385874,63.041124,63.45715425,605,970,14,-0.414,display rejected
+ime-native-long,1,564,ImePreedit,623,0,2.097,31,composited,623,42.160583,49.343666,63.557150125,606,490,14,-0.414,display rejected
+ime-native-long,1,565,ImePreedit,624,0,4.939,32,composited,624,19.819291,32.578,63.640497291,607,970,11,-0.414,display rejected
+ime-native-long,1,566,ImeCommit,625,0,4.729,42,composited,625,6.031959,13.030334,63.72093575,608,490,11,-0.413,display rejected
+ime-native-long,1,569,ImePreedit,628,0,2.799,31,direct,628,7.9225,15.964791,64.007159666,611,970,970,-0.413,
+ime-native-long,1,570,ImePreedit,629,0,3.169,37,composited,629,6.105916,11.66975,64.119555083,612,490,13,-0.414,display rejected
+ime-native-long,1,571,ImePreedit,630,0,2.251,35,composited,630,13.861874,19.117291,64.223825125,613,970,11,-0.414,display rejected
+ime-native-long,1,572,ImePreedit,631,0,3.937,54,composited,631,43.564792,51.697458,64.340476083,614,490,11,-0.414,display rejected
+ime-native-long,1,573,ImePreedit,632,0,2.56,37,composited,632,24.957042,32.581875,64.423808583,615,970,13,-0.414,display rejected
+ime-native-long,1,574,ImeCommit,633,0,1.734,30,composited,633,6.041959,9.059334,64.500139666,616,490,11,-0.413,display rejected
+ime-native-long,1,577,ImePreedit,636,0,3.437,45,direct,636,7.990083,16.053083,64.823818666,619,970,970,-0.414,
+ime-native-long,1,578,ImePreedit,637,0,3.176,38,composited,637,5.764,11.300292,64.919097125,620,490,11,-0.413,display rejected
+ime-native-long,1,579,ImePreedit,638,0,2.67,37,composited,638,5.331375,10.737958,65.015203666,621,970,11,-0.413,display rejected
+ime-native-long,1,580,ImePreedit,640,0,2.901,44,composited,640,4.70625,12.032083,65.140483208,623,970,11,-0.414,display rejected
+ime-native-long,1,581,ImePreedit,641,0,4.086,46,composited,641,6.553208,18.941458,65.260161458,624,490,11,-0.414,display rejected
+ime-native-long,1,582,ImeCommit,642,0,3.872,37,composited,642,7.010417,12.430667,65.355171583,625,970,11,-0.414,display rejected
+ime-native-long,1,585,ImePreedit,645,0,2.033,32,direct,645,11.804625,16.075042,65.640477666,628,490,490,-0.414,
+ime-native-long,1,586,ImePreedit,646,0,2.893,36,composited,646,5.19325,10.183875,65.734608791,629,970,11,-0.414,display rejected
+ime-native-long,1,587,ImePreedit,647,0,3.707,37,composited,647,5.807958,11.68575,65.832313083,630,490,14,-0.414,display rejected
+ime-native-long,1,588,ImePreedit,648,0,3.031,45,composited,648,38.388167,45.686667,65.970226125,631,970,14,-0.414,display rejected
+ime-native-long,1,589,ImePreedit,649,0,4.061,41,composited,649,5.758416,17.107166,66.037580583,632,490,14,-0.414,display rejected
+ime-native-long,1,590,ImeCommit,650,0,2.599,42,composited,650,5.475417,9.374459,66.1471495,633,970,14,-0.413,display rejected
+ime-native-long,1,593,ImePreedit,653,0,3.598,40,direct,653,3.670834,12.659917,66.453817625,636,490,490,-0.414,
+ime-native-long,1,594,ImePreedit,654,0,1.789,35,composited,654,9.421583,13.087916,66.546227833,637,970,13,-0.414,display rejected
+ime-native-long,1,595,ImePreedit,655,0,1.962,38,composited,655,36.92975,42.914208,66.673787416,638,490,14,-0.414,display rejected
+ime-native-long,1,596,ImePreedit,656,0,3.653,48,composited,656,40.467416,49.339583,66.790457375,639,970,14,-0.414,display rejected
+ime-native-long,1,597,ImePreedit,657,0,4.255,42,composited,657,5.4715,15.970625,66.857133708,640,490,14,-0.414,display rejected
+ime-native-long,1,598,ImeCommit,658,0,3.291,45,composited,658,6.820208,12.148583,66.95332075,641,970,14,-0.414,display rejected
+ime-native-long,1,601,ImePreedit,662,0,3.665,41,direct,662,6.7035,15.584084,67.243271375,645,970,970,-0.414,
+ime-native-long,1,602,ImePreedit,663,0,3.969,45,composited,663,26.931584,34.776584,67.35922375,646,490,14,-0.414,display rejected
+ime-native-long,1,603,ImePreedit,664,0,4.048,41,composited,664,4.625458,12.830708,67.437337958,647,970,14,-0.414,display rejected
+ime-native-long,1,604,ImePreedit,665,0,2.427,43,composited,665,5.872833,11.885542,67.530240333,648,490,11,-0.414,display rejected
+ime-native-long,1,605,ImePreedit,666,0,1.753,38,composited,666,6.331166,14.259208,67.639401291,649,970,11,-0.414,display rejected
+ime-native-long,1,606,ImeCommit,667,0,2.66,48,composited,667,6.735292,10.714667,67.733442625,650,490,11,-0.414,display rejected
+ime-native-long,1,609,ImePreedit,670,0,4.313,46,direct,670,3.887083,13.952542,68.038504375,653,970,970,-0.414,
+ime-native-long,1,610,ImePreedit,671,0,4.404,43,composited,671,5.693833,13.332166,68.130234708,654,490,11,-0.413,display rejected
+ime-native-long,1,611,ImePreedit,672,0,4.539,41,composited,672,10.464666,19.518958,68.235732625,655,970,11,-0.414,display rejected
+ime-native-long,1,612,ImePreedit,673,0,4.289,47,composited,673,21.463166,32.608,68.357104958,656,490,11,-0.413,display rejected
+ime-native-long,1,613,ImePreedit,674,0,2.515,45,composited,674,8.435625,16.008334,68.440452125,657,970,11,-0.414,display rejected
+ime-native-long,1,614,ImeCommit,675,0,4.91,45,composited,675,6.586084,13.302375,68.537786541,658,490,11,-0.414,display rejected
+ime-native-long,1,617,ImePreedit,678,0,3.493,45,direct,678,7.967251,15.967834,68.840447541,661,970,970,-0.414,
+ime-native-long,1,618,ImePreedit,679,0,2.889,48,composited,679,17.327125,22.675625,68.947123166,662,490,14,-0.414,display rejected
+ime-native-long,1,619,ImePreedit,680,0,4.134,46,composited,680,27.721542,36.812583,69.057098333,663,970,14,-0.413,display rejected
+ime-native-long,1,620,ImePreedit,682,0,2.345,45,composited,682,43.172499,49.352208,69.17376675,665,970,14,-0.414,display rejected
+ime-native-long,1,621,ImePreedit,683,0,4.124,50,composited,683,21.065709,32.589209,69.257111125,666,490,14,-0.414,display rejected
+ime-native-long,1,622,ImeCommit,684,0,4.238,42,composited,684,5.180458,11.461666,69.335943208,667,970,14,-0.413,display rejected
+ime-native-long,1,625,ImePreedit,687,0,3.313,47,direct,687,6.787667,15.960166,69.657106583,670,490,490,-0.413,
+ime-native-long,1,626,ImePreedit,688,0,1.654,43,composited,688,5.485666,9.047958,69.750090291,671,970,13,-0.413,display rejected
+ime-native-long,1,627,ImePreedit,689,0,4.213,46,composited,689,15.881166,23.948125,69.853063958,672,490,14,-0.414,display rejected
+ime-native-long,1,628,ImePreedit,690,0,4.381,56,composited,690,44.273291,55.771416,69.990422916,673,970,14,-0.413,display rejected
+ime-native-long,1,629,ImePreedit,691,0,4.317,51,composited,691,20.215167,32.603833,70.073770083,674,490,13,-0.414,display rejected
+ime-native-long,1,630,ImeCommit,692,0,3.114,41,composited,692,6.314333,11.264625,70.15238125,675,970,11,-0.414,display rejected
+ime-native-long,1,633,ImePreedit,695,0,2.177,45,direct,695,3.684584,10.030709,70.467922291,678,490,490,-0.414,
+ime-native-long,1,634,ImePreedit,696,0,3.133,51,composited,696,16.582166,22.006,70.579752708,679,970,13,-0.414,display rejected
+ime-native-long,1,635,ImePreedit,697,0,2.84,46,composited,697,26.093292,32.700792,70.690431,680,490,13,-0.414,display rejected
+ime-native-long,1,636,ImePreedit,698,0,2.27,43,composited,698,11.174084,18.542959,70.775858291,681,970,11,-0.414,display rejected
+ime-native-long,1,637,ImePreedit,699,0,2.385,50,composited,699,6.519833,12.75525,70.889821208,682,490,11,-0.414,display rejected
+ime-native-long,1,638,ImeCommit,700,0,3.834,56,composited,700,5.807125,10.970084,70.985247791,683,970,11,-0.413,display rejected
+ime-native-long,1,641,ImePreedit,704,0,3.742,55,direct,704,4.699375,14.280125,71.292544833,687,970,970,-0.414,
+ime-native-long,1,642,ImePreedit,705,0,2.339,47,composited,705,5.174792,9.270375,71.383637708,688,490,13,-0.414,display rejected
+ime-native-long,1,643,ImePreedit,706,0,4.913,52,composited,706,15.555125,25.931291,71.501221166,689,970,14,-0.413,display rejected
+ime-native-long,1,644,ImePreedit,707,0,2.711,49,composited,707,5.672084,11.991709,71.59251725,690,490,11,-0.414,display rejected
+ime-native-long,1,645,ImePreedit,708,0,4.161,49,composited,708,6.152,17.569166,71.718803666,691,970,11,-0.414,display rejected
+ime-native-long,1,646,ImeCommit,709,0,1.681,44,composited,709,5.545417,8.633542,71.810558791,692,490,11,-0.413,display rejected
+ime-native-long,1,649,ImePreedit,712,0,1.977,46,direct,712,10.610791,15.940583,72.123749958,695,970,970,-0.413,
+ime-native-long,1,650,ImePreedit,713,0,2.528,57,composited,713,13.432042,18.089791,72.225844708,696,490,13,-0.414,display rejected
+ime-native-long,1,651,ImePreedit,714,0,1.348,45,composited,714,7.137709,11.519209,72.316732791,697,970,13,-0.414,display rejected
+ime-native-long,1,652,ImePreedit,715,0,1.506,46,composited,715,6.81375,14.047041,72.422689666,698,490,13,-0.414,display rejected
+ime-native-long,1,653,ImePreedit,716,0,4.292,50,composited,716,6.332875,16.515167,72.535462708,699,970,11,-0.414,display rejected
+ime-native-long,1,654,ImeCommit,717,0,4.217,50,composited,717,5.636083,11.82025,72.64800625,700,490,11,-0.414,display rejected
+ime-native-long,1,657,ImePreedit,720,0,3.358,50,direct,720,3.799958,12.380167,72.953527,703,970,970,-0.414,
+ime-native-long,1,658,ImePreedit,721,0,2.896,51,composited,721,18.820625,24.622542,73.057075375,704,490,13,-0.414,display rejected
+ime-native-long,1,659,ImePreedit,723,0,3.026,53,composited,723,5.934417,13.5315,73.150287791,706,490,13,-0.413,display rejected
+ime-native-long,1,660,ImePreedit,724,0,4.709,62,composited,724,26.098542,35.714792,73.273725375,707,970,11,-0.414,display rejected
+ime-native-long,1,661,ImePreedit,725,0,4.528,59,composited,725,20.490291,33.508333,73.373739041,708,490,11,-0.414,display rejected
+ime-native-long,1,662,ImeCommit,726,0,5.306,59,composited,726,6.604583,14.346333,73.455554333,709,970,11,-0.414,display rejected
+ime-native-long,1,665,ImePreedit,729,0,3.556,66,direct,729,9.098041,18.706875,73.773734541,712,490,490,-0.414,
+ime-native-long,1,666,ImePreedit,730,0,2.049,49,composited,730,18.388166,22.482208,73.880180625,713,970,14,-0.414,display rejected
+ime-native-long,1,667,ImePreedit,731,0,2.241,53,composited,731,44.71225,49.368625,74.007051833,714,490,14,-0.414,display rejected
+ime-native-long,1,668,ImePreedit,732,0,4.281,59,composited,732,38.505583,49.248,74.107050833,715,970,14,-0.413,display rejected
+ime-native-long,1,669,ImePreedit,733,0,4.598,57,composited,733,36.555666,49.217625,74.207049916,716,490,13,-0.414,display rejected
+ime-native-long,1,670,ImeCommit,734,0,4.609,53,composited,734,6.296542,12.827583,74.270607,717,970,11,-0.413,display rejected
+ime-native-long,1,673,ImePreedit,737,0,4.347,59,direct,737,5.829083,15.9435,74.590393583,720,490,490,-0.414,
+ime-native-long,1,674,ImePreedit,738,0,3.103,52,composited,738,17.131875,22.45875,74.696839583,721,970,11,-0.414,display rejected
+ime-native-long,1,675,ImePreedit,739,0,2.925,59,composited,739,28.8555,35.248916,74.807058958,722,490,13,-0.414,display rejected
+ime-native-long,1,676,ImePreedit,740,0,1.415,50,composited,740,5.766583,10.131916,74.885440625,723,970,14,-0.414,display rejected
+ime-native-long,1,677,ImePreedit,741,0,3.878,54,composited,741,6.355125,18.173375,75.004392416,724,490,14,-0.414,display rejected
+ime-native-long,1,678,ImeCommit,743,0,2.994,53,composited,743,6.069458,10.526374,75.102785125,726,490,11,-0.414,display rejected
+ime-native-long,1,681,ImePreedit,746,0,4.439,57,direct,746,3.731709,13.722292,75.421538791,729,970,970,-0.413,
+ime-native-long,1,682,ImePreedit,747,0,3.269,53,composited,747,10.613792,16.142375,75.518997458,730,490,13,-0.414,display rejected
+ime-native-long,1,683,ImePreedit,748,0,2.574,59,composited,748,19.738499,25.800958,75.632909375,731,970,11,-0.414,display rejected
+ime-native-long,1,684,ImePreedit,749,0,4.101,55,composited,749,48.880416,59.666583,75.773716458,732,490,11,-0.414,display rejected
+ime-native-long,1,685,ImePreedit,750,0,3.54,63,composited,750,7.903292,18.005834,75.842477333,733,970,11,-0.414,display rejected
+ime-native-long,1,686,ImeCommit,751,0,2.302,56,composited,751,6.493124,10.349083,75.936799041,734,490,11,-0.413,display rejected
+ime-native-long,1,689,ImePreedit,754,0,3.543,60,direct,754,7.067417,15.996334,76.257044541,737,970,970,-0.413,
+ime-native-long,1,690,ImePreedit,755,0,3.744,66,composited,755,8.714334,15.125917,76.3562155,738,490,13,-0.414,display rejected
+ime-native-long,1,691,ImePreedit,756,0,3.317,57,composited,756,5.139166,12.372417,76.445216833,739,970,13,-0.413,display rejected
+ime-native-long,1,692,ImePreedit,757,0,4.141,57,composited,757,8.145416,18.906958,76.55506625,740,490,13,-0.414,display rejected
+ime-native-long,1,693,ImePreedit,758,0,4.073,55,composited,758,5.882792,16.156042,76.659365791,741,970,11,-0.414,display rejected
+ime-native-long,1,694,ImeCommit,759,0,4.184,56,composited,759,5.760833,12.056167,76.772189833,742,490,11,-0.413,display rejected
+ime-native-long,1,697,ImePreedit,763,0,12.43,51,direct,763,3.648667,20.256958,77.094555541,746,490,490,-0.413,
+ime-native-long,1,698,ImePreedit,764,0,2.582,63,composited,764,17.692625,22.241083,77.196586666,747,970,13,-0.414,display rejected
+ime-native-long,1,699,ImePreedit,765,0,2.974,60,composited,765,26.538583,32.698792,77.307036625,748,490,13,-0.413,display rejected
+ime-native-long,1,700,ImePreedit,766,0,2.639,66,composited,766,7.154084,13.490334,77.376484666,749,970,11,-0.414,display rejected
+ime-native-long,1,701,ImePreedit,767,0,2.629,63,composited,767,7.222208,16.353625,77.49315025,750,490,11,-0.414,display rejected
+ime-native-long,1,702,ImeCommit,768,0,4.748,58,composited,768,6.07625,12.929125,77.588160375,751,970,11,-0.414,display rejected
+ime-native-long,1,705,ImePreedit,771,0,2.191,60,direct,771,3.225916,10.078791,77.90118575,754,490,490,-0.414,
+ime-native-long,1,706,ImePreedit,772,0,2.528,61,composited,772,17.439626,21.996876,78.013016166,755,970,13,-0.413,display rejected
+ime-native-long,1,707,ImePreedit,773,0,2.86,65,composited,773,26.443209,32.655417,78.123694416,756,490,13,-0.413,display rejected
+ime-native-long,1,708,ImePreedit,774,0,1.88,55,composited,774,56.009084,60.899459,78.257013666,757,970,11,-0.414,display rejected
+ime-native-long,1,709,ImePreedit,775,0,2.156,59,composited,775,26.408251,32.530417,78.323700916,758,490,14,-0.414,display rejected
+ime-native-long,1,710,ImeCommit,778,0,8.114,57,direct,778,22.795333,32.357167,78.440343458,761,970,970,-0.414,
+ime-native-long,1,713,ImePreedit,789,0,1.495,53,direct,789,3.37,7.144375,78.714870125,772,490,490,-0.414,
+ime-native-long,1,714,ImePreedit,790,0,1.579,56,composited,790,17.440791,20.339458,78.828068916,773,970,11,-0.413,display rejected
+ime-native-long,1,715,ImePreedit,791,0,2.362,58,composited,791,28.162417,32.575125,78.957019875,774,490,13,-0.414,display rejected
+ime-native-long,1,716,ImePreedit,794,0,15.055,53,composited,794,19.611167,37.957417,79.056411083,777,970,14,-0.414,display rejected
+ime-native-long,1,717,ImePreedit,796,0,2.99,67,composited,796,6.763417,16.651583,79.140351583,779,970,14,-0.414,display rejected
+ime-native-long,1,718,ImeCommit,797,0,3.29,69,composited,797,5.89675,11.553833,79.253205083,780,490,14,-0.414,display rejected
+ime-native-long,1,721,ImePreedit,802,0,14.55,65,direct,802,3.883708,21.647458,79.569672541,785,970,970,-0.413,
+ime-native-long,1,722,ImePreedit,803,0,2.281,62,composited,803,29.281208,33.329375,79.673665208,786,490,11,-0.413,display rejected
+ime-native-long,1,723,ImePreedit,804,0,2.372,62,composited,804,27.832417,32.602625,79.773664333,787,970,11,-0.414,display rejected
+ime-native-long,1,724,ImePreedit,805,0,2.106,61,composited,805,10.776041,15.9535,79.873677958,788,490,11,-0.413,display rejected
+ime-native-long,1,725,ImePreedit,806,0,3.508,64,composited,806,6.0625,14.373792,79.972159833,789,970,11,-0.414,display rejected
+ime-native-long,1,726,ImeCommit,807,0,2.474,68,composited,807,6.614042,10.860709,80.067118916,790,490,11,-0.414,display rejected
+ime-native-space-2,space,17,ImePreedit,54,0,3.52,-18,direct,54,10.862625,19.661959,7.458165166,37,915,915,-0.038,
+ime-native-space-2,space,18,ImePreedit,55,0,2.144,-21,composited,55,5.176209,9.246667,7.551378416,38,233,13,-0.038,display rejected
+ime-native-space-2,space,19,ImePreedit,56,0,3.477,-20,composited,56,12.352751,20.183917,7.65321325,39,915,11,-0.038,display rejected
+ime-native-space-2,space,20,ImePreedit,57,0,4.463,-5,composited,57,45.532666,57.104499,7.791481583,40,233,14,-0.038,display rejected
+ime-native-space-2,space,21,ImePreedit,58,0,4.896,-9,composited,58,19.151958,32.539209,7.874828708,41,915,13,-0.038,display rejected
+ime-native-space-2,space,22,ImeCommit,59,0,2.013,-21,composited,59,7.421292,10.41075,7.952522041,42,233,11,-0.038,display rejected
+ime-native-space-2,space,25,ImePreedit,62,0,4.411,-8,direct,62,3.795625,13.108666,8.255289166,45,915,915,-0.038,
+ime-native-space-2,space,26,ImePreedit,63,0,3.838,-12,composited,63,19.978708,27.752833,8.381499875,46,233,11,-0.038,display rejected
+ime-native-space-2,space,27,ImePreedit,64,0,3.845,-15,composited,64,25.364041,32.677375,8.4914965,47,915,13,-0.038,display rejected
+ime-native-space-2,space,28,ImePreedit,65,0,3.125,-19,composited,65,5.969166,16.139875,8.563913625,48,233,13,-0.038,display rejected
+ime-native-space-2,space,29,ImePreedit,66,0,2.222,-17,composited,66,5.54625,13.944708,8.663912708,49,915,14,-0.038,display rejected
+ime-native-space-2,space,30,ImeCommit,67,0,4.076,-9,composited,67,6.484167,13.157625,8.776915166,50,233,14,-0.038,display rejected
+ime-native-space-2,space,33,ImePreedit,71,0,3.553,-16,direct,71,3.666833,12.838791,9.071718791,54,233,233,-0.038,
+ime-native-space-2,space,34,ImePreedit,72,0,3.902,-7,composited,72,5.735958,13.067209,9.188589125,55,915,13,-0.038,display rejected
+ime-native-space-2,space,35,ImePreedit,73,0,4.501,-4,composited,73,16.347458,26.015083,9.29148225,56,233,14,-0.038,display rejected
+ime-native-space-2,space,36,ImePreedit,74,0,4.41,-8,composited,74,5.76675,16.405167,9.387669333,57,915,13,-0.038,display rejected
+ime-native-space-2,space,37,ImePreedit,75,0,5.015,-7,composited,75,6.246167,19.499792,9.503646541,58,233,11,-0.038,display rejected
+ime-native-space-2,space,38,ImeCommit,76,0,2.835,-15,composited,76,5.917375,10.242875,9.597007916,59,915,11,-0.038,display rejected
+ime-native-space-2,space,41,ImePreedit,79,0,3.644,-12,direct,79,3.689084,13.079959,9.905273833,62,233,233,-0.038,
+ime-native-space-2,space,42,ImePreedit,80,0,3.83,-12,composited,80,21.081542,28.781416,10.014818,63,915,14,-0.038,display rejected
+ime-native-space-2,space,43,ImePreedit,81,0,4.573,-7,composited,81,39.401292,49.251542,10.141459708,64,233,14,-0.038,display rejected
+ime-native-space-2,space,44,ImePreedit,82,0,2.336,-13,composited,82,43.109209,49.311792,10.258125333,65,915,13,-0.038,display rejected
+ime-native-space-2,space,45,ImePreedit,83,0,3.065,-16,composited,83,22.767001,32.665125,10.341457875,66,233,13,-0.038,display rejected
+ime-native-space-2,space,46,ImeCommit,84,0,4.449,-16,composited,84,5.848292,12.408084,10.421222541,67,915,11,-0.038,display rejected
+ime-native-space-2,space,49,ImePreedit,87,0,4.259,-13,direct,87,3.681792,13.752375,10.739287791,70,233,233,-0.038,
+ime-native-space-2,space,50,ImePreedit,88,0,4.264,-10,composited,88,8.034458,15.633083,10.831477083,71,915,11,-0.038,display rejected
+ime-native-space-2,space,51,ImePreedit,89,0,3.347,-14,composited,89,26.008083,32.730916,10.958133458,72,233,13,-0.038,display rejected
+ime-native-space-2,space,52,ImePreedit,91,0,3.304,-13,composited,91,30.162125,36.513626,11.058117833,74,233,11,-0.038,display rejected
+ime-native-space-2,space,53,ImePreedit,92,0,4.803,-14,composited,92,19.578334,32.608584,11.174798041,75,915,13,-0.038,display rejected
+ime-native-space-2,space,54,ImeCommit,93,0,2.231,-9,composited,93,5.652125,10.06075,11.252261833,76,233,11,-0.038,display rejected
+ime-native-space-2,space,57,ImePreedit,96,0,3.533,-10,direct,96,3.513125,12.017875,11.570786041,79,915,915,-0.038,
+ime-native-space-2,space,58,ImePreedit,97,0,4.1,-12,composited,97,24.844667,31.649583,11.676888166,80,233,14,-0.038,display rejected
+ime-native-space-2,space,59,ImePreedit,98,0,2.151,-14,composited,98,27.295666,32.692583,11.791458916,81,915,13,-0.038,display rejected
+ime-native-space-2,space,60,ImePreedit,99,0,4.392,1,composited,99,29.542583,39.720875,11.891443375,82,233,14,-0.038,display rejected
+ime-native-space-2,space,61,ImePreedit,100,0,4.949,-4,composited,100,19.416541,32.5825,11.991457,83,915,14,-0.038,display rejected
+ime-native-space-2,space,62,ImeCommit,101,0,3.304,0,composited,101,6.867583,12.173958,12.070977625,84,233,14,-0.038,display rejected
+ime-native-space-2,space,65,ImePreedit,104,0,3.446,-9,direct,104,7.424417,15.993751,12.374786041,87,915,915,-0.038,
+ime-native-space-2,space,66,ImePreedit,105,0,2.95,-8,composited,105,5.675834,10.638292,12.486042583,88,233,14,-0.038,display rejected
+ime-native-space-2,space,67,ImePreedit,106,0,3.919,-4,composited,106,13.07175,21.913125,12.588098375,89,915,14,-0.038,display rejected
+ime-native-space-2,space,68,ImePreedit,107,0,4.825,1,composited,107,37.798666,49.225083,12.724768916,90,233,14,-0.038,display rejected
+ime-native-space-2,space,69,ImePreedit,108,0,2.518,-5,composited,108,23.615209,32.682001,12.808101458,91,915,11,-0.038,display rejected
+ime-native-space-2,space,70,ImeCommit,109,0,3.6,-8,composited,109,5.769583,11.882375,12.887407166,92,233,11,-0.038,display rejected
+ime-native-space-2,space,73,ImePreedit,113,0,3.642,-6,direct,113,3.6845,13.501916,13.205701875,96,233,233,-0.038,
+ime-native-space-2,space,74,ImePreedit,114,0,2.223,-13,composited,114,25.057375,28.784125,13.310206208,97,915,14,-0.038,display rejected
+ime-native-space-2,space,75,ImePreedit,115,0,2.546,-3,composited,115,27.323875,32.690834,13.424762291,98,233,11,-0.038,display rejected
+ime-native-space-2,space,76,ImePreedit,116,0,4.592,3,composited,116,22.637084,32.623334,13.524776083,99,915,13,-0.038,display rejected
+ime-native-space-2,space,77,ImePreedit,117,0,3.555,-4,composited,117,6.403625,15.458084,13.624396666,100,233,11,-0.038,display rejected
+ime-native-space-2,space,78,ImeCommit,118,0,3.089,-4,composited,118,6.473917,12.195542,13.720732666,101,915,11,-0.038,display rejected
+ime-native-space-2,space,81,ImePreedit,121,0,3.988,-7,direct,121,3.345167,13.062333,14.021901958,104,233,233,-0.038,
+ime-native-space-2,space,82,ImePreedit,122,0,2.774,-4,composited,122,5.759833,11.246875,14.1367155,105,915,13,-0.038,display rejected
+ime-native-space-2,space,83,ImePreedit,123,0,3.794,-5,composited,123,8.878458,17.412541,14.250397958,106,233,11,-0.038,display rejected
+ime-native-space-2,space,84,ImePreedit,124,0,2.134,-8,composited,124,45.370792,51.897292,14.374753416,107,915,13,-0.038,display rejected
+ime-native-space-2,space,85,ImePreedit,125,0,3.457,4,composited,125,21.945792,32.540709,14.474767083,108,233,13,-0.038,display rejected
+ime-native-space-2,space,86,ImeCommit,126,0,4.564,-8,composited,126,6.049458,12.604333,14.554746583,109,915,11,-0.038,display rejected
+ime-native-space-2,space,89,ImePreedit,129,0,3.22,-10,direct,129,3.445917,10.737875,14.86960775,112,233,233,-0.038,
+ime-native-space-2,space,90,ImePreedit,130,0,4.172,-1,composited,130,26.194875,33.431833,14.976857208,113,915,11,-0.038,display rejected
+ime-native-space-2,space,91,ImePreedit,132,0,2.688,-4,composited,132,9.050416,15.611083,15.074383083,115,915,13,-0.038,display rejected
+ime-native-space-2,space,92,ImePreedit,133,0,3.646,-6,composited,133,21.176375,30.492958,15.191412458,116,233,11,-0.038,display rejected
+ime-native-space-2,space,93,ImePreedit,134,0,4.382,-8,composited,134,20.52025,31.896791,15.291426125,117,915,11,-0.038,display rejected
+ime-native-space-2,space,94,ImeCommit,135,0,4.706,2,composited,135,6.323041,13.682166,15.372782458,118,233,11,-0.038,display rejected
+ime-native-space-2,space,97,ImePreedit,138,0,4.494,-3,direct,138,3.447709,13.993875,15.689011916,121,915,915,-0.038,
+ime-native-space-2,space,98,ImePreedit,139,0,2.8,-4,composited,139,5.39425,10.412875,15.785782125,122,233,14,-0.038,display rejected
+ime-native-space-2,space,99,ImePreedit,140,0,2.817,-6,composited,140,9.081041,15.460624,15.891042083,123,915,14,-0.038,display rejected
+ime-native-space-2,space,100,ImePreedit,141,0,3.766,-6,composited,141,6.672458,17.341041,15.993514333,124,233,14,-0.038,display rejected
+ime-native-space-2,space,101,ImePreedit,142,0,4.662,3,composited,142,7.056458,17.152542,16.106338375,125,915,14,-0.038,display rejected
+ime-native-space-2,space,102,ImeCommit,143,0,3.978,2,composited,143,5.801541,11.673,16.200150125,126,233,14,-0.038,display rejected
+ime-native-space-2,space,105,ImePreedit,146,0,3.581,5,direct,146,3.649417,12.883875,16.5049825,129,915,915,-0.038,
+ime-native-space-2,space,106,ImePreedit,147,0,4.17,0,composited,147,9.91075,17.238125,16.620476,130,233,14,-0.038,display rejected
+ime-native-space-2,space,107,ImePreedit,148,0,3.704,-1,composited,148,14.1075,22.488458,16.715443625,131,915,11,-0.038,display rejected
+ime-native-space-2,space,108,ImePreedit,149,0,2.831,0,composited,149,12.059958,20.280374,16.820023666,132,233,11,-0.038,display rejected
+ime-native-space-2,space,109,ImePreedit,150,0,1.53,-4,composited,150,6.847624,14.196458,16.918186916,133,915,11,-0.038,display rejected
+ime-native-space-2,space,110,ImeCommit,152,0,10.748,-3,direct,152,25.6005,39.019625,17.058061541,135,915,915,-0.038,
+ime-native-space-2,space,113,ImePreedit,155,0,3.558,2,direct,155,3.809583,9.74175,17.335103875,138,233,233,-0.038,
+ime-native-space-2,space,114,ImePreedit,156,0,4.303,1,composited,156,32.329541,38.971291,17.458072416,139,915,14,-0.038,display rejected
+ime-native-space-2,space,115,ImePreedit,157,0,2.844,2,composited,157,26.330666,32.697458,17.558056833,140,233,14,-0.038,display rejected
+ime-native-space-2,space,116,ImePreedit,158,0,4.308,-1,composited,158,21.797875,32.635541,17.674737083,141,915,13,-0.038,display rejected
+ime-native-space-2,space,117,ImePreedit,159,0,4.824,9,composited,159,6.296208,19.118667,17.76131175,142,233,11,-0.038,display rejected
+ime-native-space-2,space,118,ImeCommit,160,0,4.559,3,composited,160,5.520625,12.681792,17.858068625,143,915,11,-0.038,display rejected
+ime-native-space-2,space,121,ImePreedit,163,0,3.733,1,direct,163,9.358584,17.997625,18.174731625,146,233,233,-0.038,
+ime-native-space-2,space,122,ImePreedit,164,0,2.505,8,composited,164,17.636291,22.453624,18.281177708,147,915,14,-0.038,display rejected
+ime-native-space-2,space,123,ImePreedit,165,0,2.985,0,composited,165,43.010959,49.355584,18.408048833,148,233,14,-0.038,display rejected
+ime-native-space-2,space,124,ImePreedit,166,0,4.346,12,composited,166,38.571292,49.254209,18.508047916,149,915,14,-0.038,display rejected
+ime-native-space-2,space,125,ImePreedit,167,0,4.808,9,composited,167,19.397375,32.555292,18.591395125,150,233,11,-0.038,display rejected
+ime-native-space-2,space,126,ImeCommit,168,0,2.391,0,composited,168,6.380292,10.7755,18.686213833,151,915,11,-0.038,display rejected
+ime-native-space-2,space,129,ImePreedit,171,0,4.3,2,direct,171,3.817,13.765834,18.989210333,154,233,233,-0.038,
+ime-native-space-2,space,130,ImePreedit,173,0,3.201,6,composited,173,6.417958,12.407292,19.104474375,156,233,14,-0.038,display rejected
+ime-native-space-2,space,131,ImePreedit,174,0,3.948,11,composited,174,32.063084,40.721125,19.2247225,157,915,13,-0.039,display rejected
+ime-native-space-2,space,132,ImePreedit,175,0,4.57,4,composited,175,4.978167,15.715708,19.299662083,158,233,14,-0.038,display rejected
+ime-native-space-2,space,133,ImePreedit,176,0,3.489,6,composited,176,5.849749,16.105291,19.411525666,159,915,14,-0.038,display rejected
+ime-native-space-2,space,134,ImeCommit,177,0,3.403,0,composited,177,5.249667,10.958542,19.506535875,160,233,14,-0.038,display rejected
+ime-native-space-2,space,137,ImePreedit,180,0,3.992,1,direct,180,6.315208,15.968416,19.824716125,163,915,915,-0.038,
+ime-native-space-2,space,138,ImePreedit,181,0,2.198,3,composited,181,17.506792,21.7735,19.94714025,164,233,14,-0.038,display rejected
+ime-native-space-2,space,139,ImePreedit,182,0,2.339,6,composited,182,43.700374,49.232958,20.058033291,165,915,11,-0.038,display rejected
+ime-native-space-2,space,140,ImePreedit,183,0,4.622,8,composited,183,22.888166,32.710833,20.158047,166,233,11,-0.038,display rejected
+ime-native-space-2,space,141,ImePreedit,184,0,4.777,5,composited,184,6.561999,19.602124,20.245080666,167,915,11,-0.038,display rejected
+ime-native-space-2,space,142,ImeCommit,185,0,5.093,9,composited,185,7.296959,14.394376,20.343473416,168,233,11,-0.038,display rejected
+ime-native-space-2,space,145,ImePreedit,188,0,4.195,8,direct,188,3.78675,13.768542,20.639194833,171,915,915,-0.039,
+ime-native-space-2,space,146,ImePreedit,189,0,4.164,12,composited,189,12.67225,19.487792,20.747821125,172,233,11,-0.038,display rejected
+ime-native-space-2,space,147,ImePreedit,190,0,3.742,7,composited,190,6.49025,14.918875,20.856982041,173,915,13,-0.038,display rejected
+ime-native-space-2,space,148,ImePreedit,191,0,1.737,2,composited,191,5.38475,10.991292,20.955145375,174,233,14,-0.038,display rejected
+ime-native-space-2,space,149,ImePreedit,193,0,1.995,-1,composited,193,5.421375,11.978083,21.046670916,176,233,11,-0.038,display rejected
+ime-native-space-2,space,150,ImeCommit,194,0,4.235,7,composited,194,5.877125,12.575625,21.160132375,177,915,11,-0.038,display rejected
+ime-native-space-2,space,153,ImePreedit,197,0,2.941,10,direct,197,8.778374,15.977249,21.474700541,180,233,233,-0.038,
+ime-native-space-2,space,154,ImePreedit,198,0,2.439,10,composited,198,17.548,22.247625,21.580917125,181,915,14,-0.038,display rejected
+ime-native-space-2,space,155,ImePreedit,199,0,2.661,9,composited,199,41.660792,46.956042,21.708020083,182,233,14,-0.038,display rejected
+ime-native-space-2,space,156,ImePreedit,200,0,3.672,12,composited,200,40.390417,49.301208,21.824683333,183,915,13,-0.038,display rejected
+ime-native-space-2,space,157,ImePreedit,201,0,3.925,5,composited,201,21.209083,32.6495,21.908030458,184,233,11,-0.038,display rejected
+ime-native-space-2,space,158,ImeCommit,202,0,3.712,15,composited,202,6.870459,12.623292,21.988010041,185,915,11,-0.038,display rejected
+ime-native-space-2,space,161,ImePreedit,205,0,3.335,10,direct,205,8.718416,16.034541,22.291359541,188,233,233,-0.038,
+ime-native-space-2,space,162,ImePreedit,206,0,2.46,6,composited,206,4.968458,9.498875,22.384802125,189,915,13,-0.038,display rejected
+ime-native-space-2,space,163,ImePreedit,207,0,4.485,7,composited,207,7.551208,16.607042,22.491358291,190,233,13,-0.038,display rejected
+ime-native-space-2,space,164,ImePreedit,208,0,5.037,18,composited,208,11.812917,22.228,22.596656375,191,915,11,-0.038,display rejected
+ime-native-space-2,space,165,ImePreedit,209,0,2.152,5,composited,209,5.003333,13.125375,22.693910208,192,233,11,-0.038,display rejected
+ime-native-space-2,space,166,ImeCommit,210,0,3.798,17,composited,210,5.846792,12.08575,22.79006775,193,915,11,-0.038,display rejected
+ime-native-space-2,space,169,ImePreedit,214,0,2.258,4,direct,214,3.263417,7.712292,23.082993,197,915,915,-0.038,
+ime-native-space-2,space,170,ImePreedit,215,0,3.426,7,composited,215,5.199667,11.22125,23.186630416,198,233,11,-0.038,display rejected
+ime-native-space-2,space,171,ImePreedit,216,0,3.432,12,composited,216,18.774917,26.390125,23.297567625,199,915,14,-0.038,display rejected
+ime-native-space-2,space,172,ImePreedit,217,0,3.844,21,composited,217,38.95425,49.210542,23.424669541,200,233,13,-0.038,display rejected
+ime-native-space-2,space,173,ImePreedit,218,0,2.285,7,composited,218,24.733459,32.624709,23.508000833,201,915,13,-0.038,display rejected
+ime-native-space-2,space,174,ImeCommit,219,0,1.33,4,composited,219,5.142083,7.483416,23.582734083,202,233,11,-0.038,display rejected
+ime-native-space-2,space,177,ImePreedit,222,0,3.786,11,direct,222,3.468959,11.913292,23.904003458,205,915,915,-0.038,
+ime-native-space-2,space,178,ImePreedit,223,0,4.376,14,composited,223,26.777375,34.693666,24.026772083,206,233,14,-0.038,display rejected
+ime-native-space-2,space,179,ImePreedit,224,0,2.059,8,composited,224,27.949541,32.743333,24.124676333,207,915,13,-0.038,display rejected
+ime-native-space-2,space,180,ImePreedit,225,0,3.261,19,composited,225,20.9945,31.794584,24.241347625,208,233,13,-0.038,display rejected
+ime-native-space-2,space,181,ImePreedit,226,0,4.826,18,composited,226,5.638459,18.038,24.32676925,209,915,11,-0.038,display rejected
+ime-native-space-2,space,182,ImeCommit,227,0,4.291,13,composited,227,6.030667,12.534876,24.423385708,210,233,11,-0.038,display rejected
+ime-native-space-2,space,185,ImePreedit,230,0,3.786,11,direct,230,3.679625,13.479375,24.721801333,213,915,915,-0.038,
+ime-native-space-2,space,186,ImePreedit,231,0,2.276,12,composited,231,6.613209,11.111458,24.813531625,214,233,14,-0.038,display rejected
+ime-native-space-2,space,187,ImePreedit,232,0,3.083,10,composited,232,5.81275,12.585584,24.92131575,215,915,11,-0.038,display rejected
+ime-native-space-2,space,188,ImePreedit,233,0,2.24,10,composited,233,7.7835,13.954167,25.012611875,216,233,13,-0.038,display rejected
+ime-native-space-2,space,189,ImePreedit,235,0,1.712,8,composited,235,6.838167,15.314,25.13065425,218,233,14,-0.038,display rejected
+ime-native-space-2,space,190,ImeCommit,236,0,4.544,19,composited,236,6.571041,13.529417,25.228137625,219,915,14,-0.038,display rejected
+ime-native-space-2,space,193,ImePreedit,239,0,4.115,25,direct,239,3.537708,13.51075,25.53891925,222,233,233,-0.038,
+ime-native-space-2,space,194,ImePreedit,240,0,2.906,13,composited,240,22.426125,27.819292,25.641328666,223,915,14,-0.038,display rejected
+ime-native-space-2,space,195,ImePreedit,241,0,3.989,24,composited,241,53.7295,62.34075,25.774646125,224,233,11,-0.038,display rejected
+ime-native-space-2,space,196,ImePreedit,242,0,4.493,16,composited,242,38.152583,49.252583,25.87464525,225,915,11,-0.038,display rejected
+ime-native-space-2,space,197,ImePreedit,243,0,3.968,11,composited,243,4.922416,15.970583,25.941325958,226,233,11,-0.038,display rejected
+ime-native-space-2,space,198,ImeCommit,244,0,4.141,17,composited,244,5.578624,12.311416,26.021075916,227,915,11,-0.038,display rejected
+ime-native-space-2,space,201,ImePreedit,247,0,3.514,15,direct,247,3.688667,11.254209,26.319041083,230,233,233,-0.038,
+ime-native-space-2,space,202,ImePreedit,248,0,1.993,12,composited,248,20.644041,25.195667,26.4267495,231,915,11,-0.038,display rejected
+ime-native-space-2,space,203,ImePreedit,249,0,3.561,13,composited,249,24.895542,32.636542,26.541305666,232,233,11,-0.038,display rejected
+ime-native-space-2,space,204,ImePreedit,250,0,4.561,18,composited,250,20.372916,32.558625,26.641319375,233,915,13,-0.038,display rejected
+ime-native-space-2,space,205,ImePreedit,251,0,4.47,12,composited,251,6.451834,18.034667,26.726746708,234,233,11,-0.038,display rejected
+ime-native-space-2,space,206,ImeCommit,252,0,4.352,14,composited,252,5.918958,12.750667,26.823592625,235,915,11,-0.038,display rejected
+ime-native-space-2,space,209,ImePreedit,256,0,3.784,20,direct,256,3.647583,12.587499,27.121328333,239,915,915,-0.038,
+ime-native-space-2,space,210,ImePreedit,257,0,2.184,13,composited,257,24.958125,29.625,27.226742,240,233,14,-0.038,display rejected
+ime-native-space-2,space,211,ImePreedit,258,0,3.503,24,composited,258,25.602042,32.676,27.341313708,241,915,13,-0.038,display rejected
+ime-native-space-2,space,212,ImePreedit,259,0,4.814,39,composited,259,6.027417,17.004208,27.415572416,242,233,13,-0.038,display rejected
+ime-native-space-2,space,213,ImePreedit,260,0,3.91,28,composited,260,6.614208,16.569875,27.516480875,243,915,14,-0.038,display rejected
+ime-native-space-2,space,214,ImeCommit,261,0,3.054,17,composited,261,6.593334,11.417458,27.6119075,244,233,14,-0.038,display rejected

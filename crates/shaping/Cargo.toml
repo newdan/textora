@@ -20,6 +20,8 @@ serde = { version = "1", features = ["derive"] }
 bincode = "1.3"
 sys-locale = "0.3"
 dirs.workspace = true
+unicode-bidi = "0.3"
+unicode-linebreak = "0.1"
 
 [dev-dependencies]
 criterion = { workspace = true }

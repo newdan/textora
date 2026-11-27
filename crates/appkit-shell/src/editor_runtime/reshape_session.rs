@@ -197,6 +197,7 @@ mod tests {
             generation: 0,
             doc_line: 0,
             byte_offset: 0,
+            highlight_depends_on_position: false,
             byte_length: 0,
             line_bytes: Arc::from([]),
             viewport_width: 100.0,

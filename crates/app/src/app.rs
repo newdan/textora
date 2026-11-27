@@ -13,7 +13,7 @@ pub(crate) use workspace_services::WorkspaceServices;
 mod settings_ui_state;
 pub(crate) use settings_ui_state::{SettingsPersistenceState, SettingsUiState};
 mod platform_state;
-pub(crate) use platform_state::PlatformState;
+pub(crate) use platform_state::{PlatformState, PreparedFontSystem};
 
 // Font size and line height are now in Settings
 
@@ -296,9 +296,6 @@ impl App {
                 AppEffectStep::PersistWorkspace => self.persist_workspace_state(),
                 AppEffectStep::Redraw => {
                     self.platform.schedule_redraw();
-                    if let Some(window) = self.editor_runtime.window() {
-                        window.request_redraw();
-                    }
                 }
             }
         }

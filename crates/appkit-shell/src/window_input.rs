@@ -1,7 +1,37 @@
 use appkit_core::edit_command::EditCommand;
 use ui::core::widget::{KeyCode, Modifiers};
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::MouseScrollDelta;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+#[derive(Default)]
+pub struct ImeCursorAreaCache {
+    last_area: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+}
+
+impl ImeCursorAreaCache {
+    pub fn update(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Option<(PhysicalPosition<i32>, PhysicalSize<u32>)> {
+        let area = (
+            PhysicalPosition::new(x.round() as i32, y.round() as i32),
+            PhysicalSize::new(width.round() as u32, height.round() as u32),
+        );
+        if self.last_area == Some(area) {
+            return None;
+        }
+        self.last_area = Some(area);
+        Some(area)
+    }
+
+    pub fn invalidate(&mut self) {
+        self.last_area = None;
+    }
+}
 
 /// Resolves Markdown formatting from physical keys before layout-specific text conversion.
 pub fn markdown_semantic_shortcut(
@@ -175,6 +205,16 @@ mod tests {
         command_allowed_during_preedit, is_ime_process_key, scroll_delta_pixels, ui_modifiers,
         winit_key_to_keycode,
     };
+
+    #[test]
+    fn ime_area_resubmits_only_when_pixels_change_or_cache_is_invalidated() {
+        let mut cache = super::ImeCursorAreaCache::default();
+        assert!(cache.update(10.1, 20.1, 2.0, 15.1).is_some());
+        assert!(cache.update(10.4, 20.4, 2.0, 15.4).is_none());
+        assert!(cache.update(10.6, 20.4, 2.0, 15.4).is_some());
+        cache.invalidate();
+        assert!(cache.update(10.6, 20.4, 2.0, 15.4).is_some());
+    }
 
     #[test]
     fn ime_process_key_never_falls_back_to_event_text() {

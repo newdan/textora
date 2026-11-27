@@ -8,7 +8,8 @@ use crate::app::App;
 use appkit_shell::editor_runtime::{
     EditorFrame, EditorPaintOptions, EditorRuntime, EmptyFrameTarget, PreeditAdvanceMeasure,
     PreparedPluginContent, RenderResources, SearchHighlightStyle, SurfaceFrameOptions,
-    SurfaceFrameSubmission, TextCaretReveal, TextHighlightLayer, WindowCornerClip,
+    SurfaceFrameReport, SurfaceFrameSubmission, SurfaceSkipReason, TextCaretReveal,
+    TextHighlightLayer, WindowCornerClip,
 };
 use ui::canvas::CanvasViewportSnapshot;
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_NOVEL_VIEW};
@@ -20,6 +21,12 @@ const WYSIWYG_CURSOR_LOG_ENV: &str = "EDIT_PLUS_WYSIWYG_CURSOR_LOG";
 const SEARCH_FOCUSED_CARET_OPACITY: f32 = 0.4;
 const MACOS_TRAFFIC_LIGHT_INSET_LOGICAL: f32 = 68.0;
 const WINDOWS_FRAMELESS_RESIZE_INSET_LOGICAL: f32 = crate::events::WINDOW_RESIZE_MARGIN_LOGICAL;
+
+enum FrameRenderOutcome {
+    Rendered(SurfaceFrameSubmission),
+    Aborted,
+    NeedsSurfaceReconfigure,
+}
 
 #[derive(Clone, Copy)]
 enum SidebarWindowChrome {
@@ -624,22 +631,38 @@ impl App {
         // handles fresh requests raised during preparation or painting.
         self.editor_runtime.take_redraw_request();
         let mut frame = self.editor_runtime.begin_frame().ok()?;
-        EditorRuntime::with_render_resources_for(
+        let outcome = EditorRuntime::with_render_resources_for(
             self,
             |app| &mut app.editor_runtime,
             |app, resources| app.render_with_runtime_resources(resources, &mut frame),
-        )
+        );
+        match outcome {
+            FrameRenderOutcome::Rendered(submission) => Some(submission),
+            FrameRenderOutcome::Aborted => None,
+            FrameRenderOutcome::NeedsSurfaceReconfigure => {
+                if let Some((width, height)) = self.editor_runtime.surface_size() {
+                    let _ = self.editor_runtime.resize_now(width, height);
+                }
+                self.platform.schedule_redraw();
+                None
+            }
+        }
     }
 
     fn render_with_runtime_resources(
         &mut self,
         resources: &mut RenderResources,
         frame: &mut EditorFrame,
-    ) -> Option<SurfaceFrameSubmission> {
+    ) -> FrameRenderOutcome {
         let _render_t0 = std::time::Instant::now();
+        let is_first_frame = !self.editor_runtime.first_frame_presented();
         let _frame_interval_us = self.editor_runtime.note_render_started(_render_t0);
         if self.editor_is_empty() || self.active_editor_index().is_none() {
-            return None;
+            if is_first_frame {
+                self.platform
+                    .log_startup_point("first_frame_aborted", format_args!(" reason=empty_editor"));
+            }
+            return FrameRenderOutcome::Aborted;
         }
         if let Some(text) = resources.text.as_mut() {
             text.begin_frame();
@@ -660,9 +683,18 @@ impl App {
         let perf_sync_prepare_us = sync_prepare_started_at.elapsed().as_micros();
 
         let editor_paint_started_at = Instant::now();
-        self.paint_editor_surface(frame, resources, canvas.as_ref())?;
+        let Some(()) = self.paint_editor_surface(frame, resources, canvas.as_ref()) else {
+            if is_first_frame {
+                self.platform.log_startup_point(
+                    "first_frame_aborted",
+                    format_args!(" reason=paint_editor_none"),
+                );
+            }
+            return FrameRenderOutcome::Aborted;
+        };
         let perf_editor_paint_us = editor_paint_started_at.elapsed().as_micros();
 
+        let paint_chrome_started_at = Instant::now();
         let chrome_list = self.ui_shell.paint_chrome(
             self.editor_runtime.theme(),
             metrics.dpi,
@@ -671,6 +703,7 @@ impl App {
         frame.with_paint_context(|context| {
             context.list.cmds.extend(chrome_list.cmds);
         });
+        let perf_paint_chrome_us = paint_chrome_started_at.elapsed().as_micros();
 
         let mut vertices = Vec::new();
         let frame_drain_started_at = Instant::now();
@@ -678,22 +711,68 @@ impl App {
         let perf_chrome_drain_us = frame_drain_started_at.elapsed().as_micros();
 
         let [red, green, blue, _] = self.editor_runtime.theme().editor.background;
-        let submission = resources
-            .submit_surface_frame_with_timing(
-                &vertices,
-                SurfaceFrameOptions {
-                    background: [red, green, blue, 1.0],
-                    empty_frame_target: EmptyFrameTarget::MultisampledWhenTextAvailable,
-                    window_corner_clip: WindowCornerClip::Preserve,
-                },
-                self.platform.has_pending_input_sample(),
-            )
-            .ok()??;
+        let submit_result = resources.submit_surface_frame_with_timing(
+            &vertices,
+            SurfaceFrameOptions {
+                background: [red, green, blue, 1.0],
+                empty_frame_target: EmptyFrameTarget::MultisampledWhenTextAvailable,
+                window_corner_clip: WindowCornerClip::Preserve,
+            },
+            self.platform.has_pending_input_sample(),
+        );
+        let submission = match submit_result {
+            Ok(Some(submission)) => submission,
+            Ok(None) => {
+                let report = resources.last_surface_report();
+                if is_first_frame {
+                    self.platform.log_startup_point(
+                        "first_frame_submit_skipped",
+                        format_args!(" report={report:?} err=None"),
+                    );
+                }
+                return match report {
+                    Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::Occluded)) => {
+                        self.platform.defer_redraw_until_unoccluded();
+                        FrameRenderOutcome::Aborted
+                    }
+                    Some(SurfaceFrameReport::Skipped(SurfaceSkipReason::Timeout)) => {
+                        self.platform.schedule_redraw();
+                        FrameRenderOutcome::Aborted
+                    }
+                    Some(SurfaceFrameReport::Skipped(
+                        SurfaceSkipReason::Outdated | SurfaceSkipReason::Lost,
+                    )) => FrameRenderOutcome::NeedsSurfaceReconfigure,
+                    _ => FrameRenderOutcome::Aborted,
+                };
+            }
+            Err(error) => {
+                let report = resources.last_surface_report();
+                if is_first_frame {
+                    self.platform.log_startup_point(
+                        "first_frame_submit_skipped",
+                        format_args!(" report={report:?} err={error:?}"),
+                    );
+                }
+                return FrameRenderOutcome::Aborted;
+            }
+        };
         let perf_gpu_submit_us = submission.submit_and_present.as_micros();
 
         if !self.editor_runtime.first_frame_presented() {
             self.editor_runtime.mark_frame_presented();
-            eprintln!("[startup] first_frame_visible total: {:?}", self.platform.startup_elapsed());
+            self.platform.log_startup_stage(
+                "first_frame_visible",
+                _render_t0.elapsed(),
+                format_args!(
+                    " sync_prepare={:.2}ms editor_paint={:.2}ms paint_chrome={:.2}ms drain={:.2}ms surface={:?} vertices={}",
+                    perf_sync_prepare_us as f64 / 1_000.0,
+                    perf_editor_paint_us as f64 / 1_000.0,
+                    perf_paint_chrome_us as f64 / 1_000.0,
+                    perf_chrome_drain_us as f64 / 1_000.0,
+                    resources.last_surface_report(),
+                    vertices.len(),
+                ),
+            );
             if let Some(event_loop_proxy) = self.platform.event_loop_proxy() {
                 let _ = event_loop_proxy
                     .send_event(crate::app_event::AppEvent::StartBackgroundServices);
@@ -759,7 +838,7 @@ impl App {
         ) {
             self.platform.schedule_redraw();
         }
-        Some(submission)
+        FrameRenderOutcome::Rendered(submission)
     }
 
     /// 用最新的 Shell 输入完成一次布局。
@@ -943,7 +1022,8 @@ impl App {
 
             let mut measure = appkit_shell::measure_adapter::MeasureFromShaper(shaper);
             self.ui_shell.update_frame(screen, self.editor_runtime.theme(), &mut measure, &inputs);
-            if self.ui_shell.dock_is_dirty() {
+            // The first layout defers sidebar creation until the native window is ready.
+            if !self.editor_runtime.first_frame_presented() && self.ui_shell.dock_is_dirty() {
                 self.platform.schedule_redraw();
             }
         }

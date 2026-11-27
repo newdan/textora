@@ -276,10 +276,13 @@ pub fn subpixel_offset(phase: SubpixelPhase) -> f32 {
 pub struct GlyphVertex {
     pub position: [f32; 2],
     /// Nonnegative U samples glyph coverage. For an image, encode normal UV as
-    /// `[-1 - u, v]` on every vertex. The shader decodes U and samples the
-    /// premultiplied RGBA image texture through the image sampler.
+    /// `[-1 - u, v]` on every vertex. Use `SOLID_TEX_COORDS` for flat-color geometry.
     pub tex_coords: [f32; 2],
     pub color: [f32; 4],
+}
+
+impl GlyphVertex {
+    pub const SOLID_TEX_COORDS: [f32; 2] = [-0.5, 0.0];
 }
 
 /// Gamma correction uniform for dynamic contrast enhancement.
@@ -316,10 +319,19 @@ pub struct GlyphRenderer {
 impl GlyphRenderer {
     /// Create a new glyph renderer for the given surface format.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::new_with_sample_count(device, format, 4)
+    }
+
+    pub fn new_with_sample_count(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
         let shader_source = format!(
-            "const IMAGE_TARGET_SRGB: bool = {};\nconst GLYPH_SHARPNESS: f32 = {};\n{SHADER_SRC}",
+            "const IMAGE_TARGET_SRGB: bool = {};\nconst GLYPH_SHARPNESS: f32 = {};\nconst SOLID_U: f32 = {};\n{SHADER_SRC}",
             format.is_srgb(),
-            platform_glyph_sharpness()
+            platform_glyph_sharpness(),
+            GlyphVertex::SOLID_TEX_COORDS[0],
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glyph shader"),
@@ -412,7 +424,7 @@ impl GlyphRenderer {
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState { count: 4, ..Default::default() },
+            multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
             multiview_mask: None,
             cache: None,
         });
@@ -562,6 +574,10 @@ fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if in.tex_coords.x < 0.0 {
+        // The gap between image UVs and glyph UVs leaves room for interpolation error.
+        if abs(in.tex_coords.x - SOLID_U) < 0.25 {
+            return in.color;
+        }
         let image_uv = vec2<f32>(-in.tex_coords.x - 1.0, in.tex_coords.y);
         let premultiplied = textureSampleLevel(image_texture, image_sampler, image_uv, 0.0);
         if premultiplied.a <= 0.0 {

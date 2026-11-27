@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::Edition;
-use crate::app::{App, PlatformState, SettingsUiState, WorkspaceServices};
+use crate::app::{App, PlatformState, PreparedFontSystem, SettingsUiState, WorkspaceServices};
 use crate::product_paths::ProductPaths;
 use crate::ui_shell::UiShell;
 use appkit_shell::editor_runtime::{
@@ -33,13 +33,21 @@ enum AppStartupMode {
     LaunchParallel,
 }
 
-fn load_font_system() -> shaping::FontSystem {
+fn startup_log_path(startup_mode: AppStartupMode) -> Option<PathBuf> {
+    match startup_mode {
+        AppStartupMode::TestReady => None,
+        AppStartupMode::LaunchParallel => PlatformState::resolve_startup_log_path(),
+    }
+}
+
+fn load_font_system() -> PreparedFontSystem {
     let started_at = std::time::Instant::now();
     let font_system = shaping::font_cache::new_font_system_with_cache(
         &shaping::font_cache::default_cache_path().unwrap_or_default(),
     );
-    eprintln!("[startup] FontSystem::new: {:?}", started_at.elapsed());
-    font_system
+    let load_elapsed = started_at.elapsed();
+    eprintln!("[startup] FontSystem::new: {:?}", load_elapsed);
+    PreparedFontSystem { font_system, load_elapsed }
 }
 
 fn register_plugin_factory(
@@ -267,6 +275,7 @@ impl App {
     ) -> Self {
         // Load persisted settings from settings.toml (before FontSystem/worker creation
         // so that font shaping uses persisted settings rather than defaults).
+        let settings_started_at = std::time::Instant::now();
         let persisted = match crate::settings_io::load(&paths.settings_file) {
             Ok(settings) => settings,
             Err(error) => {
@@ -275,9 +284,12 @@ impl App {
             }
         };
         let settings = settings_from_persisted(&persisted);
+        let settings_elapsed = settings_started_at.elapsed();
 
         let (ready_font_system, startup_font_preparation) = match startup_mode {
-            AppStartupMode::TestReady => (Some(Arc::new(Mutex::new(load_font_system()))), None),
+            AppStartupMode::TestReady => {
+                (Some(Arc::new(Mutex::new(load_font_system().font_system))), None)
+            }
             AppStartupMode::LaunchParallel => {
                 match std::thread::Builder::new()
                     .name(FONT_PREPARATION_THREAD_NAME.to_owned())
@@ -286,7 +298,7 @@ impl App {
                     Ok(preparation) => (None, Some(preparation)),
                     Err(error) => {
                         eprintln!("[startup] could not start font preparation worker: {error}");
-                        (Some(Arc::new(Mutex::new(load_font_system()))), None)
+                        (Some(Arc::new(Mutex::new(load_font_system().font_system))), None)
                     }
                 }
             }
@@ -296,8 +308,11 @@ impl App {
         // scale factor is known.  We store None here and spawn the worker
         // after scale setup in init_window.
 
+        let history_started_at = std::time::Instant::now();
         let workspace_services = WorkspaceServices::new(&paths);
+        let history_elapsed = history_started_at.elapsed();
 
+        let themes_started_at = std::time::Instant::now();
         let (theme_registry, theme_load_report) = load_user_themes(&paths.theme_dir);
         for diagnostic in &theme_load_report.source_diagnostics {
             eprintln!("[theme] {diagnostic:?}");
@@ -308,6 +323,9 @@ impl App {
         let settings_ui = SettingsUiState::new(theme_registry);
         let current_theme =
             settings_ui.resolve_theme(settings.theme_mode, winit::window::Theme::Dark);
+        let themes_elapsed = themes_started_at.elapsed();
+
+        let runtime_started_at = std::time::Instant::now();
         let mut editor_runtime =
             build_product_editor_runtime(settings, current_theme, &paths.snapshots_dir, edition)
                 .expect("textora editor runtime must be constructible");
@@ -319,6 +337,8 @@ impl App {
         {
             eprintln!("[startup] could not start GPU preparation: {error}");
         }
+        let runtime_elapsed = runtime_started_at.elapsed();
+
         let mut app = Self {
             paths,
             settings_ui,
@@ -327,11 +347,29 @@ impl App {
             editor_runtime,
             workspace_services,
             ui_shell: UiShell::new(),
-            platform: PlatformState::new(file_path, startup_started_at, startup_font_preparation),
+            platform: PlatformState::new(
+                file_path,
+                startup_started_at,
+                startup_font_preparation,
+                startup_log_path(startup_mode),
+            ),
         };
         app.ui_shell.set_plain_text_only(edition == Edition::Lite);
         app.ui_shell.set_sidebar_width_logical(persisted.sidebar_width);
-        eprintln!("[startup] App::new total: {:?}", startup_started_at.elapsed());
+        if matches!(startup_mode, AppStartupMode::LaunchParallel) {
+            app.platform.log_startup_banner(edition);
+            app.platform.log_startup_stage(
+                "app_new",
+                startup_started_at.elapsed(),
+                format_args!(
+                    " settings={:.2}ms history={:.2}ms themes={:.2}ms runtime={:.2}ms",
+                    settings_elapsed.as_secs_f64() * 1_000.0,
+                    history_elapsed.as_secs_f64() * 1_000.0,
+                    themes_elapsed.as_secs_f64() * 1_000.0,
+                    runtime_elapsed.as_secs_f64() * 1_000.0,
+                ),
+            );
+        }
         app
     }
 
@@ -341,9 +379,9 @@ impl App {
         }
 
         let wait_started_at = std::time::Instant::now();
-        let font_system = match self.platform.take_font_preparation() {
+        let prepared = match self.platform.take_font_preparation() {
             Some(preparation) => match preparation.join() {
-                Ok(font_system) => font_system,
+                Ok(prepared) => prepared,
                 Err(_) => {
                     eprintln!("[startup] font preparation worker panicked; retrying synchronously");
                     load_font_system()
@@ -351,13 +389,19 @@ impl App {
             },
             None => load_font_system(),
         };
-        let shared_font_system = Arc::new(Mutex::new(font_system));
+        let shared_font_system = Arc::new(Mutex::new(prepared.font_system));
         self.editor_runtime.set_shared_font_system(Arc::clone(&shared_font_system));
-        eprintln!("[startup] font preparation wait: {:?}", wait_started_at.elapsed());
+        self.platform.log_startup_stage(
+            "font_wait",
+            wait_started_at.elapsed(),
+            format_args!(" font_load={:.2}ms", prepared.load_elapsed.as_secs_f64() * 1_000.0),
+        );
         shared_font_system
     }
 
     pub(crate) fn init_display_map(&mut self, dv_idx: usize) {
+        let log_startup = !self.editor_runtime.first_frame_presented();
+        let total_started = std::time::Instant::now();
         let Some(tab_id) = self.editor_tab_id_at(dv_idx) else {
             return;
         };
@@ -366,7 +410,7 @@ impl App {
         let font_size = metrics.font_size;
 
         // Early-out: collect metadata first so we can release dv borrow before shaping.
-        let (_vc, viewport_width, lh, _font_size, _pre_start, _pre_end, viewport_line_data) = {
+        let collect_result: Option<_> = {
             let Some(tab) = self.tab_session(tab_id) else { return };
             let dv = tab.document();
 
@@ -398,9 +442,24 @@ impl App {
                             tab.clamp_scroll_anchor(line_height);
                             tab.derive_scroll_top(line_height);
                         }
+                        if log_startup {
+                            self.platform.log_startup_point(
+                                "init_display_map_skipped",
+                                format_args!(" reason=up_to_date dv_idx={dv_idx}"),
+                            );
+                        }
                         return;
                     }
                     if is_placeholder {
+                        let line_count = dv.line_count();
+                        if log_startup {
+                            self.platform.log_startup_point(
+                                "init_display_map_skipped",
+                                format_args!(
+                                    " reason=placeholder lines={line_count} dv_idx={dv_idx}"
+                                ),
+                            );
+                        }
                         return;
                     }
                     // Hash mismatch but entry has valid visual_breaks (e.g. viewport resize).
@@ -439,10 +498,17 @@ impl App {
                     vld.push((dl, s.to_owned(), off, len as u32));
                 }
             }
-            (vc, vw, lh, fs, pre_start, pre_end, vld)
+            Some((vc, vw, lh, fs, pre_start, pre_end, vld))
         }; // dv borrow released
+        let Some((_vc, viewport_width, lh, _font_size, _pre_start, _pre_end, viewport_line_data)) =
+            collect_result
+        else {
+            return;
+        };
+        let p1_elapsed = total_started.elapsed();
 
         // Phase 2: shape viewport lines with main-thread shaper
+        let p2_started = std::time::Instant::now();
         let mut pre_entries: std::collections::HashMap<
             usize,
             appkit_shell::snap_tree::DisplayLineEntry,
@@ -509,13 +575,18 @@ impl App {
                 }
             }
         });
+        let p2_elapsed = p2_started.elapsed();
+        let shaped_lines = pre_entries.len();
 
         // Phase 3: build all entries and commit
+        let p3_started = std::time::Instant::now();
+        let mut total_lines = 0usize;
         if let Some(mut tab) = self.tab_session_mut(tab_id) {
             let dv = tab.document();
+            total_lines = dv.line_count();
             let est_cpl = (viewport_width / (font_size * 0.6)).max(40.0);
 
-            let entries: Vec<appkit_shell::snap_tree::DisplayLineEntry> = (0..dv.line_count())
+            let entries: Vec<appkit_shell::snap_tree::DisplayLineEntry> = (0..total_lines)
                 .map(|i| {
                     if let Some(entry) = pre_entries.get(&i) {
                         entry.clone()
@@ -545,6 +616,19 @@ impl App {
             tab.clamp_scroll_anchor(lh);
             tab.derive_scroll_top(lh);
             self.editor_runtime.mark_skip_next_reshape_submit();
+        }
+        let p3_elapsed = p3_started.elapsed();
+        if log_startup {
+            self.platform.log_startup_stage(
+                "init_display_map",
+                total_started.elapsed(),
+                format_args!(
+                    " dv_idx={dv_idx} lines={total_lines} shaped={shaped_lines} p1={:.2}ms p2={:.2}ms p3={:.2}ms",
+                    p1_elapsed.as_secs_f64() * 1_000.0,
+                    p2_elapsed.as_secs_f64() * 1_000.0,
+                    p3_elapsed.as_secs_f64() * 1_000.0,
+                ),
+            );
         }
     }
 }

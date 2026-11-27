@@ -543,7 +543,7 @@ mod zoom_tests {
         let line = "中文,正文".as_bytes();
         let natural_hash = content_hash_for_layout(
             line,
-            0,
+            None,
             200.0,
             settings.font_size,
             TextSpacingMode::Natural,
@@ -553,7 +553,7 @@ mod zoom_tests {
         );
         let verbatim_hash = content_hash_for_layout(
             line,
-            0,
+            None,
             200.0,
             settings.font_size,
             TextSpacingMode::Verbatim,

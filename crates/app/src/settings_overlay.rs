@@ -156,9 +156,6 @@ impl App {
         self.refresh_settings_overlay();
         if failed {
             self.platform.schedule_redraw();
-            if let Some(window) = self.editor_runtime.window() {
-                window.request_redraw();
-            }
         }
     }
 }

@@ -178,9 +178,10 @@ impl ReshapeLayout {
             document_uses_verbatim_source_spacing(document),
             &line_bytes,
         );
+        let highlight_anchor = document.language.map(|_| byte_offset);
         let content_hash = content_hash_for_layout(
             &line_bytes,
-            byte_offset,
+            highlight_anchor,
             self.viewport_width,
             self.font_size,
             spacing_mode,
@@ -199,6 +200,7 @@ impl ReshapeLayout {
             generation: self.generation,
             doc_line: line,
             byte_offset,
+            highlight_depends_on_position: highlight_anchor.is_some(),
             byte_length: byte_length as u32,
             line_bytes: Arc::from(line_bytes.as_ref()),
             viewport_width: self.viewport_width,

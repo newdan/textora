@@ -457,7 +457,7 @@ pub(in crate::render) fn draw_line_segment(
     let italic = inline_style.is_some_and(is_italic);
     if let Some(shaped) = &line.shaped
         && let Some(mut layout) = crate::layout::shaping::segment_text_layout(
-            shaped,
+            &shaped.clusters,
             start,
             end,
             text,

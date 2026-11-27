@@ -7,6 +7,7 @@ pub enum ShellEvent {
     FileSafetyResultsReady,
     SaveResultsReady,
     ProductWake,
+    DisplayTick,
     Accessibility(Arc<accesskit_winit::Event>),
 }
 

@@ -8,6 +8,34 @@ use ui::layout::{
 };
 
 #[test]
+fn editing_an_earlier_line_keeps_plain_text_layout_keys_stable() {
+    let mut document = DocumentModel::from_lines(&["first".into(), "unchanged text".into()]);
+    let mut presentation = DocumentPresentation::new(10, 10.0);
+    let layout_key = |document: &DocumentModel, presentation: &mut DocumentPresentation| {
+        let bytes = document.doc_line_bytes(1).expect("the unchanged line must exist");
+        let byte_offset = document.line_byte_offset(1).expect("the unchanged line has an offset");
+        super::lookup_or_prepare_cached_line(
+            super::LineCacheInput {
+                doc_index: 1,
+                doc_offset: byte_offset,
+                highlight_anchor: document.language.map(|_| byte_offset),
+                bytes: &bytes,
+                spacing: ui::typography::TextSpacingMode::Natural,
+                preedit_on_cursor_line: false,
+            },
+            presentation,
+            800.0,
+            16.0,
+            "Menlo",
+        )
+        .layout_hash
+    };
+    let before = layout_key(&document, &mut presentation);
+    document.replace_range(0..0, "前缀");
+    assert_eq!(before, layout_key(&document, &mut presentation));
+}
+
+#[test]
 fn render_viewport_width_uses_physical_scrollbar_reserve() {
     let settings = ui::settings::Settings::new();
     let metrics = ui::settings::UiMetrics::from_settings(&settings, 2.0);

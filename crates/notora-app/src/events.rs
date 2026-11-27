@@ -4,7 +4,9 @@ use appkit_shell::ShellEvent;
 use appkit_shell::canvas_viewport::{
     CanvasWheelDelta, CanvasWheelMode, canvas_pinch_viewport_action, canvas_wheel_viewport_action,
 };
+use appkit_shell::editor_runtime::input_latency::InputEventKind;
 use appkit_shell::editor_runtime::{EditorFocus, EditorInputContext};
+use appkit_shell::frame_pacer::{FrameRequest, input_frame_request};
 use appkit_shell::window_input::{scroll_delta_pixels, ui_modifiers, winit_key_to_keycode};
 use winit::application::ApplicationHandler;
 use winit::event::{
@@ -86,6 +88,10 @@ impl ApplicationHandler<ShellEvent> for NotoraApp {
         self.handle_window_event(event_loop, window_id, event);
     }
 
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.stop_frame_pacing();
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.handle_about_to_wait(event_loop);
     }
@@ -101,6 +107,7 @@ impl NotoraRuntime {
 
     fn handle_user_event(&mut self, _event_loop: &ActiveEventLoop, event: ShellEvent) {
         match event {
+            ShellEvent::DisplayTick => self.present_on_display_tick(),
             ShellEvent::ProductWake => self.drain_product_events(),
             ShellEvent::SaveResultsReady => {
                 self.drain_runtime_save_completions();
@@ -119,6 +126,20 @@ impl NotoraRuntime {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        let request = input_frame_request(&event, self.editor_pointer_is_captured());
+        self.route_window_event(event_loop, event);
+        if let Some(request) = request
+            && self.take_redraw_request()
+        {
+            self.request_paced_frame(request);
+        }
+    }
+
+    fn route_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        let input_started_at = self.input_latency_started_at();
+        if matches!(&event, WindowEvent::Focused(false) | WindowEvent::Ime(Ime::Disabled)) {
+            self.cancel_pending_preedit_measurement();
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.shutdown();
@@ -129,6 +150,7 @@ impl NotoraRuntime {
                 self.set_scale_factor(scale_factor)
             }
             WindowEvent::Focused(focused) => self.set_window_focused(focused),
+            WindowEvent::Occluded(occluded) => self.set_window_occluded(occluded),
             WindowEvent::ThemeChanged(system_appearance) if self.follows_system_theme() => {
                 self.rebuild_theme_for_system_appearance(system_appearance);
             }
@@ -187,7 +209,19 @@ impl NotoraRuntime {
             WindowEvent::DroppedFile(path) => {
                 self.receive_system_open_paths(vec![path]);
             }
-            WindowEvent::Ime(event) => self.handle_ime_input(event),
+            WindowEvent::Ime(event) => {
+                let kind = match &event {
+                    Ime::Preedit(..) => InputEventKind::ImePreedit,
+                    Ime::Commit(..) => InputEventKind::ImeCommit,
+                    Ime::Enabled | Ime::Disabled => {
+                        self.handle_ime_input(event);
+                        return;
+                    }
+                };
+                self.measure_editor_input(input_started_at, kind, |runtime| {
+                    runtime.handle_ime_input(event);
+                });
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let Some(key_code) =
                     winit_key_to_keycode(&event.logical_key, event.text.as_deref())
@@ -195,15 +229,11 @@ impl NotoraRuntime {
                     return;
                 };
                 let modifiers = ui_modifiers(self.editor_runtime_mut().input_modifiers());
-                self.handle_key_input(key_code, modifiers, Some(event.physical_key));
+                self.measure_editor_input(input_started_at, InputEventKind::Key, |runtime| {
+                    runtime.handle_key_input(key_code, modifiers, Some(event.physical_key));
+                });
             }
-            WindowEvent::RedrawRequested => match self.render() {
-                Ok(()) => {
-                    self.record_first_frame_visible();
-                    self.restore_session_after_first_frame();
-                }
-                Err(error) => eprintln!("notora frame rendering failed: {error}"),
-            },
+            WindowEvent::RedrawRequested => self.request_paced_frame(FrameRequest::Immediate),
             _ => {}
         }
     }
@@ -211,11 +241,34 @@ impl NotoraRuntime {
     fn handle_about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.process_due_scheduled_work();
         if self.take_redraw_request() {
-            self.request_window_redraw();
+            self.request_paced_frame(FrameRequest::Deferred);
         }
+        self.present_on_display_tick();
         event_loop.set_control_flow(
             self.next_deadline().map(ControlFlow::WaitUntil).unwrap_or(ControlFlow::Wait),
         );
+    }
+    fn request_paced_frame(&mut self, request: FrameRequest) {
+        if self.paced_frame_requested(request) {
+            self.present_paced_frame();
+        }
+    }
+
+    fn present_on_display_tick(&mut self) {
+        if self.frame_due_on_tick() {
+            self.present_paced_frame();
+        }
+    }
+
+    fn present_paced_frame(&mut self) {
+        if let Err(error) = self.render() {
+            eprintln!("notora frame rendering failed: {error}");
+            return;
+        }
+        if self.editor_runtime_mut().first_frame_presented() {
+            self.record_first_frame_visible();
+            self.restore_session_after_first_frame();
+        }
     }
 }
 

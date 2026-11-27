@@ -33,6 +33,7 @@ pub mod editor_tab_set;
 pub mod event;
 mod event_runtime;
 pub mod frame_cache;
+pub mod frame_pacer;
 pub mod gpu;
 pub mod image_atlas;
 pub mod inspector_panel;

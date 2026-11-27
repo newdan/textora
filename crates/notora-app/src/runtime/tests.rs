@@ -1683,6 +1683,19 @@ fn search_text_drag_requests_redraw_in_the_same_pointer_event_cycle() {
 }
 
 #[test]
+fn unsent_frame_keeps_one_retry_for_a_consumed_editor_redraw_request() {
+    let mut app = app();
+    let _ = app.take_redraw_request();
+    app.editor_runtime_mut().request_redraw();
+
+    app.render().expect("headless rendering should compose without a submission");
+
+    assert!(!app.editor_runtime_mut().take_redraw_request());
+    assert!(app.take_redraw_request());
+    assert!(!app.take_redraw_request());
+}
+
+#[test]
 fn settings_modal_consumes_unhandled_keyboard_input() {
     let mut app = app();
     app.dispatch_action(NotoraAction::OpenSettings);
@@ -3279,7 +3292,7 @@ fn completed_note_creation_is_persisted_and_restored_after_restart() {
     assert_eq!(restarted_app.action_runtime.state().layout.focus_target, FocusTarget::Editor);
     assert_eq!(restarted_app.action_runtime.state().layout.compact_content, CompactContent::Editor);
     assert!(matches!(
-        restarted_app.render_frame().expect("restored note frame should compose"),
+        restarted_app.render_frame().expect("restored note frame should compose").0,
         appkit_shell::editor_runtime::EditorSurfacePaint::Document { .. }
     ));
 }

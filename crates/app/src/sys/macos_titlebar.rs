@@ -12,11 +12,22 @@ pub(crate) fn enable_full_size_content(window: &Window) {
     let Some(native_window) = native_window(window) else {
         return;
     };
-    native_window.setTitlebarAppearsTransparent(true);
-    native_window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
     let mut style = native_window.styleMask();
-    style.insert(NSWindowStyleMask::FullSizeContentView);
-    native_window.setStyleMask(style);
+    let fullscreen = style.contains(NSWindowStyleMask::FullScreen);
+    if native_window.titlebarAppearsTransparent() == fullscreen {
+        native_window.setTitlebarAppearsTransparent(!fullscreen);
+    }
+    if fullscreen {
+        if !native_window.isOpaque() {
+            native_window.setOpaque(true);
+        }
+        return;
+    }
+    native_window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    if !style.contains(NSWindowStyleMask::FullSizeContentView) {
+        style.insert(NSWindowStyleMask::FullSizeContentView);
+        native_window.setStyleMask(style);
+    }
     align_native_traffic_lights(&native_window, f64::from(ui::constants::TITLE_BAR_HEIGHT));
 }
 

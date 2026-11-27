@@ -207,9 +207,10 @@ impl RenderSession {
 
     pub(crate) fn request_redraw(&mut self) {
         self.redraw_requested = true;
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
+    }
+
+    pub(crate) fn has_redraw_request(&self) -> bool {
+        self.redraw_requested
     }
 
     pub(crate) fn take_redraw_request(&mut self) -> bool {

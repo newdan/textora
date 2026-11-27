@@ -513,7 +513,11 @@ pub(crate) fn layout_text_block(
         );
         let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(&projected.text);
 
-        let shaped_input = ctx.last_wrap_shaped.first().and_then(|s| s.as_ref());
+        let shaped_input = ctx
+            .last_wrap_shaped
+            .first()
+            .and_then(|run| run.as_ref())
+            .map(|shaped| crate::layout::shaping::ClusterLookup::new(shaped, wrapped.len()));
         let font_family_str = ctx.style.body_font_family.first().map(|s| s.as_str());
         for (visual_index, w) in wrapped.iter().enumerate() {
             let visual_indent = if visual_index == 0 { line_indent } else { 0.0 };
@@ -535,9 +539,9 @@ pub(crate) fn layout_text_block(
                     source_range: span.source_range.clone(),
                 });
             }
-            let seg_text_layout = if let Some(full) = shaped_input {
+            let seg_text_layout = if let Some(lookup) = shaped_input.as_ref() {
                 crate::layout::shaping::segment_text_layout(
-                    full,
+                    lookup.candidates(seg_start..seg_end),
                     seg_start,
                     seg_end,
                     &w.text,
@@ -657,6 +661,8 @@ pub(in crate::layout::block) fn layout_line_with_styles(
     let mut result = Vec::new();
     let mut ly = y_start;
     let visual_grapheme_bytes = crate::grapheme_map::grapheme_byte_boundaries(&projected.text);
+    let shaped_input =
+        full_shaped.map(|shaped| crate::layout::shaping::ClusterLookup::new(shaped, wrapped.len()));
     for w in wrapped {
         let seg_start = w.byte_start;
         let seg_end = w.byte_end;
@@ -678,9 +684,9 @@ pub(in crate::layout::block) fn layout_line_with_styles(
         let source_projection = projected
             .slice_visual_line_indexed(&visual_grapheme_bytes, 0, seg_start..seg_end)
             .expect("wrapped visual lines must end at projection grapheme boundaries");
-        let seg_text_layout = full_shaped.and_then(|shaped| {
+        let seg_text_layout = shaped_input.as_ref().and_then(|lookup| {
             crate::layout::shaping::segment_text_layout(
-                shaped,
+                lookup.candidates(seg_start..seg_end),
                 seg_start,
                 seg_end,
                 &w.text,

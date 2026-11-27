@@ -2,6 +2,7 @@
 //!
 //! Converts text into positioned glyph clusters for rendering.
 
+mod editing_shape;
 pub mod font_cache;
 mod rasterization;
 use hashlink::LruCache;
@@ -132,6 +133,7 @@ pub struct Shaper {
     font_weight: Weight,
     font_style: Style,
     cache: GraphemeAdvanceCache,
+    editing_shapes: editing_shape::EditingShapeCache,
     scale_context: swash::scale::ScaleContext,
     rasterization_policies: HashMap<FontId, GlyphRasterization>,
     /// Reusable buffer — avoids reallocating on every shape() call.
@@ -162,6 +164,7 @@ impl Shaper {
             font_weight: Weight::NORMAL,
             font_style: Style::Normal,
             cache: GraphemeAdvanceCache::new(),
+            editing_shapes: Default::default(),
             scale_context: swash::scale::ScaleContext::new(),
             rasterization_policies: HashMap::new(),
             buffer,
@@ -188,6 +191,7 @@ impl Shaper {
             font_weight: Weight::NORMAL,
             font_style: Style::Normal,
             cache: GraphemeAdvanceCache::new(),
+            editing_shapes: Default::default(),
             scale_context: swash::scale::ScaleContext::new(),
             rasterization_policies: HashMap::new(),
             buffer,
@@ -216,6 +220,7 @@ impl Shaper {
             font_weight: Weight::NORMAL,
             font_style: Style::Normal,
             cache: GraphemeAdvanceCache::new(),
+            editing_shapes: Default::default(),
             scale_context: swash::scale::ScaleContext::new(),
             rasterization_policies: HashMap::new(),
             buffer,
@@ -365,6 +370,18 @@ impl Shaper {
         // Return buffer for reuse
         self.buffer = buffer;
         Ok(ShapedRun { clusters, width: total_width })
+    }
+
+    /// Shape an editor line before it is broken into visual lines.
+    pub fn shape_editing_line(&mut self, text: &str) -> Result<ShapedRun, ShapeError> {
+        if !editing_shape::supports_word_reuse(text) {
+            return self.shape(text);
+        }
+        let family = self.font_family.as_deref().map_or(Family::SansSerif, Self::resolve_family);
+        let attrs = Attrs::new().family(family).weight(self.font_weight).style(self.font_style);
+        let mut font_system =
+            self.font_system.lock().expect("the font system lock must not be poisoned");
+        Ok(self.editing_shapes.shape_line(text, attrs, self.font_size, &mut font_system))
     }
 
     /// Shape text with per-span weight/style overrides (e.g. bold/italic).
@@ -701,6 +718,55 @@ impl Shaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editing_shape_reuses_words_across_changes_to_a_long_line() {
+        let mut shaper = Shaper::new().expect("test shaper must initialize");
+        shaper.set_font_family(Some("-apple-system"));
+        let line = "ffi 你好, cafe\u{0301} and 👩🏽‍💻 ".repeat(30);
+        let edited = format!("新 input {line}");
+        let original_layout = shaper.shape(&line).expect("original line shapes");
+        let edited_layout = shaper.shape(&edited).expect("edited line shapes");
+        let sentinel = "the general shaper keeps its own buffer";
+        shaper.shape(sentinel).expect("sentinel line shapes");
+
+        assert_eq!(
+            shaper.shape_editing_line(&line).expect("original line shapes"),
+            original_layout
+        );
+        assert_eq!(shaper.shape_editing_line(&edited).expect("edited line shapes"), edited_layout);
+        assert!(shaper.buffer.lines[0].text() == sentinel, "editing should reuse word shapes");
+    }
+
+    #[test]
+    fn editing_shape_matches_standard_shaping_across_fonts_and_text_directions() {
+        let mut shaper = Shaper::new().expect("test shaper must initialize");
+        for (font, weight, style, size) in [
+            ("-apple-system", Weight::NORMAL, Style::Normal, 15.0),
+            ("Menlo", Weight::BOLD, Style::Italic, 28.0),
+            ("-apple-system", Weight::NORMAL, Style::Normal, 24.0),
+        ] {
+            shaper.set_font_family(Some(font));
+            shaper.set_font_weight(weight);
+            shaper.set_font_style(style);
+            shaper.set_font_size(size);
+            for pattern in [
+                "office  你好。 (42) 👩‍💻 ",
+                "שלום, world! سَلَام (123) ",
+                "alpha\t你好 beta ",
+                "first line\r\nsecond line ",
+                "你好、世界! 日本語、こんにちは。 ",
+            ] {
+                let line = pattern.repeat(20);
+                let expected = shaper.shape(&line).expect("standard path shapes test line");
+                assert_eq!(
+                    shaper.shape_editing_line(&line).expect("editing path shapes test line"),
+                    expected,
+                    "{font:?}, {pattern:?}",
+                );
+            }
+        }
+    }
 
     fn assert_offsets_use_pixels(highlighted: bool) {
         let mut shaper = Shaper::new().expect("offset regression requires system fonts");
