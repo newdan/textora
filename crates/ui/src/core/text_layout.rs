@@ -16,7 +16,7 @@ pub fn wrap_text_to_lines(
     text: &str,
     max_width: f32,
     max_lines: usize,
-    measure_width: impl Fn(&str) -> f32,
+    mut measure_width: impl FnMut(&str) -> f32,
 ) -> Vec<String> {
     if text.is_empty() || !max_width.is_finite() || max_width <= 0.0 || max_lines == 0 {
         return Vec::new();
@@ -24,13 +24,13 @@ pub fn wrap_text_to_lines(
 
     let mut lines: Vec<String> = Vec::new();
     for paragraph in text.split('\n') {
-        wrap_paragraph(paragraph, max_width, &measure_width, &mut lines);
+        wrap_paragraph(paragraph, max_width, &mut measure_width, &mut lines);
     }
 
     let truncated = lines.len() > max_lines;
     lines.truncate(max_lines);
     if truncated && let Some(last_line) = lines.last_mut() {
-        append_fitting_ellipsis(last_line, max_width, &measure_width);
+        append_fitting_ellipsis(last_line, max_width, &mut measure_width);
     }
     lines
 }
@@ -38,7 +38,7 @@ pub fn wrap_text_to_lines(
 fn wrap_paragraph(
     paragraph: &str,
     max_width: f32,
-    measure_width: &impl Fn(&str) -> f32,
+    measure_width: &mut impl FnMut(&str) -> f32,
     lines: &mut Vec<String>,
 ) {
     if paragraph.is_empty() {
@@ -72,7 +72,7 @@ fn wrap_paragraph(
 fn append_graphemes(
     text: &str,
     max_width: f32,
-    measure_width: &impl Fn(&str) -> f32,
+    measure_width: &mut impl FnMut(&str) -> f32,
     lines: &mut Vec<String>,
     current_line: &mut String,
 ) {
@@ -90,7 +90,7 @@ fn append_graphemes(
 fn append_fitting_ellipsis(
     line: &mut String,
     max_width: f32,
-    measure_width: &impl Fn(&str) -> f32,
+    measure_width: &mut impl FnMut(&str) -> f32,
 ) {
     const ELLIPSIS: &str = "…";
     while !line.is_empty() && measure_width(&format!("{line}{ELLIPSIS}")) > max_width {

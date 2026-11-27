@@ -1,7 +1,8 @@
-//! Tooltip overlay widget — renders a single-line label pill with
+//! Tooltip overlay widget — renders a wrapped label with
 //! auto-positioning relative to a target rect.
 
 use crate::core::geom::Rect;
+use crate::core::measure::TextMeasure;
 use crate::core::text_layout::wrap_text_to_lines;
 use crate::core::text_util::estimate_text_width_px;
 use crate::core::widget::{Event, EventCtx, LayoutCtx, PaintCtx, Widget, WidgetAction};
@@ -68,10 +69,35 @@ impl TooltipWidget {
     /// 3. Side with more horizontal space (if both vertical positions overflow)
     /// Horizontal clamping ensures tooltip stays within `[0, screen_w]`.
     pub fn new(hint: &TooltipHint, dpi: f32, screen_w: f32, screen_h: f32) -> (Self, Rect) {
+        Self::layout(hint, dpi, screen_w, screen_h, estimate_text_width_px)
+    }
+
+    /// Use the same font metrics as the UI paint context for wrapping and sizing.
+    pub fn with_measure(
+        hint: &TooltipHint,
+        dpi: f32,
+        screen_w: f32,
+        screen_h: f32,
+        measure: &mut dyn TextMeasure,
+    ) -> (Self, Rect) {
+        Self::layout(hint, dpi, screen_w, screen_h, |text, font_size| {
+            let width = measure.measure(text, font_size);
+            if width > 0.0 { width } else { estimate_text_width_px(text, font_size) }
+        })
+    }
+
+    fn layout(
+        hint: &TooltipHint,
+        dpi: f32,
+        screen_w: f32,
+        screen_h: f32,
+        mut measure: impl FnMut(&str, f32) -> f32,
+    ) -> (Self, Rect) {
         let Some(metrics) = TooltipLayoutMetrics::new(dpi, screen_w, screen_h) else {
             return Self::empty(hint, dpi);
         };
-        let (display_lines, tooltip_w, tooltip_h) = Self::wrap_content(hint, &metrics);
+        let (display_lines, tooltip_w, tooltip_h) =
+            Self::wrap_content(hint, &metrics, |text| measure(text, metrics.font_size));
         if display_lines.is_empty() {
             return Self::empty(hint, dpi);
         }
@@ -99,19 +125,19 @@ impl TooltipWidget {
         )
     }
 
-    fn wrap_content(hint: &TooltipHint, metrics: &TooltipLayoutMetrics) -> (Vec<String>, f32, f32) {
+    fn wrap_content(
+        hint: &TooltipHint,
+        metrics: &TooltipLayoutMetrics,
+        mut measure_width: impl FnMut(&str) -> f32,
+    ) -> (Vec<String>, f32, f32) {
         let content_max_width = (metrics.max_width - metrics.pad_x * 2.0).max(0.0);
         let max_lines = (((metrics.available_height - metrics.pad_y * 2.0).max(0.0)
             / metrics.line_height)
             .floor() as usize)
             .max(1);
-        let lines = wrap_text_to_lines(&hint.label, content_max_width, max_lines, |text| {
-            estimate_text_width_px(text, metrics.font_size)
-        });
-        let text_width = lines
-            .iter()
-            .map(|line| estimate_text_width_px(line, metrics.font_size))
-            .fold(0.0, f32::max);
+        let lines =
+            wrap_text_to_lines(&hint.label, content_max_width, max_lines, &mut measure_width);
+        let text_width = lines.iter().map(|line| measure_width(line)).fold(0.0, f32::max);
         let width = (text_width + metrics.pad_x * 2.0).min(metrics.max_width);
         let height = (metrics.line_height * lines.len() as f32 + metrics.pad_y * 2.0)
             .min(metrics.available_height);
@@ -138,11 +164,12 @@ impl TooltipWidget {
 
         let left_space = target.x - metrics.margin_x;
         let right_space = metrics.screen_w - target.right();
-        let x = if right_space >= left_space {
-            (target.right() + metrics.gap).min(metrics.screen_w - metrics.margin_x - tooltip_w)
+        let side_x = if right_space >= left_space {
+            target.right() + metrics.gap
         } else {
-            (target.x - tooltip_w - metrics.gap).max(metrics.margin_x)
+            target.x - tooltip_w - metrics.gap
         };
+        let x = side_x.max(metrics.margin_x).min(metrics.screen_w - metrics.margin_x - tooltip_w);
         let y = Self::clamp_y(&target, tooltip_h, metrics.screen_h, metrics.margin_y);
         Rect::new(x, y, tooltip_w, tooltip_h)
     }
@@ -254,19 +281,19 @@ impl Widget for TooltipWidget {
         let text_block_top = r.y + (r.h - text_block_height).max(0.0) * 0.5;
         let first_baseline =
             text_block_top + self.line_height * 0.5 + font_size * BASELINE_CENTER_SHIFT;
-        if let Some(ref mut shaper) = ctx.shaper {
+        let Some(shaper) = ctx.shaper.as_deref_mut() else { return };
+        ctx.list.clip(r, |list| {
             for (line_index, line) in self.display_lines.iter().enumerate() {
-                let text_y = first_baseline + line_index as f32 * self.line_height;
-                ctx.list.text_shaped(
+                list.text_shaped(
                     text_x,
-                    text_y,
+                    first_baseline + line_index as f32 * self.line_height,
                     font_size,
                     theme.application_theme().text_primary,
                     line,
                     shaper,
                 );
             }
-        }
+        });
     }
 
     fn accessibility_node(&self, ctx: &AccessibilityContext) -> Option<AccessibilityNode> {

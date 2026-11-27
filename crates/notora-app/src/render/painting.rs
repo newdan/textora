@@ -441,8 +441,15 @@ impl NotoraShell {
             || model.save_conflict.is_some()
             || model.show_new_document_menu;
         if !product_overlay_visible && let Some(hint) = self.active_tooltip.as_ref() {
-            let (tooltip, tooltip_rect) =
-                TooltipWidget::new(hint, layout.dpi, layout.overlay_rect.w, layout.overlay_rect.h);
+            let (tooltip, tooltip_rect) = frame.with_layout_context(|context| {
+                TooltipWidget::with_measure(
+                    hint,
+                    layout.dpi,
+                    layout.overlay_rect.w,
+                    layout.overlay_rect.h,
+                    context.measure,
+                )
+            });
             frame.with_paint_context(|context| {
                 paint_at(context, tooltip_rect, |context| tooltip.paint(context));
             });

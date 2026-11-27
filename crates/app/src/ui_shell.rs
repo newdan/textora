@@ -6,6 +6,7 @@ use crate::editor_host::EditorHostWidget;
 use appkit_core::tab_set::types::TabId;
 use appkit_shell::SystemClipboard;
 use appkit_shell::inspector_panel::{MountedInspectorPanel, StampedInspectorPanelAction};
+#[cfg(test)]
 use appkit_shell::measure_adapter::MeasureFromShaper;
 use appkit_shell::smooth_scroll::SmoothScroll;
 use std::any::Any;
@@ -129,9 +130,6 @@ pub struct UiShell {
     tab_scroll_animation: SmoothScroll,
     popup_tab_ids: Vec<TabId>,
     dock_dirty: bool,
-    /// UI 字体 shaper，用于 widget 布局时的精确文本测量（proportional font）。
-    /// 与编辑器 monospace shaper 分开，避免 CJK 标点等字符的宽度误差。
-    ui_shaper: Option<shaping::Shaper>,
     /// 上次的 sidebar 可见性/宽度，变化时需重建 Dock children 以更新厚度闭包。
     last_sidebar_visible: bool,
     last_sidebar_thickness: f32,
@@ -198,7 +196,6 @@ impl UiShell {
             tab_scroll_animation: SmoothScroll::new(),
             popup_tab_ids: Vec::new(),
             dock_dirty: true,
-            ui_shaper: None,
             last_sidebar_visible: false,
             last_sidebar_thickness: 0.0,
             last_search_visible: false,
@@ -857,16 +854,7 @@ impl UiShell {
         }
 
         // Step 3: Layout
-        self.ensure_ui_shaper();
-        let mut ui_adapter;
-        let ui_measure: Option<&mut dyn TextMeasure> = match self.ui_shaper {
-            Some(ref mut ui_shaper) => {
-                ui_adapter = MeasureFromShaper(ui_shaper);
-                Some(&mut ui_adapter)
-            }
-            None => None,
-        };
-        let mut layout_ctx = LayoutCtx { ui_measure, measure, theme, dpi };
+        let mut layout_ctx = LayoutCtx { ui_measure: None, measure, theme, dpi };
         self.dock.layout(screen_rect, &mut layout_ctx);
         Self::resolve_overlay_layouts(&mut self.overlays, screen_rect, dpi, &mut layout_ctx);
         if let Some(input) = self.canvas_scrollbars_input {
@@ -883,11 +871,14 @@ impl UiShell {
         // frames_rendered 变为 1 后需再触发一次重建，否则 sidebar widget 永远不会被加入 dock。
         self.dock_dirty = self.frames_rendered == 1;
 
-        // Cache screen dims and update tooltip
+        // Reflow a visible tooltip when its window or DPI changes.
+        if (self.screen_w, self.screen_h, self.last_dpi) != (screen.w, screen.h, dpi) {
+            self.tooltip_overlay = None;
+        }
         self.screen_w = screen.w;
         self.screen_h = screen.h;
         self.last_dpi = dpi;
-        self.update_tooltip(dpi);
+        self.update_tooltip(dpi, layout_ctx.measure);
     }
 
     /// Update widget state in-place on existing Dock children via downcast.
@@ -1111,17 +1102,6 @@ impl UiShell {
         self.dock.fill_rect
     }
 
-    /// 懒初始化 UI shaper，使用 proportional UI 字体族。
-    fn ensure_ui_shaper(&mut self) {
-        if self.ui_shaper.is_some() {
-            return;
-        }
-        let ui_font = ui::settings::platform_default_ui_font_family().to_string();
-        if let Ok(s) = shaping::Shaper::new() {
-            self.ui_shaper = Some(s.with_font_family(&ui_font));
-        }
-    }
-
     /// 测试辅助：强制重建 Dock children 并执行布局。
     #[cfg(test)]
     pub fn rebuild_and_layout(
@@ -1178,7 +1158,7 @@ impl UiShell {
         self.tooltip_timer.is_some()
     }
 
-    fn update_tooltip(&mut self, dpi: f32) {
+    fn update_tooltip(&mut self, dpi: f32, measure: &mut dyn TextMeasure) {
         if let Some(ref timer) = self.tooltip_timer
             && timer.start.elapsed().as_millis() >= 400
             && self.tooltip_overlay.is_none()
@@ -1188,8 +1168,13 @@ impl UiShell {
                 label: timer.hint.label.clone(),
                 target_rect: timer.target_screen_rect,
             };
-            let (widget, layout_rect) =
-                TooltipWidget::new(&screen_hint, dpi, self.screen_w, self.screen_h);
+            let (widget, layout_rect) = TooltipWidget::with_measure(
+                &screen_hint,
+                dpi,
+                self.screen_w,
+                self.screen_h,
+                measure,
+            );
             self.tooltip_overlay = Some(OverlayChild { widget: Box::new(widget), layout_rect });
         }
     }
@@ -3373,6 +3358,84 @@ mod tests {
                 scroll_top_rows: 12.5,
             }
         );
+    }
+
+    #[test]
+    fn title_bar_keeps_parent_path_clear_of_the_painted_filename() {
+        let theme = test_theme();
+        let mut shell = UiShell::new();
+        let mut shaper = shaping::Shaper::new().expect("标题栏测试需要文字整形器");
+        shaper.set_font_family(Some("monospace"));
+        let filename = "iiiiiiiiiiiiiiiiiiiiiiii.md";
+        shell.set_title_bar_input(ui::title_bar::TitleBarInput {
+            file_path: Some(std::path::Path::new("/docs").join(filename)),
+            sidebar_left: 0.0,
+            titlebar_x: 0.0,
+            can_toggle: false,
+            toggled: false,
+            toggle_label: None,
+            toc_visible: false,
+            toc_enabled: false,
+            inspector: None,
+            window_chrome: ui::title_bar::WindowChrome::Native,
+            show_hamburger: false,
+        });
+
+        shell.update_frame(
+            Screen::new(800.0, 600.0),
+            &theme,
+            &mut MeasureFromShaper(&mut shaper),
+            &shell_inputs(),
+        );
+        let list = shell.paint_chrome(&theme, 1.0, Some(&mut shaper));
+        let mut text = list.cmds.iter().filter_map(|command| match command {
+            DrawCmd::TextLayout { layout, x, .. } => Some((layout, *x)),
+            _ => None,
+        });
+        let (name, name_x) = text.next().expect("标题栏应绘制文件名");
+        let (path, path_x) = text.next().expect("标题栏应绘制父路径");
+        assert_eq!(name.text, filename);
+        assert_eq!(path.text, "/docs");
+        assert!(path_x > name_x + name.shaped.width, "父路径覆盖了文件名");
+    }
+
+    #[test]
+    fn path_tooltip_wraps_to_fit_the_painted_font() {
+        let theme = test_theme();
+        let mut shell = UiShell::new();
+        let mut shaper = shaping::Shaper::new().expect("提示框测试需要文字整形器");
+        shaper.set_font_family(Some("monospace"));
+        let label = "/Users/dan/proj/llmws/textora/textora/docs/onboarding.md";
+        let target_rect = Rect::new(620.0, 0.0, 170.0, 28.0);
+        shell.tooltip_timer = Some(TooltipTimer {
+            hint: TooltipHint { label: label.to_owned(), target_rect },
+            target_screen_rect: target_rect,
+            start: Instant::now() - std::time::Duration::from_secs(1),
+        });
+
+        for screen in [Screen::new(800.0, 600.0), Screen::new(240.0, 56.0)] {
+            shell.update_frame(
+                screen,
+                &theme,
+                &mut MeasureFromShaper(&mut shaper),
+                &shell_inputs(),
+            );
+            let bounds = shell.tooltip_overlay.as_ref().expect("应显示路径提示").layout_rect;
+            assert!(bounds.x >= 0.0 && bounds.right() <= screen.w, "{bounds:?}");
+            assert!(bounds.y >= 0.0 && bounds.bottom() <= screen.h, "{bounds:?}");
+            let list = shell.paint_chrome(&theme, 1.0, Some(&mut shaper));
+            let mut displayed_path = String::new();
+            let mut line_count = 0;
+            for command in list.cmds {
+                if let DrawCmd::TextLayout { layout, x, .. } = command {
+                    assert!(x >= bounds.x && x + layout.shaped.width <= bounds.right());
+                    displayed_path.push_str(&layout.text);
+                    line_count += 1;
+                }
+            }
+            assert!(line_count > 1);
+            assert_eq!(displayed_path, label);
+        }
     }
 
     #[test]

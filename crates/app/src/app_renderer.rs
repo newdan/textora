@@ -341,10 +341,11 @@ mod tests {
         app.switch_workspace_for_test(0);
         let mut shaper = shaping::Shaper::new().expect("测试画布插件必须能够创建文本整形器");
 
-        let snapshot =
-            app.prepare_editor_frame(&mut shaper).expect("常规帧必须在布局覆盖层前准备画布");
-        let editor_rect = app.ui_shell.editor_rect();
         let mut frame = app.editor_runtime.begin_frame().expect("无窗口的测试可以开始帧");
+        let snapshot = app
+            .prepare_editor_frame(&mut frame, &mut shaper)
+            .expect("常规帧必须在布局覆盖层前准备画布");
+        let editor_rect = app.ui_shell.editor_rect();
         app.paint_editor_surface(&mut frame, &mut Default::default(), Some(&snapshot))
             .expect("无 GPU 的画布帧也应记录编辑区位置");
         assert!(app.editor_runtime.editor_hit_test_allowed(
@@ -387,15 +388,15 @@ mod tests {
         );
         app.switch_workspace_for_test(0);
         let mut shaper = shaping::Shaper::new().expect("行号栏测试需要文字整形器");
-        assert!(app.prepare_editor_frame(&mut shaper).is_none());
+        let mut frame = app.editor_runtime.begin_frame().expect("应能创建无窗口编辑帧");
+        assert!(app.prepare_editor_frame(&mut frame, &mut shaper).is_none());
         let dpi = app.ui_metrics().dpi;
         app.ui_shell.paint_chrome(app.editor_runtime.theme(), dpi, Some(&mut shaper));
-        assert!(app.prepare_editor_frame(&mut shaper).is_none());
+        assert!(app.prepare_editor_frame(&mut frame, &mut shaper).is_none());
 
         let editor = app.ui_shell.editor_rect();
         assert!(editor.x > 0.0, "固定侧栏应占据编辑区左侧");
         let screen = ui::Screen::new(editor.right(), editor.bottom());
-        let mut frame = app.editor_runtime.begin_frame().expect("应能创建无窗口编辑帧");
         let mut resources = Default::default();
         app.paint_editor_surface(&mut frame, &mut resources, None)
             .expect("纯文本布局可在无 GPU 时绘制行号背景");
@@ -671,10 +672,9 @@ impl App {
         let screen_w = self.screen_width();
         let screen_h = self.screen_height();
 
-        let metrics = self.ui_metrics();
         let sync_prepare_started_at = Instant::now();
         let canvas = if let Some(text) = resources.text.as_mut() {
-            self.prepare_editor_frame(&mut text.shaper)
+            self.prepare_editor_frame(frame, &mut text.shaper)
         } else {
             self.sync_plugin_state();
             self.ui_shell.set_canvas_scrollbars_input(None);
@@ -695,12 +695,12 @@ impl App {
         let perf_editor_paint_us = editor_paint_started_at.elapsed().as_micros();
 
         let paint_chrome_started_at = Instant::now();
-        let chrome_list = self.ui_shell.paint_chrome(
-            self.editor_runtime.theme(),
-            metrics.dpi,
-            resources.text.as_mut().map(|text| &mut text.shaper),
-        );
         frame.with_paint_context(|context| {
+            let chrome_list = self.ui_shell.paint_chrome(
+                context.theme,
+                context.dpi,
+                context.shaper.as_deref_mut(),
+            );
             context.list.cmds.extend(chrome_list.cmds);
         });
         let perf_paint_chrome_us = paint_chrome_started_at.elapsed().as_micros();
@@ -842,7 +842,7 @@ impl App {
     }
 
     /// 用最新的 Shell 输入完成一次布局。
-    fn update_shell_layout(&mut self, shaper: &mut shaping::Shaper) {
+    fn update_shell_layout(&mut self, frame: &mut EditorFrame) {
         // Phase 3：注入 status_bar 数据，然后更新 dock 布局
         {
             use ui::core::Screen;
@@ -1020,8 +1020,9 @@ impl App {
             #[cfg(feature = "sync")]
             self.refresh_sync_settings_overlay();
 
-            let mut measure = appkit_shell::measure_adapter::MeasureFromShaper(shaper);
-            self.ui_shell.update_frame(screen, self.editor_runtime.theme(), &mut measure, &inputs);
+            frame.with_layout_context(|context| {
+                self.ui_shell.update_frame(screen, context.theme, context.measure, &inputs);
+            });
             // The first layout defers sidebar creation until the native window is ready.
             if !self.editor_runtime.first_frame_presented() && self.ui_shell.dock_is_dirty() {
                 self.platform.schedule_redraw();
@@ -1041,18 +1042,19 @@ impl App {
     /// 同步内容，先解析画布滚动条，再将覆盖层和编辑区布局到同一帧。
     fn prepare_editor_frame(
         &mut self,
+        frame: &mut EditorFrame,
         shaper: &mut shaping::Shaper,
     ) -> Option<CanvasViewportSnapshot> {
         let canvas = self.sync_and_prepare_canvas_frame(shaper);
-        self.update_shell_layout(shaper);
+        self.update_shell_layout(frame);
         canvas
     }
 
     #[cfg(test)]
     pub(crate) fn prepare_editor_pointer_frame_for_test(&mut self) {
         let mut shaper = shaping::Shaper::new().expect("指针测试需要文字整形器");
-        let canvas = self.prepare_editor_frame(&mut shaper);
         let mut frame = self.editor_runtime.begin_frame().expect("应能创建无窗口帧");
+        let canvas = self.prepare_editor_frame(&mut frame, &mut shaper);
         self.paint_editor_surface(&mut frame, &mut RenderResources::default(), canvas.as_ref())
             .expect("应能发布活动编辑区的指针坐标");
     }
