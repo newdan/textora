@@ -1,13 +1,13 @@
 //! TitleBarWidget — Sidebar 模式下显示在内容区顶部的标题栏。
 //!
 //! 显示：文件名（正常大小）+ 完整路径（更小、更淡的颜色）。
-//! 高度与 sidebar header 一致（HEADER_H = 28px * dpi）。
+//! 高度与侧栏顶栏一致。
 
 use crate::core::widget::WidgetAction;
 use crate::core::{Event, EventCtx, LayoutCtx, MouseButton, PaintCtx, Rect, Widget};
 use crate::core::{TextMeasure, text_util::truncate_title_precise};
 use crate::widgets::button::{ButtonStyle, ButtonVisualState};
-use crate::widgets::icon::draw_icon;
+use crate::widgets::icon::{draw_icon, draw_sidebar_icon};
 use crate::widgets::tooltip::TooltipHint;
 use std::any::Any;
 use std::path::PathBuf;
@@ -26,8 +26,6 @@ const CENTERED_TEXT_BASELINE_EM: f32 = 0.35;
 const ELLIPSIS: &str = "…";
 const WINDOW_BUTTON_WIDTH_LOGICAL: f32 = 40.0;
 const WINDOW_ICON_SIZE_LOGICAL: f32 = 16.0;
-const HAMBURGER_LINE_HEIGHT_LOGICAL: f32 = 2.0;
-const HAMBURGER_LINE_SPACING_LOGICAL: f32 = 5.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowChrome {
@@ -392,20 +390,7 @@ impl Widget for TitleBarWidget {
                     ctx.theme.control_metrics().compact_corner_radius_logical * dpi,
                 );
             }
-            let line_width = ACTION_ICON_SIZE_LOGICAL * dpi;
-            let line_height = HAMBURGER_LINE_HEIGHT_LOGICAL * dpi;
-            for row in [-1.0_f32, 0.0, 1.0] {
-                ctx.list.fill(
-                    Rect::new(
-                        button.x + (button.w - line_width) * 0.5,
-                        button.y + button.h * 0.5 + row * HAMBURGER_LINE_SPACING_LOGICAL * dpi
-                            - line_height * 0.5,
-                        line_width,
-                        line_height,
-                    ),
-                    ctx.theme.palette.text_muted,
-                );
-            }
+            draw_sidebar_icon(ctx, button, ctx.theme.palette.text_muted);
         }
 
         let control_icons = ["minus", "maximize", "x"];

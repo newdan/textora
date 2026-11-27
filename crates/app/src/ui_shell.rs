@@ -119,7 +119,7 @@ pub struct UiShell {
     frames_rendered: u32,
     sidebar_tabs: Vec<ui::tab_bar::TabInfo>,
     sidebar_active_index: Option<usize>,
-    sidebar_traffic_light_inset: (f32, f32),
+    sidebar_header_layout: ui::sidebar::SidebarHeaderLayout,
     /// Phase 6: Tab bar 输入数据缓存。
     tab_input_tabs: Vec<ui::tab_bar::TabInfo>,
     tab_input_active_index: Option<usize>,
@@ -186,7 +186,7 @@ impl UiShell {
             frames_rendered: 0,
             sidebar_tabs: Vec::new(),
             sidebar_active_index: None,
-            sidebar_traffic_light_inset: (0.0, 0.0),
+            sidebar_header_layout: ui::sidebar::SidebarHeaderLayout::Inline,
             tab_input_tabs: Vec::new(),
             tab_input_active_index: None,
             tab_input_back_enabled: false,
@@ -625,12 +625,12 @@ impl UiShell {
         cfg: ui::sidebar::SidebarConfig,
         tabs: Vec<ui::tab_bar::TabInfo>,
         active_index: Option<usize>,
-        traffic_light_inset: (f32, f32),
+        header_layout: ui::sidebar::SidebarHeaderLayout,
     ) {
         self.sidebar_config = cfg;
         self.sidebar_tabs = tabs;
         self.sidebar_active_index = active_index;
-        self.sidebar_traffic_light_inset = traffic_light_inset;
+        self.sidebar_header_layout = header_layout;
     }
 
     /// Phase 6：app 每帧调用，注入 tab bar 数据。
@@ -678,7 +678,7 @@ impl UiShell {
         ui::sidebar::SidebarWidgetInput {
             tabs: self.sidebar_tabs.clone(),
             active_index: self.sidebar_active_index,
-            traffic_light_inset_px: self.sidebar_traffic_light_inset,
+            header_layout: self.sidebar_header_layout,
             screen_size_px: (screen.w, screen.h),
             metrics: inputs.metrics,
             settings: inputs.sidebar_settings,
@@ -754,11 +754,8 @@ impl UiShell {
             self.sidebar_editor_left_offset(inputs.metrics.dpi).max(SIDEBAR_OVERLAY_DOCK_THICKNESS);
         if let Some(title) = &mut self.title_bar_input {
             title.titlebar_x = resolved.sidebar_thickness;
-            let sidebar_header_width = if cfg!(target_os = "macos") {
-                ui::constants::TRAFFIC_LIGHT_TOTAL_W
-            } else {
-                ui::constants::TITLE_BAR_HEIGHT
-            } * inputs.metrics.dpi;
+            let sidebar_header_width =
+                self.sidebar_header_layout.reserved_titlebar_width_px(inputs.metrics.dpi);
             title.sidebar_left = resolved.sidebar_thickness.max(sidebar_header_width);
         }
         Some(resolved)
@@ -2727,7 +2724,7 @@ mod tests {
             ui::sidebar::SidebarConfig::new_default(),
             tabs,
             Some(1),
-            (0.0, 0.0),
+            ui::sidebar::SidebarHeaderLayout::Inline,
         );
         assert_eq!(shell.sidebar_tabs.len(), 3, "sidebar_tabs count");
         assert_eq!(shell.sidebar_active_index, Some(1));
@@ -2912,7 +2909,7 @@ mod tests {
                 language: String::new(),
             }],
             Some(0),
-            (0.0, 0.0),
+            ui::sidebar::SidebarHeaderLayout::Inline,
         );
         shell.set_sidebar_pinned(true);
         shell.frames_rendered = 2;
@@ -3320,7 +3317,7 @@ mod tests {
             language: String::new(),
         }];
         shell.sidebar_active_index = Some(0);
-        shell.sidebar_traffic_light_inset = (68.0, 0.0);
+        shell.sidebar_header_layout = ui::sidebar::SidebarHeaderLayout::Fullscreen;
         let mut inputs = ShellInputs {
             tabs_visible: false,
             tabs_thickness: 0.0,
@@ -3341,6 +3338,7 @@ mod tests {
         let input = shell.sidebar_widget_input(Screen { w: 900.0, h: 700.0 }, &inputs);
 
         assert_eq!(input.tabs[0].title, "one");
+        assert_eq!(input.header_layout, ui::sidebar::SidebarHeaderLayout::Fullscreen);
         assert_eq!(input.screen_size_px, (900.0, 700.0));
         assert_eq!(input.metrics.dpi, 2.0);
         assert!(!input.settings.word_wrap);

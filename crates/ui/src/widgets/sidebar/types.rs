@@ -8,6 +8,9 @@ use crate::widgets::popup_menu::ContextMenuAction;
 use serde::{Deserialize, Serialize};
 
 const MINIMUM_EDITOR_WIDTH_LOGICAL: f32 = 100.0;
+pub(super) const FILE_ACTION_INSET_LOGICAL: f32 = 12.0;
+pub(super) const INLINE_TOGGLE_INSET_LOGICAL: f32 = 4.0;
+pub(super) const SIDEBAR_TOGGLE_SIZE_LOGICAL: f32 = 32.0;
 
 // ── Configuration (persisted per-workspace) ──
 
@@ -69,12 +72,37 @@ pub enum Visibility {
 
 // ── Input / Output types ──
 
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub enum SidebarHeaderLayout {
+    #[default]
+    Inline,
+    TitleBar {
+        toggle_left_logical: f32,
+    },
+    Fullscreen,
+}
+
+impl SidebarHeaderLayout {
+    pub fn toggle_left_px(self, dpi: f32) -> f32 {
+        let logical_left = match self {
+            Self::Inline => INLINE_TOGGLE_INSET_LOGICAL,
+            Self::TitleBar { toggle_left_logical } => toggle_left_logical,
+            Self::Fullscreen => FILE_ACTION_INSET_LOGICAL,
+        };
+        logical_left * dpi
+    }
+
+    pub fn reserved_titlebar_width_px(self, dpi: f32) -> f32 {
+        self.toggle_left_px(dpi) + SIDEBAR_TOGGLE_SIZE_LOGICAL * dpi
+    }
+}
+
 pub(crate) struct SidebarInput<'a> {
     pub tabs: &'a [TabInfo],
     pub active_index: Option<usize>,
     pub screen_w: f32,
     pub screen_h: f32,
-    pub traffic_light_inset: (f32, f32), // (left, top) — 阶段 5 才会非零
+    pub header_layout: SidebarHeaderLayout,
     pub content_top: f32,
 }
 
@@ -124,7 +152,7 @@ pub enum SidebarAction {
 pub enum SidebarHoverButton {
     #[default]
     None,
-    Hamburger,
+    Toggle,
     NewDoc,
     OpenFile,
     Settings,
@@ -182,7 +210,7 @@ impl Default for SidebarSettingsInput {
 pub struct SidebarWidgetInput {
     pub tabs: Vec<TabInfo>,
     pub active_index: Option<usize>,
-    pub traffic_light_inset_px: (f32, f32),
+    pub header_layout: SidebarHeaderLayout,
     pub screen_size_px: (f32, f32),
     pub metrics: crate::settings::UiMetrics,
     pub settings: SidebarSettingsInput,

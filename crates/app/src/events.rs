@@ -1917,8 +1917,7 @@ mod tests {
         open_untitled_fixture(&mut app);
         open_untitled_fixture(&mut app);
 
-        // Inject sidebar tabs data before building widgets
-        let dpi = app.ui_metrics().dpi;
+        // Inject sidebar tabs before building widgets.
         let tabs = vec![
             ui::tab_bar::TabInfo {
                 title: "a.rs".into(),
@@ -1939,7 +1938,7 @@ mod tests {
             ui::sidebar::SidebarConfig::new_default(),
             tabs,
             Some(0),
-            (68.0 * dpi, 0.0),
+            ui::sidebar::SidebarHeaderLayout::TitleBar { toggle_left_logical: 72.0 },
         );
 
         init_sidebar_widgets(&mut app);

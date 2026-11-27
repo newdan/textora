@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
 use crate::core::paint::DrawList;
+use crate::core::{PaintCtx, Rect};
 
 // ── SVG number tokenizer (handles implicit negatives: 1.5-2.9 → [1.5, -2.9]) ──
 
@@ -668,6 +669,12 @@ const DATA_ELLIPSIS: IconSvg = IconSvg {
     stroke_width: 2.0,
 };
 
+const DATA_PANEL_LEFT: IconSvg = IconSvg {
+    paths: &["M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z", "M9 3v18"],
+    circles: &[],
+    stroke_width: 2.0,
+};
+
 fn icon_svg(name: &str) -> Option<&'static IconSvg> {
     match name {
         "plus" => Some(&DATA_PLUS),
@@ -677,6 +684,7 @@ fn icon_svg(name: &str) -> Option<&'static IconSvg> {
         "folder-plus" => Some(&DATA_FOLDER_PLUS),
         "workspace-plus" => Some(&DATA_WORKSPACE_PLUS),
         "folder-open" => Some(&DATA_FOLDER_OPEN),
+        "panel-left" => Some(&DATA_PANEL_LEFT),
         "star" => Some(&DATA_STAR),
         "tag" => Some(&DATA_TAG),
         "trash-2" => Some(&DATA_TRASH_2),
@@ -802,6 +810,19 @@ pub fn draw_icon(list: &mut DrawList, name: &str, x: f32, y: f32, size: f32, col
             color,
         );
     }
+}
+
+pub(crate) fn draw_sidebar_icon(ctx: &mut PaintCtx, button: Rect, color: [f32; 4]) {
+    const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 18.0;
+    let size = SIDEBAR_ICON_SIZE_LOGICAL * ctx.dpi;
+    draw_icon(
+        ctx.list,
+        "panel-left",
+        button.x + (button.w - size) * 0.5,
+        button.y + (button.h - size) * 0.5,
+        size,
+        color,
+    );
 }
 
 #[cfg(test)]

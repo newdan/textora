@@ -11,11 +11,10 @@ use super::types::*;
 use crate::constants;
 use crate::core::{PaintCtx, Rect};
 use crate::view_mode::ViewMode;
-use crate::widgets::icon::draw_icon;
+use crate::widgets::icon::{draw_icon, draw_sidebar_icon};
 use crate::widgets::popup_menu::{PopupMenu, PopupMenuAction as PMA, PopupMenuItem};
 use crate::widgets::split_button::SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
 
-const ACTION_ROW_INSET_LOGICAL: f32 = 12.0;
 const ACTION_ROW_GAP_LOGICAL: f32 = crate::button::ButtonMetrics::ACTION_GAP;
 const NEW_DOCUMENT_SPLIT_WIDTH_LOGICAL: f32 =
     crate::button::ButtonMetrics::split_icon_text_width(2, SIDEBAR_ICON_SIZE_LOGICAL);
@@ -133,9 +132,7 @@ const ROW_H: f32 = constants::ROW_HEIGHT;
 const NEW_BTN_H: f32 = constants::ROW_HEIGHT;
 const SETTINGS_BTN_H: f32 = constants::ROW_HEIGHT;
 const PADDING: f32 = constants::SMALL_GAP;
-const SIDEBAR_ACTION_SIZE_LOGICAL: f32 = 32.0;
 const SIDEBAR_ICON_SIZE_LOGICAL: f32 = 14.0;
-const HEADER_ACTION_INSET_LOGICAL: f32 = 4.0;
 const EDGE_RESIZE_W: f32 = 4.0;
 
 impl SidebarState {
@@ -272,17 +269,21 @@ impl SidebarState {
             input.screen_w,
             metrics.dpi,
         );
+        let dpi = metrics.dpi;
+        let top = input.content_top.max(0.0);
+        let header_h = HEADER_H * dpi;
+        let new_h = NEW_BTN_H * dpi;
+        let inline = input.header_layout == SidebarHeaderLayout::Inline;
+        let action_size = SIDEBAR_TOGGLE_SIZE_LOGICAL * dpi;
+        let toggle_y =
+            if inline { top + (new_h - action_size) * 0.5 } else { (header_h - action_size) * 0.5 };
+        let menu_btn_rect =
+            Rect::new(input.header_layout.toggle_left_px(dpi), toggle_y, action_size, action_size);
         if matches!(self.interaction.hover.visibility, Visibility::Hidden) {
-            // Produce minimal layout with only hamburger button overlay
-            let dpi = metrics.dpi;
-            let btn_size = SIDEBAR_ACTION_SIZE_LOGICAL * dpi;
-            let hx = input.traffic_light_inset.0 + HEADER_ACTION_INSET_LOGICAL * dpi;
-            let hy = (HEADER_H * dpi - btn_size) * 0.5;
-            let menu_btn = Rect::new(hx, hy, btn_size, btn_size);
             self.layout = Some(SidebarLayout {
-                bg_rect: menu_btn,
-                header_rect: menu_btn,
-                menu_btn_rect: menu_btn,
+                bg_rect: menu_btn_rect,
+                header_rect: menu_btn_rect,
+                menu_btn_rect,
                 new_btn_rect: Rect::ZERO,
                 new_menu_btn_rect: Rect::ZERO,
                 open_btn_rect: Rect::ZERO,
@@ -294,16 +295,11 @@ impl SidebarState {
             });
             return;
         }
-        let dpi = metrics.dpi;
-        let header_h = HEADER_H * dpi;
         let row_h = ROW_H * dpi;
-        let new_h = NEW_BTN_H * dpi;
         let settings_h = SETTINGS_BTN_H * dpi;
         let pad = PADDING * dpi;
         let edge_w = EDGE_RESIZE_W * dpi;
-        let native_titlebar = input.traffic_light_inset.0 == 0.0;
         let w = cfg.width_px(metrics.dpi);
-        let top = input.content_top.max(0.0);
         let sh = input.screen_h.max(1.0);
 
         // Background
@@ -312,26 +308,15 @@ impl SidebarState {
         // Header
         let header_rect = Rect::new(0.0, top, w, header_h);
 
-        // Hamburger menu button
-        let action_size = SIDEBAR_ACTION_SIZE_LOGICAL * dpi;
-        let menu_x = input.traffic_light_inset.0 + HEADER_ACTION_INSET_LOGICAL * dpi;
-        let new_y = if native_titlebar { top } else { top + header_h + pad };
-        let menu_y = if native_titlebar {
-            new_y + (new_h - action_size) * 0.5
-        } else {
-            (header_h - action_size) * 0.5
-        };
-        let menu_btn_rect = Rect::new(menu_x, menu_y, action_size, action_size);
-
         // New and open actions share one row; narrow sidebars use an icon-only open button.
-        let action_inset = if native_titlebar {
-            HEADER_ACTION_INSET_LOGICAL * dpi
+        let new_y = if inline { top } else { top + header_h + pad };
+        let action_inset = if inline {
+            INLINE_TOGGLE_INSET_LOGICAL * dpi
         } else {
-            ACTION_ROW_INSET_LOGICAL * dpi
+            FILE_ACTION_INSET_LOGICAL * dpi
         };
         let action_gap = ACTION_ROW_GAP_LOGICAL * dpi;
-        let action_start =
-            if native_titlebar { menu_btn_rect.right() + action_gap } else { action_inset };
+        let action_start = if inline { menu_btn_rect.right() + action_gap } else { action_inset };
         let action_width = (w - action_start - action_inset).max(0.0);
         let (new_width_logical, new_menu_width_logical) = if self.plain_text_only {
             (NEW_DOCUMENT_SINGLE_WIDTH_LOGICAL, 0.0)
@@ -399,7 +384,6 @@ impl SidebarState {
             settings_btn_rect,
             edge_resize_rect,
         });
-        let _ = input.traffic_light_inset; // 阶段 5 接入
         let _ = input.active_index; // 渲染时再用
     }
 }
@@ -422,7 +406,7 @@ impl SidebarState {
         let mut btn_hover = SidebarHoverButton::None;
         if let Some(layout) = &self.layout {
             if layout.menu_btn_rect.contains(px, py) {
-                btn_hover = SidebarHoverButton::Hamburger;
+                btn_hover = SidebarHoverButton::Toggle;
             } else if layout.new_btn_rect.contains(px, py)
                 || layout.new_menu_btn_rect.contains(px, py)
             {
@@ -437,10 +421,10 @@ impl SidebarState {
 
         let hot_band = HOT_BAND_LOGICAL * metrics.dpi;
         let in_left_hot = px >= 0.0 && px <= hot_band;
-        // Hamburger button as trigger zone (via layout)
-        let on_hamburger =
+        // The sidebar toggle also triggers hover expansion
+        let on_toggle =
             self.layout.as_ref().map(|l| l.menu_btn_rect.contains(px, py)).unwrap_or(false);
-        let in_hot_zone = in_left_hot || on_hamburger;
+        let in_hot_zone = in_left_hot || on_toggle;
 
         let in_sidebar = px >= 0.0 && px <= cfg.width_px(metrics.dpi) && px < screen_w;
         if self.interaction.hover.pointer_moved(in_hot_zone, in_sidebar, Instant::now()) {
@@ -491,37 +475,22 @@ impl SidebarState {
 
     // ── Paint helpers ──
 
-    /// Draw the hamburger icon at its layout position with the given alpha.
-    pub fn paint_hamburger(&self, ctx: &mut PaintCtx, override_alpha: f32, skip_hover_bg: bool) {
+    pub(super) fn paint_toggle(&self, ctx: &mut PaintCtx) {
         let Some(layout) = &self.layout else {
             return;
         };
-        let alpha = override_alpha;
-        if !skip_hover_bg && self.hovered_button == SidebarHoverButton::Hamburger {
-            let mut h_bg = ctx.theme.palette.sidebar_hover_bg;
-            h_bg[3] *= alpha;
+        if self.hovered_button == SidebarHoverButton::Toggle {
+            let mut hover_background = ctx.theme.palette.sidebar_hover_bg;
+            hover_background[3] *= ctx.global_alpha;
             ctx.list.fill_rounded(
                 layout.menu_btn_rect,
-                h_bg,
+                hover_background,
                 ctx.theme.control_metrics().corner_radius_logical * ctx.dpi,
             );
         }
-        let icon_color = ctx.theme.palette.text_muted;
-        let line_w = 1.5 * ctx.dpi;
-        let line_len = 12.0 * ctx.dpi;
-        let cx = layout.menu_btn_rect.x + layout.menu_btn_rect.w * 0.5;
-        let cy = layout.menu_btn_rect.y + layout.menu_btn_rect.h * 0.5;
-        let gap = 4.0 * ctx.dpi;
-        let mut fg = icon_color;
-        fg[3] *= alpha;
-        for i in [-1.0, 0.0, 1.0] {
-            let y = cy + i * gap - line_w * 0.5;
-            ctx.list.fill_rounded(
-                Rect::new(cx - line_len * 0.5, y, line_len, line_w),
-                fg,
-                line_w * 0.5,
-            );
-        }
+        let mut foreground = ctx.theme.palette.text_muted;
+        foreground[3] *= ctx.global_alpha;
+        draw_sidebar_icon(ctx, layout.menu_btn_rect, foreground);
     }
 
     fn paint_open_button(&self, ctx: &mut PaintCtx, rect: Rect) {
@@ -561,18 +530,12 @@ impl SidebarState {
 
     // ── Paint ──
 
-    pub fn paint(&self, ctx: &mut PaintCtx, _active_index: Option<usize>) {
+    pub(super) fn paint_panel(&self, ctx: &mut PaintCtx) {
         let Some(layout) = &self.layout else {
             return;
         };
 
         let alpha = ctx.global_alpha;
-
-        // Hidden (auto-hide) mode: only draw hamburger icon, no panel background
-        if matches!(self.interaction.hover.visibility, Visibility::Hidden) {
-            self.paint_hamburger(ctx, alpha, true);
-            return;
-        }
 
         // 1) Background
         let mut bg = ctx.theme.palette.bg_surface;
@@ -597,8 +560,6 @@ impl SidebarState {
         border[3] *= alpha;
         ctx.list.stroke_rounded(r, border, radius, 1.0);
         ctx.list.fill(Rect::new(r.x, r.y, r.w - radius, r.h), bg);
-
-        self.paint_hamburger(ctx, alpha, false);
 
         let new_document_rect = Rect::new(
             layout.new_btn_rect.x,
@@ -685,7 +646,7 @@ impl SidebarState {
         if layout.menu_btn_rect.contains(px, py) {
             return Some(SidebarAction::TogglePin);
         }
-        // When hidden, only hamburger button is active
+        // When hidden, only the sidebar toggle is active
         if matches!(self.interaction.hover.visibility, Visibility::Hidden) {
             return None;
         }
@@ -722,7 +683,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0 * dpi,
             screen_h: 800.0 * dpi,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         state.update_layout(&input, &cfg, &metrics);
@@ -929,7 +890,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -954,7 +915,7 @@ mod tests {
             active_index: None,
             screen_w: cfg.width_px(dpi) + 180.0,
             screen_h: 800.0 * dpi,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
 
@@ -964,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_hidden_has_hamburger_layout() {
+    fn sidebar_hidden_has_toggle_layout() {
         let cfg = SidebarConfig { pinned: false, width: 220.0 };
         let mut s = SidebarState::new(&cfg);
         s.set_visibility(Visibility::Hidden);
@@ -973,7 +934,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -981,7 +942,7 @@ mod tests {
             &cfg,
             &crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), 1.0),
         );
-        // Hidden now has hamburger overlay layout
+        // Hidden sidebar retains the toggle layout
         assert!(s.current_layout().is_some());
     }
 
@@ -995,7 +956,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1024,7 +985,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1054,7 +1015,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1086,7 +1047,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1114,7 +1075,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1479,7 +1440,7 @@ mod tests {
             active_index: None,
             screen_w: 250.0,
             screen_h: 600.0, // 250 < 220+100
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1499,7 +1460,7 @@ mod tests {
             active_index: None,
             screen_w: 500.0,
             screen_h: 600.0, // 500 >= 220+100
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1520,7 +1481,7 @@ mod tests {
             active_index: None,
             screen_w: 250.0,
             screen_h: 600.0, // narrow window
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1544,7 +1505,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1584,7 +1545,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1623,7 +1584,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1662,7 +1623,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1696,7 +1657,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1808,7 +1769,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1843,7 +1804,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1876,7 +1837,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1911,7 +1872,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 400.0, // increased screen height to fit the menu
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -1945,7 +1906,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -2013,7 +1974,7 @@ mod tests {
             active_index: None,
             screen_w: 1200.0,
             screen_h: 800.0,
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             content_top: 0.0,
         };
         s.update_layout(
@@ -2044,6 +2005,41 @@ mod tests {
         assert!(s.open_menu().is_some(), "menu should stay when mouse is inside");
     }
     #[test]
+    fn fullscreen_sidebar_toggle_aligns_with_new_button_and_stays_in_the_titlebar() {
+        for dpi in [1.0, 1.5, 2.0] {
+            let cfg = SidebarConfig { pinned: false, ..SidebarConfig::new_default() };
+            let metrics =
+                crate::settings::UiMetrics::from_settings(&crate::settings::Settings::new(), dpi);
+            let input = SidebarInput {
+                tabs: &[],
+                active_index: None,
+                screen_w: 1200.0 * dpi,
+                screen_h: 600.0 * dpi,
+                header_layout: SidebarHeaderLayout::Fullscreen,
+                content_top: 0.0,
+            };
+            let mut state = SidebarState::new(&cfg);
+            state.update_layout(&input, &cfg, &metrics);
+            let expected_toggle = Rect::new(12.0 * dpi, 2.0 * dpi, 32.0 * dpi, 32.0 * dpi);
+            assert_eq!(
+                state.current_layout().expect("侧栏开关始终有布局").menu_btn_rect,
+                expected_toggle
+            );
+
+            for visibility in
+                [Visibility::HoverPeek, Visibility::HoverPeekFadingOut, Visibility::Pinned]
+            {
+                state.set_visibility(visibility);
+                state.update_layout(&input, &cfg, &metrics);
+                let layout = state.current_layout().expect("可见侧栏应有布局");
+                assert_eq!(layout.menu_btn_rect, expected_toggle);
+                assert_eq!(layout.menu_btn_rect.x, layout.new_btn_rect.x);
+                assert!(layout.new_btn_rect.y >= HEADER_H * dpi);
+            }
+        }
+    }
+
+    #[test]
     fn native_titlebar_places_sidebar_toggle_beside_file_actions() {
         for dpi in [1.0, 2.0] {
             for width in [160.0, 220.0, 400.0] {
@@ -2059,7 +2055,7 @@ mod tests {
                         active_index: None,
                         screen_w: 1200.0 * dpi,
                         screen_h: 600.0 * dpi,
-                        traffic_light_inset: (0.0, 0.0),
+                        header_layout: SidebarHeaderLayout::Inline,
                         content_top: 0.0,
                     },
                     &cfg,
@@ -2097,7 +2093,7 @@ mod tests {
                     active_index: None,
                     screen_w: 1200.0 * dpi,
                     screen_h: 600.0 * dpi,
-                    traffic_light_inset: (68.0 * dpi, 0.0),
+                    header_layout: SidebarHeaderLayout::TitleBar { toggle_left_logical: 72.0 },
                     content_top: 0.0,
                 };
                 state.update_layout(&input, &cfg, &metrics);
@@ -2144,7 +2140,7 @@ mod tests {
             active_index: None,
             screen_w: 250.0,
             screen_h: 600.0,
-            traffic_light_inset: (68.0, 0.0),
+            header_layout: SidebarHeaderLayout::TitleBar { toggle_left_logical: 72.0 },
             content_top: 0.0,
         };
         state.update_layout(&input, &cfg, &metrics);
@@ -2164,7 +2160,7 @@ mod tests {
             active_index: None,
             screen_w: 250.0,
             screen_h: 600.0,
-            traffic_light_inset: (68.0, 0.0),
+            header_layout: SidebarHeaderLayout::TitleBar { toggle_left_logical: 72.0 },
             content_top: 0.0,
         };
         state.update_layout(&input, &cfg, &metrics);

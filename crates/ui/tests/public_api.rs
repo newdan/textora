@@ -98,7 +98,7 @@ fn semantic_public_modules_compile_for_external_consumers() {
     let _sidebar_input = SidebarWidgetInput {
         tabs: vec![tab],
         active_index: Some(0),
-        traffic_light_inset_px: (68.0, 0.0),
+        header_layout: ui::sidebar::SidebarHeaderLayout::TitleBar { toggle_left_logical: 72.0 },
         screen_size_px: (800.0, 600.0),
         metrics: UiMetrics::from_settings(&settings, 2.0),
         settings: behavior,

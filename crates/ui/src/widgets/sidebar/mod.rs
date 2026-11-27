@@ -13,8 +13,8 @@ pub(crate) use state::SidebarState;
 #[allow(unused_imports)]
 pub(crate) use types::SidebarInput;
 pub use types::{
-    NewDocumentKind, SidebarAction, SidebarConfig, SidebarHoverButton, SidebarKey,
-    SidebarSettingsInput, SidebarWidgetInput, Visibility,
+    NewDocumentKind, SidebarAction, SidebarConfig, SidebarHeaderLayout, SidebarHoverButton,
+    SidebarKey, SidebarSettingsInput, SidebarWidgetInput, Visibility,
 };
 
 // SidebarWidget — Phase 7.5：内嵌 ListWidget 管理 items 渲染/命中。
@@ -28,6 +28,8 @@ use crate::widgets::list::{
     ListAction, ListItem, ListItemIndicator, ListItemKind, ListStyle, ListWidget, Orientation,
 };
 use crate::widgets::split_button::{SplitButtonInput, SplitButtonWidget};
+
+const SIDEBAR_SLIDE_DURATION_SECONDS: f32 = 0.15;
 
 const NEW_DOCUMENT_BUTTON_ID: WidgetId = WidgetId(8_100);
 const NEW_DOCUMENT_MENU_BUTTON_ID: WidgetId = WidgetId(8_101);
@@ -52,7 +54,7 @@ pub struct SidebarWidget {
     pub(crate) active_index: Option<usize>,
     /// sorted_index → original_workspace_index mapping (for SwitchTab after pin sort)
     tab_index_map: Vec<usize>,
-    pub(crate) traffic_light_inset: (f32, f32),
+    pub(crate) header_layout: SidebarHeaderLayout,
     pub(crate) screen_w: f32,
     pub(crate) screen_h: f32,
     pub metrics: crate::settings::UiMetrics,
@@ -122,7 +124,7 @@ impl SidebarWidget {
             tabs: Vec::new(),
             active_index: None,
             tab_index_map: Vec::new(),
-            traffic_light_inset: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_w: 800.0,
             screen_h: 600.0,
             list_items: Vec::new(),
@@ -137,7 +139,7 @@ impl SidebarWidget {
         let types::SidebarWidgetInput {
             tabs,
             active_index,
-            traffic_light_inset_px,
+            header_layout,
             screen_size_px,
             metrics,
             settings,
@@ -164,7 +166,7 @@ impl SidebarWidget {
         self.active_index = new_active;
         self.tab_index_map = new_tab_index_map;
         self.tabs = new_tabs;
-        self.traffic_light_inset = traffic_light_inset_px;
+        self.header_layout = header_layout;
         self.screen_w = screen_size_px.0;
         self.screen_h = screen_size_px.1;
         self.metrics = metrics;
@@ -371,7 +373,7 @@ impl Widget for SidebarWidget {
             active_index: self.active_index,
             screen_w: self.screen_w,
             screen_h: self.screen_h,
-            traffic_light_inset: self.traffic_light_inset,
+            header_layout: self.header_layout,
             content_top: 0.0,
         };
         // 动画只改变绘制位置与透明度，保持按钮和列表内容的布局宽度。
@@ -429,90 +431,44 @@ impl Widget for SidebarWidget {
             return;
         }
 
-        let vis = self.state.visibility();
-        let alpha = match vis {
-            types::Visibility::HoverPeek => {
-                if let Some(start) = self.state.hover_peek_start() {
-                    (start.elapsed().as_secs_f32() / 0.15).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                }
+        let visibility = self.state.visibility();
+        let animation = match visibility {
+            Visibility::HoverPeek => self.state.hover_peek_start().map(|start| (start, true)),
+            Visibility::HoverPeekFadingOut => {
+                self.state.hover_peek_leave_start().map(|start| (start, false))
             }
-            types::Visibility::HoverPeekFadingOut => {
-                if let Some(leave_start) = self.state.hover_peek_leave_start() {
-                    1.0 - (leave_start.elapsed().as_secs_f32() / 0.15).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                }
-            }
-            _ => 1.0,
+            _ => None,
         };
-        let saved_alpha = ctx.global_alpha;
-        ctx.global_alpha *= alpha;
+        let (alpha, slide_x) = animation.map_or((1.0, 0.0), |(start, entering)| {
+            let progress =
+                (start.elapsed().as_secs_f32() / SIDEBAR_SLIDE_DURATION_SECONDS).clamp(0.0, 1.0);
+            let eased = (1.0 - progress).powi(3);
+            let (alpha, displacement) =
+                if entering { (progress, eased) } else { (1.0 - progress, 1.0 - eased) };
+            (alpha, -self.cfg.width_px(ctx.dpi) * displacement)
+        });
 
-        // During slide animation, draw a static hamburger at the target position
-        // so it's visible from the start (prevents flash when transitioning from Hidden).
-        match vis {
-            types::Visibility::HoverPeek => {
-                if let Some(start) = self.state.hover_peek_start() {
-                    let t = (start.elapsed().as_secs_f32() / 0.15).clamp(0.0, 1.0);
-                    if t < 1.0 {
-                        self.state.paint_hamburger(ctx, alpha * t, false);
-                    }
-                }
-            }
-            types::Visibility::HoverPeekFadingOut
-                // 自动隐藏时 hamburger 始终可见：fade-out 期间保持全不透明，
-                // 避免 sidebar 滑走后回到 Hidden 时 hamburger 从 0→1 跳变闪动。
-                if self.state.hover_peek_leave_start().is_some() => {
-                    let saved = ctx.global_alpha;
-                    ctx.global_alpha = 1.0;
-                    self.state.paint_hamburger(ctx, 1.0, true);
-                    ctx.global_alpha = saved;
-                }
-            _ => {}
+        if visibility != Visibility::Hidden {
+            ctx.with_offset(slide_x, 0.0, |panel_ctx| {
+                panel_ctx.global_alpha *= alpha;
+                self.state.paint_panel(panel_ctx);
+                self.new_document_button.paint(panel_ctx);
+                self.list.paint(panel_ctx);
+            });
         }
 
-        // Slide animation: translate sidebar horizontally
-        let slide_x = match vis {
-            types::Visibility::HoverPeek => {
-                if let Some(start) = self.state.hover_peek_start() {
-                    let t = (start.elapsed().as_secs_f32() / 0.15).clamp(0.0, 1.0);
-                    -self.cfg.width_px(ctx.dpi) * (1.0 - t).powi(3)
-                } else {
-                    0.0
-                }
-            }
-            types::Visibility::HoverPeekFadingOut => {
-                if let Some(leave_start) = self.state.hover_peek_leave_start() {
-                    let t = (leave_start.elapsed().as_secs_f32() / 0.15).clamp(0.0, 1.0);
-                    -self.cfg.width_px(ctx.dpi) * (1.0 - (1.0 - t).powi(3))
-                } else {
-                    0.0
-                }
-            }
-            _ => 0.0,
-        };
-        let saved_offset = ctx.list.offset;
-        ctx.list.offset.0 += slide_x;
+        self.state.paint_toggle(ctx);
 
-        // 框架（bg/header/按钮/文字）
-        self.state.paint(ctx, self.active_index);
-        self.new_document_button.paint(ctx);
-        // items 列表
-        if let Some(_layout) = self.state.current_layout() {
-            self.list.paint(ctx);
+        if self.state.open_menu().is_some() {
+            ctx.with_offset(slide_x, 0.0, |menu_ctx| {
+                menu_ctx.global_alpha *= alpha;
+                self.state.paint_menu(menu_ctx);
+            });
         }
-
-        // Popup menu must be drawn AFTER list items so it's on top
-        self.state.paint_menu(ctx);
-
-        ctx.list.offset = saved_offset;
-        ctx.global_alpha = saved_alpha;
     }
 
     fn hit(&self, px: f32, py: f32) -> bool {
-        // 使用 layout 边界做命中检测。汉堡按钮在 title bar 区域（y < bg_rect.y），
+        // 使用 layout 边界做命中检测。侧栏开关在 title bar 区域（y < bg_rect.y），
         // 必须独立命中，否则 events.rs 的 title-bar guard 会先把点击吞掉。
         // Auto-hide 模式时，左侧热区也视为命中，确保 cursor_hint 能生效。
         if let Some(layout) = self.state.current_layout()
@@ -611,7 +567,7 @@ impl Widget for SidebarWidget {
                     return self.translate_list_action(action);
                 }
 
-                // Check framework buttons (hamburger toggle)
+                // Check the sidebar toggle
                 if let Some(action) = self.state.hit_test_px(*px, *py, &self.metrics)
                     && action == SidebarAction::TogglePin
                 {

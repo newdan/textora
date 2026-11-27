@@ -13,8 +13,8 @@ mod tests {
     use crate::theme::Theme;
     use crate::widgets::list::ListItemIndicator;
     use crate::widgets::sidebar::{
-        NewDocumentKind, SidebarAction, SidebarConfig, SidebarPopupKind, SidebarWidget,
-        SidebarWidgetInput, Visibility,
+        NewDocumentKind, SidebarAction, SidebarConfig, SidebarHeaderLayout, SidebarPopupKind,
+        SidebarWidget, SidebarWidgetInput, Visibility,
     };
 
     fn test_theme() -> Theme {
@@ -59,7 +59,7 @@ mod tests {
         SidebarWidgetInput {
             tabs,
             active_index,
-            traffic_light_inset_px: (68.0, 0.0),
+            header_layout: SidebarHeaderLayout::TitleBar { toggle_left_logical: 72.0 },
             screen_size_px: (800.0, 600.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -246,7 +246,7 @@ mod tests {
         widget.set_input(first);
 
         let mut second = sidebar_widget_input(vec![make_tab("second")], None);
-        second.traffic_light_inset_px = (20.0, 4.0);
+        second.header_layout = SidebarHeaderLayout::TitleBar { toggle_left_logical: 24.0 };
         second.screen_size_px = (400.0, 300.0);
         second.metrics = metrics(2.0);
         second.settings.word_wrap = true;
@@ -254,7 +254,10 @@ mod tests {
 
         assert_eq!(widget.tabs[0].title, "second");
         assert_eq!(widget.active_index, None);
-        assert_eq!(widget.traffic_light_inset, (20.0, 4.0));
+        assert_eq!(
+            widget.header_layout,
+            SidebarHeaderLayout::TitleBar { toggle_left_logical: 24.0 }
+        );
         assert_eq!((widget.screen_w, widget.screen_h), (400.0, 300.0));
         assert_eq!(widget.metrics.dpi, 2.0);
         assert!(widget.settings_input.word_wrap);
@@ -272,7 +275,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![make_tab("a.rs")],
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -295,6 +298,53 @@ mod tests {
         assert!(matches!(dl.cmds[0], DrawCmd::FillRect { .. }));
     }
 
+    #[test]
+    fn sidebar_toggle_paint_stays_in_place_during_hover_animation() {
+        let theme = test_theme();
+        let config = SidebarConfig { pinned: false, ..SidebarConfig::new_default() };
+        let mut widget = SidebarWidget::new(config, metrics(1.0));
+        widget.set_input(sidebar_widget_input(Vec::new(), None));
+        let mut measure = NoopMeasure;
+        let mut layout_ctx =
+            LayoutCtx { ui_measure: None, measure: &mut measure, theme: &theme, dpi: 1.0 };
+        let bounds = Rect::new(0.0, 0.0, 220.0, 800.0);
+        let paint_toggle = |widget: &SidebarWidget| {
+            let mut list = DrawList::new();
+            widget.paint(&mut PaintCtx {
+                list: &mut list,
+                theme: &theme,
+                global_alpha: 1.0,
+                dpi: 1.0,
+                shaper: None,
+            });
+            let is_toggle_color = |color: &[f32; 4]| color[..3] == theme.palette.text_muted[..3];
+            list.cmds
+                .into_iter()
+                .filter(|command| match command {
+                    DrawCmd::FillRect { rect, color, .. } => {
+                        rect.y < crate::constants::TITLE_BAR_HEIGHT && is_toggle_color(color)
+                    }
+                    DrawCmd::FillTriangle { p0, color, .. } => {
+                        p0[1] < crate::constants::TITLE_BAR_HEIGHT && is_toggle_color(color)
+                    }
+                    _ => false,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        widget.set_rect(bounds, &mut layout_ctx);
+        let hidden_toggle = paint_toggle(&widget);
+        assert!(!hidden_toggle.is_empty());
+        for visibility in [Visibility::HoverPeek, Visibility::HoverPeekFadingOut] {
+            widget.set_visibility(visibility);
+            let started_at = std::time::Instant::now() - std::time::Duration::from_millis(75);
+            widget.state.interaction.hover.hover_peek_start = Some(started_at);
+            widget.state.interaction.hover.hover_peek_leave_start = Some(started_at);
+            widget.set_rect(bounds, &mut layout_ctx);
+            assert_eq!(paint_toggle(&widget), hidden_toggle, "{visibility:?}");
+        }
+    }
+
     // ── on_event: click dispatch ──
 
     #[test]
@@ -307,7 +357,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![],
             active_index: None,
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -561,7 +611,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -599,7 +649,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![],
             active_index: None,
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -632,7 +682,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![make_tab("a.rs")],
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -689,7 +739,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![],
             active_index: None,
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -722,7 +772,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -847,7 +897,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: (0..20).map(|i| make_tab(&format!("file{}.rs", i))).collect(),
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -941,7 +991,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![],
             active_index: None,
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -967,7 +1017,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![],
             active_index: None,
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -989,7 +1039,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![],
             active_index: None,
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1010,7 +1060,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![make_tab("a.rs")],
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1036,7 +1086,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1074,7 +1124,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![make_tab("a.rs")],
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1117,7 +1167,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: vec![],
             active_index: None,
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (800.0, 600.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1166,7 +1216,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (800.0, 600.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1212,7 +1262,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (800.0, 600.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1258,7 +1308,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1288,7 +1338,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1365,7 +1415,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1426,7 +1476,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1452,7 +1502,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs: tabs2,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1478,7 +1528,7 @@ mod tests {
         w.set_input(SidebarWidgetInput {
             tabs,
             active_index: Some(0),
-            traffic_light_inset_px: (0.0, 0.0),
+            header_layout: SidebarHeaderLayout::Inline,
             screen_size_px: (1200.0, 800.0),
             metrics: metrics(1.0),
             settings: sidebar_settings(),
@@ -1567,7 +1617,8 @@ mod sidebar_integration_tests {
 
     use crate::view_mode::ViewMode;
     use crate::widgets::sidebar::{
-        NewDocumentKind, SidebarAction, SidebarConfig, SidebarKey, SidebarState, Visibility,
+        NewDocumentKind, SidebarAction, SidebarConfig, SidebarHeaderLayout, SidebarKey,
+        SidebarState, Visibility,
     };
     use std::path::PathBuf;
 
@@ -1591,7 +1642,7 @@ mod sidebar_integration_tests {
             active_index: Some(active),
             screen_w: 800.0,
             screen_h: 600.0,
-            traffic_light_inset: (52.0, 0.0),
+            header_layout: SidebarHeaderLayout::TitleBar { toggle_left_logical: 56.0 },
         }
     }
 

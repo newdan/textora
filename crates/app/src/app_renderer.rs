@@ -13,14 +13,15 @@ use appkit_shell::editor_runtime::{
 };
 use ui::canvas::CanvasViewportSnapshot;
 use ui::plugin::{PLUGIN_EDITOR, PLUGIN_MARKDOWN_EDITOR, PLUGIN_NOVEL_VIEW};
+use ui::sidebar::SidebarHeaderLayout;
 
 const PERF_LOG_ENV: &str = "EDIT_PLUS_PERF_LOG";
 const PERF_LOG_THRESHOLD_US_ENV: &str = "EDIT_PLUS_PERF_LOG_THRESHOLD_US";
 const DEFAULT_PERF_LOG_THRESHOLD_US: u128 = 1_000;
 const WYSIWYG_CURSOR_LOG_ENV: &str = "EDIT_PLUS_WYSIWYG_CURSOR_LOG";
 const SEARCH_FOCUSED_CARET_OPACITY: f32 = 0.4;
-const MACOS_TRAFFIC_LIGHT_INSET_LOGICAL: f32 = 68.0;
-const WINDOWS_FRAMELESS_RESIZE_INSET_LOGICAL: f32 = crate::events::WINDOW_RESIZE_MARGIN_LOGICAL;
+const MACOS_SIDEBAR_TOGGLE_LEFT_LOGICAL: f32 = 72.0;
+const WINDOWS_SIDEBAR_TOGGLE_LEFT_LOGICAL: f32 = crate::events::WINDOW_RESIZE_MARGIN_LOGICAL + 4.0;
 
 enum FrameRenderOutcome {
     Rendered(SurfaceFrameSubmission),
@@ -28,81 +29,35 @@ enum FrameRenderOutcome {
     NeedsSurfaceReconfigure,
 }
 
-#[derive(Clone, Copy)]
-enum SidebarWindowChrome {
-    NativeTitlebar,
-    IntegratedTrafficLights,
-    CustomTitlebar,
-}
-
-fn sidebar_window_chrome() -> SidebarWindowChrome {
+fn sidebar_header_layout(fullscreen: bool) -> SidebarHeaderLayout {
     if cfg!(target_os = "macos") {
-        SidebarWindowChrome::IntegratedTrafficLights
-    } else if cfg!(target_os = "windows") {
-        SidebarWindowChrome::CustomTitlebar
-    } else {
-        SidebarWindowChrome::NativeTitlebar
-    }
-}
-
-fn sidebar_traffic_light_inset(dpi: f32, chrome: SidebarWindowChrome) -> (f32, f32) {
-    let left = match chrome {
-        SidebarWindowChrome::NativeTitlebar => 0.0,
-        SidebarWindowChrome::CustomTitlebar => WINDOWS_FRAMELESS_RESIZE_INSET_LOGICAL * dpi,
-        SidebarWindowChrome::IntegratedTrafficLights => MACOS_TRAFFIC_LIGHT_INSET_LOGICAL * dpi,
-    };
-    (left, 0.0)
-}
-
-fn sidebar_titlebar_reserved_width(dpi: f32, chrome: SidebarWindowChrome) -> f32 {
-    let logical_width = match chrome {
-        SidebarWindowChrome::NativeTitlebar | SidebarWindowChrome::CustomTitlebar => {
-            ui::constants::TITLE_BAR_HEIGHT
+        if fullscreen {
+            SidebarHeaderLayout::Fullscreen
+        } else {
+            SidebarHeaderLayout::TitleBar { toggle_left_logical: MACOS_SIDEBAR_TOGGLE_LEFT_LOGICAL }
         }
-        SidebarWindowChrome::IntegratedTrafficLights => ui::constants::TRAFFIC_LIGHT_TOTAL_W,
-    };
-    logical_width * dpi
+    } else if cfg!(target_os = "windows") {
+        SidebarHeaderLayout::TitleBar { toggle_left_logical: WINDOWS_SIDEBAR_TOGGLE_LEFT_LOGICAL }
+    } else {
+        SidebarHeaderLayout::Inline
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod sidebar_chrome_tests {
-    use super::{
-        SidebarWindowChrome, sidebar_titlebar_reserved_width, sidebar_traffic_light_inset,
-    };
+    use super::sidebar_header_layout;
 
     #[test]
-    fn native_titlebar_keeps_sidebar_toggle_at_left_edge() {
-        let dpi = 1.5;
-        let chrome = SidebarWindowChrome::NativeTitlebar;
-        assert_eq!(sidebar_traffic_light_inset(dpi, chrome), (0.0, 0.0));
-        assert_eq!(
-            sidebar_titlebar_reserved_width(dpi, chrome),
-            ui::constants::TITLE_BAR_HEIGHT * dpi
-        );
-    }
+    fn macos_reclaims_traffic_light_space_in_fullscreen() {
+        for dpi in [1.0, 1.5, 2.0] {
+            let windowed = sidebar_header_layout(false);
+            assert_eq!(windowed.toggle_left_px(dpi), 72.0 * dpi);
+            assert_eq!(windowed.reserved_titlebar_width_px(dpi), 104.0 * dpi);
 
-    #[test]
-    fn macos_reserves_traffic_lights_in_sidebar_header() {
-        let dpi = 1.5;
-        let chrome = SidebarWindowChrome::IntegratedTrafficLights;
-        assert_eq!(
-            sidebar_traffic_light_inset(dpi, chrome),
-            (super::MACOS_TRAFFIC_LIGHT_INSET_LOGICAL * dpi, 0.0)
-        );
-        assert_eq!(
-            sidebar_titlebar_reserved_width(dpi, chrome),
-            ui::constants::TRAFFIC_LIGHT_TOTAL_W * dpi
-        );
-    }
-
-    #[test]
-    fn windows_reserves_resize_edge_before_sidebar_toggle() {
-        let dpi = 1.5;
-        let chrome = SidebarWindowChrome::CustomTitlebar;
-        assert_eq!(
-            sidebar_traffic_light_inset(dpi, chrome),
-            (super::WINDOWS_FRAMELESS_RESIZE_INSET_LOGICAL * dpi, 0.0)
-        );
+            let fullscreen = sidebar_header_layout(true);
+            assert_eq!(fullscreen.toggle_left_px(dpi), 12.0 * dpi);
+            assert_eq!(fullscreen.reserved_titlebar_width_px(dpi), 44.0 * dpi);
+        }
     }
 }
 
@@ -931,13 +886,17 @@ impl App {
                 );
 
                 let dpi = metrics.dpi;
-                let chrome = sidebar_window_chrome();
-                let traffic_inset = sidebar_traffic_light_inset(dpi, chrome);
+                let fullscreen = cfg!(target_os = "macos")
+                    && self
+                        .editor_runtime
+                        .window()
+                        .is_some_and(|window| window.fullscreen().is_some());
+                let header_layout = sidebar_header_layout(fullscreen);
                 self.ui_shell.set_sidebar_input(
                     self.ui_shell.sidebar_cfg().clone(),
                     tab_infos,
                     active_tab_index,
-                    traffic_inset,
+                    header_layout,
                 );
 
                 let file_path = self.active_editor_file_path();
@@ -955,9 +914,9 @@ impl App {
                 let sidebar_left = if sidebar_mode {
                     self.ui_shell
                         .sidebar_editor_left_offset(dpi)
-                        .max(sidebar_titlebar_reserved_width(dpi, chrome))
+                        .max(header_layout.reserved_titlebar_width_px(dpi))
                 } else if cfg!(target_os = "macos") {
-                    ui::constants::TRAFFIC_LIGHT_TOTAL_W * dpi
+                    header_layout.toggle_left_px(dpi)
                 } else {
                     0.0
                 };
