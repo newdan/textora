@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Textora macOS app icon</title>
+  <desc>A cyan notepad with four binding rings on a warm ivory tile.</desc>
+
+  <defs>
+    <linearGradient id="tile" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF8EC"/>
+      <stop offset="1" stop-color="#E5D3B7"/>
+    </linearGradient>
+  </defs>
+
+  <path fill="url(#tile)" d="M304 100H720C848 100 924 176 924 304V720C924 848 848 924 720 924H304C176 924 100 848 100 720V304C100 176 176 100 304 100Z"/>
+
+  <svg x="100" y="100" width="824" height="824" viewBox="88 89 848 848">
+    <defs>
+      <linearGradient id="paper" x1="512" y1="126" x2="512" y2="838" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#7AD8E9"/>
+        <stop offset="1" stop-color="#43B2CC"/>
+      </linearGradient>
+
+      <linearGradient id="clay" x1="512" y1="54" x2="512" y2="928" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#0B7D9D"/>
+        <stop offset="1" stop-color="#05617F"/>
+      </linearGradient>
+    </defs>
+
+    <g transform="translate(81.92 61.44) scale(.84 .88)">
+      <!-- Back cover, aligned to the width of the page block -->
+      <path d="M88 808H936V874C936 925 895 966 844 966H180C129 966 88 925 88 874V808Z" fill="#B85A05"/>
+
+      <!-- Page stack -->
+      <path d="M88 176C88 138 119 107 157 107H867C905 107 936 138 936 176V829C936 874 900 910 855 910H169C124 910 88 874 88 829V176Z" fill="#D5DADC"/>
+      <path d="M88 176C88 138 119 107 157 107H867C905 107 936 138 936 176V797C936 842 900 878 855 878H169C124 878 88 842 88 797V176Z" fill="#FFFFFF"/>
+
+      <!-- Front paper -->
+      <path d="M88 176C88 138 119 107 157 107H867C905 107 936 138 936 176V758C936 801 901 836 858 836H166C123 836 88 801 88 758V176Z" fill="url(#paper)"/>
+      <path d="M108 184C108 153 133 128 164 128H860" stroke="#FFFFFF" stroke-opacity=".38" stroke-width="10" stroke-linecap="round"/>
+
+      <!-- Three writing lines -->
+      <rect x="282" y="330" width="460" height="56" rx="20" fill="#087794"/>
+      <rect x="282" y="484" width="460" height="56" rx="20" fill="#087794"/>
+      <rect x="282" y="638" width="460" height="56" rx="20" fill="#087794"/>
+
+      <!-- Binding rings -->
+      <rect x="183" y="60" width="82" height="132" rx="38" fill="url(#clay)"/>
+      <rect x="375" y="60" width="82" height="132" rx="38" fill="url(#clay)"/>
+      <rect x="567" y="60" width="82" height="132" rx="38" fill="url(#clay)"/>
+      <rect x="759" y="60" width="82" height="132" rx="38" fill="url(#clay)"/>
+
+    </g>
+  </svg>
+</svg>
