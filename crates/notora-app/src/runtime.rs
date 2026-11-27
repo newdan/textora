@@ -992,14 +992,44 @@ impl NotoraRuntime {
         self.window_runtime.schedule_redraw();
     }
 
+    fn frame_pacing_allowed(&self) -> bool {
+        !self.window_runtime.occluded && self.document_runtime.editor().window().is_some()
+    }
+
     pub(crate) fn paced_frame_requested(&mut self, request: FrameRequest) -> bool {
-        !self.window_runtime.occluded
-            && self.document_runtime.editor().window().is_some()
+        self.frame_pacing_allowed()
             && self.window_runtime.frame_pacer.request(request, Instant::now())
     }
 
     pub(crate) fn frame_due_on_tick(&mut self) -> bool {
-        self.window_runtime.frame_pacer.take_tick(Instant::now(), false)
+        self.frame_pacing_allowed()
+            && self.window_runtime.frame_pacer.take_tick(Instant::now(), false)
+    }
+
+    pub(crate) fn begin_paced_present(&mut self) -> bool {
+        self.frame_pacing_allowed() && self.window_runtime.begin_present()
+    }
+
+    pub(crate) fn finish_paced_present(&mut self) {
+        self.window_runtime.finish_present();
+    }
+
+    pub(crate) fn requeue_followup_redraw_after_present(&mut self) {
+        if self.frame_pacing_allowed() {
+            self.sync_followup_redraw_to_pacer(Instant::now());
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn sync_followup_redraw_to_pacer(&mut self, now: Instant) {
+        if self.window_runtime.occluded {
+            return;
+        }
+        if self.window_runtime.has_redraw_request()
+            || self.document_runtime.editor().has_redraw_request()
+        {
+            let _ = self.window_runtime.frame_pacer.request(FrameRequest::Deferred, now);
+        }
     }
 
     pub(crate) fn stop_frame_pacing(&mut self) {

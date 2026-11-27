@@ -116,6 +116,10 @@
 pub enum PacerState {
     /// 空闲：DisplayLink 停止，事件循环处于 ControlFlow::Wait（零唤醒）。
     Idle,
+    /// 冷却态：保留 DisplayLink 运行最后一个静默周期，同时允许新周期输入即时呈现。
+    CoolingDown,
+    /// 延迟重绘等待态：空 Preedit 或非即时重绘等待下一次 DisplayLink tick。
+    WaitingForTick,
     /// 本刷新周期已即时提交 1 帧，周期门控激活，等待下一个 DisplayLink tick。
     SubmittedThisCycle {
         pending_followup: bool,

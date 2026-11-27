@@ -14,6 +14,9 @@ const DEFAULT_REFRESH_RATE_HZ: f64 = 60.0;
 enum PacerState {
     #[default]
     Idle,
+    /// Leave the clock running for one final quiet tick while allowing input
+    /// arriving in the new refresh cycle to present immediately.
+    CoolingDown,
     WaitingForTick,
     SubmittedThisCycle {
         pending_followup: bool,
@@ -51,21 +54,24 @@ pub fn input_frame_request(event: &WindowEvent, pointer_captured: bool) -> Optio
 #[derive(Default)]
 pub struct FramePacer {
     state: PacerState,
-    // Leave the clock running for one final quiet tick while allowing input
-    // arriving in the new refresh cycle to present immediately.
-    cooling_down: bool,
 }
 
 impl FramePacer {
     pub fn request(&mut self, request: FrameRequest) -> bool {
-        self.cooling_down = false;
         match (&mut self.state, request) {
-            (_, FrameRequest::Continuous) => self.state = PacerState::Continuous { dirty: true },
-            (PacerState::Idle | PacerState::WaitingForTick, FrameRequest::Immediate) => {
+            (_, FrameRequest::Continuous) => {
+                self.state = PacerState::Continuous { dirty: true };
+            }
+            (
+                PacerState::Idle | PacerState::CoolingDown | PacerState::WaitingForTick,
+                FrameRequest::Immediate,
+            ) => {
                 self.state = PacerState::SubmittedThisCycle { pending_followup: false };
                 return true;
             }
-            (PacerState::Idle, FrameRequest::Deferred) => self.state = PacerState::WaitingForTick,
+            (PacerState::Idle | PacerState::CoolingDown, FrameRequest::Deferred) => {
+                self.state = PacerState::WaitingForTick;
+            }
             (PacerState::SubmittedThisCycle { pending_followup }, _) => *pending_followup = true,
             (PacerState::Continuous { dirty }, _) => *dirty = true,
             (PacerState::WaitingForTick, FrameRequest::Deferred) => {}
@@ -75,28 +81,30 @@ impl FramePacer {
 
     pub fn tick(&mut self, animation_active: bool) -> bool {
         let dirty = match self.state {
-            PacerState::Idle => false,
+            PacerState::Idle | PacerState::CoolingDown => false,
             PacerState::WaitingForTick => true,
             PacerState::SubmittedThisCycle { pending_followup } => pending_followup,
             PacerState::Continuous { dirty } => dirty,
         };
         if animation_active {
             self.state = PacerState::Continuous { dirty: false };
-            self.cooling_down = false;
             return true;
         }
         if dirty {
             self.state = PacerState::SubmittedThisCycle { pending_followup: false };
-            self.cooling_down = false;
             return true;
         }
-        self.cooling_down = self.state != PacerState::Idle;
-        self.state = PacerState::Idle;
+        self.state = match self.state {
+            PacerState::Idle | PacerState::CoolingDown => PacerState::Idle,
+            PacerState::WaitingForTick
+            | PacerState::SubmittedThisCycle { .. }
+            | PacerState::Continuous { .. } => PacerState::CoolingDown,
+        };
         false
     }
 
     pub fn is_active(&self) -> bool {
-        self.state != PacerState::Idle || self.cooling_down
+        self.state != PacerState::Idle
     }
 }
 
@@ -269,5 +277,26 @@ mod tests {
         assert!(!window.request(FrameRequest::Immediate, after_queued_tick));
         assert!(!window.take_tick(after_queued_tick, false));
         assert!(window.take_tick(start + interval * 3, false));
+    }
+
+    #[test]
+    fn cooling_down_state_allows_immediate_input_and_defers_non_immediate_redraws() {
+        let mut pacer = FramePacer::default();
+        assert!(pacer.request(FrameRequest::Immediate));
+        // First quiet tick moves to CoolingDown: clock remains active, no render.
+        assert!(!pacer.tick(false));
+        assert!(pacer.is_active());
+
+        // Immediate input during CoolingDown submits at once.
+        assert!(pacer.request(FrameRequest::Immediate));
+        assert!(!pacer.tick(false));
+        assert!(pacer.is_active());
+
+        // Deferred redraw during CoolingDown waits for the next tick instead of getting lost.
+        assert!(!pacer.request(FrameRequest::Deferred));
+        assert!(pacer.tick(false));
+        assert!(!pacer.tick(false));
+        assert!(!pacer.tick(false));
+        assert!(!pacer.is_active());
     }
 }

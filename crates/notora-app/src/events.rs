@@ -261,7 +261,13 @@ impl NotoraRuntime {
     }
 
     fn present_paced_frame(&mut self) {
-        if let Err(error) = self.render() {
+        if !self.begin_paced_present() {
+            return;
+        }
+        let rendered = self.render();
+        self.finish_paced_present();
+        self.requeue_followup_redraw_after_present();
+        if let Err(error) = rendered {
             eprintln!("notora frame rendering failed: {error}");
             return;
         }

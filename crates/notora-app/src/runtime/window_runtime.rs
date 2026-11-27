@@ -57,6 +57,7 @@ pub(super) struct WindowRuntime {
     event_loop_proxy: Option<EventLoopProxy<ShellEvent>>,
     pub(super) frame_pacer: WindowFramePacer,
     pub(super) occluded: bool,
+    presenting: bool,
     #[cfg(target_os = "macos")]
     latency_critical_activity: Option<appkit_shell::macos::LatencyCriticalActivity>,
 }
@@ -73,6 +74,7 @@ impl WindowRuntime {
             event_loop_proxy: None,
             frame_pacer: WindowFramePacer::default(),
             occluded: false,
+            presenting: false,
             #[cfg(target_os = "macos")]
             latency_critical_activity: None,
         }
@@ -190,6 +192,22 @@ impl WindowRuntime {
             || editor_cursor_blink_due
     }
 
+    pub(super) fn has_redraw_request(&self) -> bool {
+        self.redraw_requested
+    }
+
+    pub(super) fn begin_present(&mut self) -> bool {
+        if self.presenting || self.occluded {
+            return false;
+        }
+        self.presenting = true;
+        true
+    }
+
+    pub(super) fn finish_present(&mut self) {
+        self.presenting = false;
+    }
+
     pub(super) fn set_occluded(&mut self, occluded: bool) {
         self.occluded = occluded;
         if occluded {
@@ -213,5 +231,36 @@ impl WindowRuntime {
         if let Some(window) = editor_runtime.window() {
             window.set_title(title);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use appkit_shell::frame_pacer::FrameRequest;
+    use std::time::Duration;
+
+    #[test]
+    fn begin_present_blocks_reentrant_and_occluded_presents() {
+        let mut runtime = WindowRuntime::new();
+        assert!(runtime.begin_present());
+        assert!(!runtime.begin_present());
+        runtime.finish_present();
+        assert!(runtime.begin_present());
+        runtime.finish_present();
+
+        runtime.set_occluded(true);
+        assert!(!runtime.begin_present());
+        runtime.set_occluded(false);
+        assert!(runtime.begin_present());
+    }
+
+    #[test]
+    fn occluded_window_drops_pending_tick_without_rendering() {
+        let mut runtime = WindowRuntime::new();
+        let start = Instant::now();
+        assert!(runtime.frame_pacer.request(FrameRequest::Immediate, start));
+        runtime.set_occluded(true);
+        assert!(!runtime.frame_pacer.take_tick(start + Duration::from_millis(20), false));
     }
 }

@@ -4696,3 +4696,26 @@ fn system_open_before_session_restore_completion_keeps_the_external_document_foc
             )
     ));
 }
+
+#[test]
+fn sync_followup_redraw_to_pacer_requeues_pending_redraw_without_dropping_tick() {
+    let mut app = app();
+    let _ = app.take_redraw_request();
+    let start = Instant::now();
+    assert!(
+        app.window_runtime
+            .frame_pacer
+            .request(appkit_shell::frame_pacer::FrameRequest::Immediate, start)
+    );
+
+    app.sync_followup_redraw_to_pacer(start);
+    assert!(!app.window_runtime.frame_pacer.take_tick(start + Duration::from_millis(20), false));
+
+    assert!(app.window_runtime.frame_pacer.request(
+        appkit_shell::frame_pacer::FrameRequest::Immediate,
+        start + Duration::from_millis(25),
+    ));
+    app.window_runtime.schedule_redraw();
+    app.sync_followup_redraw_to_pacer(start + Duration::from_millis(25));
+    assert!(app.window_runtime.frame_pacer.take_tick(start + Duration::from_millis(45), false));
+}

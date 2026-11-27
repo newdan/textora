@@ -8,7 +8,7 @@ use crate::image_atlas::ImageAtlas;
 use crate::render_cache::PreviewRenderCache;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
 };
 use std::time::Instant;
 use wgpu::util::DeviceExt;
@@ -214,12 +214,13 @@ impl FrameVertexBuffers {
         encoder: &wgpu::CommandEncoder,
         vertices: &[u8],
     ) -> &wgpu::Buffer {
+        debug_assert!(!vertices.is_empty(), "frame vertex upload requires non-empty geometry");
         if let Some(slots) = &mut self.mapped {
             // Poll without waiting if all shared slots are still in flight.
-            if !slots.iter().any(MappedVertexSlot::is_ready) {
+            if !slots.iter().any(MappedVertexSlot::is_reusable) {
                 let _ = device.poll(wgpu::PollType::Poll);
             }
-            if let Some(slot) = slots.iter_mut().find(|slot| slot.is_ready()) {
+            if let Some(slot) = slots.iter_mut().find(|slot| slot.is_reusable()) {
                 return slot.write(device, encoder, vertices);
             }
         }
@@ -238,9 +239,28 @@ impl FrameVertexBuffers {
     }
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MappedSlotState {
+    InFlight = 0,
+    Ready = 1,
+    Failed = 2,
+}
+
+impl MappedSlotState {
+    fn from_u8(raw: u8) -> Self {
+        match raw {
+            0 => Self::InFlight,
+            1 => Self::Ready,
+            2 => Self::Failed,
+            _ => Self::Failed,
+        }
+    }
+}
+
 struct MappedVertexSlot {
     buffer: wgpu::Buffer,
-    mapped: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
 }
 
 impl MappedVertexSlot {
@@ -251,11 +271,19 @@ impl MappedVertexSlot {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::MAP_WRITE,
             mapped_at_creation: true,
         });
-        Self { buffer, mapped: Arc::new(AtomicBool::new(true)) }
+        Self { buffer, state: Arc::new(AtomicU8::new(MappedSlotState::Ready as u8)) }
     }
 
-    fn is_ready(&self) -> bool {
-        self.mapped.load(Ordering::Acquire)
+    fn load_state(&self) -> MappedSlotState {
+        MappedSlotState::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    fn store_state(&self, state: MappedSlotState) {
+        self.state.store(state as u8, Ordering::Release);
+    }
+
+    fn is_reusable(&self) -> bool {
+        matches!(self.load_state(), MappedSlotState::Ready | MappedSlotState::Failed)
     }
 
     fn write(
@@ -265,15 +293,17 @@ impl MappedVertexSlot {
         vertices: &[u8],
     ) -> &wgpu::Buffer {
         let size = vertices.len() as u64;
-        if self.buffer.size() < size {
-            *self = Self::new(device, size.next_power_of_two());
+        if self.load_state() == MappedSlotState::Failed || self.buffer.size() < size {
+            *self = Self::new(device, size.next_power_of_two().max(INITIAL_VERTEX_BUFFER_BYTES));
         }
         self.buffer.slice(..size).get_mapped_range_mut().copy_from_slice(vertices);
         self.buffer.unmap();
-        self.mapped.store(false, Ordering::Release);
-        let mapped = Arc::clone(&self.mapped);
+        self.store_state(MappedSlotState::InFlight);
+        let state = Arc::clone(&self.state);
         encoder.map_buffer_on_submit(&self.buffer, wgpu::MapMode::Write, .., move |result| {
-            mapped.store(result.is_ok(), Ordering::Release);
+            let next =
+                if result.is_ok() { MappedSlotState::Ready } else { MappedSlotState::Failed };
+            state.store(next as u8, Ordering::Release);
         });
         &self.buffer
     }
@@ -282,6 +312,46 @@ impl MappedVertexSlot {
 #[cfg(test)]
 mod frame_vertex_tests {
     use super::*;
+
+    #[test]
+    fn failed_mapped_slot_recovers_as_reusable_while_in_flight_remains_blocked() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            eprintln!("skipping mapped vertex recovery test: no GPU adapter");
+            return;
+        };
+        let feature = wgpu::Features::MAPPABLE_PRIMARY_BUFFERS;
+        if !adapter.features().contains(feature) {
+            eprintln!(
+                "skipping mapped vertex recovery test: adapter has no primary mapping support"
+            );
+            return;
+        }
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: feature,
+            ..Default::default()
+        }))
+        .expect("adapter advertises primary mapping support");
+
+        let mut slot = MappedVertexSlot::new(&device, INITIAL_VERTEX_BUFFER_BYTES);
+        assert!(slot.is_reusable());
+        slot.store_state(MappedSlotState::InFlight);
+        assert!(!slot.is_reusable());
+
+        slot.store_state(MappedSlotState::Failed);
+        assert!(slot.is_reusable());
+
+        let encoder = device.create_command_encoder(&Default::default());
+        let vertex_bytes = [7; std::mem::size_of::<render::GlyphVertex>()];
+        let _ = slot.write(&device, &encoder, &vertex_bytes);
+        assert_eq!(slot.load_state(), MappedSlotState::InFlight);
+
+        let submitted = queue.submit(std::iter::once(encoder.finish()));
+        device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submitted), timeout: None })
+            .expect("recovered slot submission must complete");
+        assert_eq!(slot.load_state(), MappedSlotState::Ready);
+    }
 
     #[test]
     fn shared_vertex_slots_are_reused_only_after_the_submission_releases_them() {

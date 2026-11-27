@@ -907,6 +907,24 @@ impl App {
         let submission = self.render();
         self.finish_presented_frame(redraw_started_at, is_first_frame, submission);
         self.platform.finish_present();
+        self.requeue_followup_redraw_after_present();
+    }
+
+    fn sync_followup_redraw_to_pacer(&mut self, now: Instant) {
+        if self.platform.redraw_is_occluded() {
+            return;
+        }
+        if self.has_active_animation() {
+            let _ = self.platform.frame_pacer.request(FrameRequest::Continuous, now);
+        } else if self.platform.redraw_pending() || self.editor_runtime.has_redraw_request() {
+            let _ = self.platform.frame_pacer.request(FrameRequest::Deferred, now);
+        }
+    }
+
+    fn requeue_followup_redraw_after_present(&mut self) {
+        if self.frame_pacing_allowed() {
+            self.sync_followup_redraw_to_pacer(Instant::now());
+        }
     }
 
     fn finish_presented_frame(
@@ -1262,9 +1280,12 @@ impl ApplicationHandler<AppEvent> for App {
                 || self.ui_shell.scrollbar_is_dragging();
             let request = input_frame_request(&event, pointer_captured);
             let previous_redraw = self.platform.redraw_revision();
+            let had_runtime_redraw = self.editor_runtime.has_redraw_request();
             self.do_window_event(event_loop, event);
+            let redraw_triggered = self.platform.redraw_revision() != previous_redraw
+                || (!had_runtime_redraw && self.editor_runtime.has_redraw_request());
             if let Some(request) = request
-                && self.platform.redraw_revision() != previous_redraw
+                && redraw_triggered
             {
                 self.request_paced_frame(request);
             }
@@ -2814,5 +2835,34 @@ mod tests {
         assert!(!app.platform.redraw_pending());
         app.handle_window_occluded(false);
         assert!(app.platform.redraw_pending());
+    }
+
+    #[test]
+    fn sync_followup_redraw_to_pacer_requeues_pending_redraw_without_dropping_tick() {
+        let mut app = App::new(None);
+        app.platform.clear_redraw();
+        let start = Instant::now();
+        assert!(app.platform.frame_pacer.request(super::FrameRequest::Immediate, start));
+
+        // No pending redraw -> next tick is quiet and does not render.
+        app.sync_followup_redraw_to_pacer(start);
+        assert!(
+            !app.platform
+                .frame_pacer
+                .take_tick(start + std::time::Duration::from_millis(20), false)
+        );
+
+        // Simulate Timeout / atlas recovery scheduling a redraw during present.
+        assert!(
+            app.platform.frame_pacer.request(
+                super::FrameRequest::Immediate,
+                start + std::time::Duration::from_millis(25)
+            )
+        );
+        app.platform.schedule_redraw();
+        app.sync_followup_redraw_to_pacer(start + std::time::Duration::from_millis(25));
+        assert!(
+            app.platform.frame_pacer.take_tick(start + std::time::Duration::from_millis(45), false)
+        );
     }
 }
