@@ -1,4 +1,4 @@
-//! Settings menu builder — standalone free function.
+//! Sidebar popup menu builders.
 
 use crate::constants;
 use crate::core::Rect;
@@ -7,74 +7,58 @@ use crate::widgets::popup_menu::{PopupMenu, PopupMenuAction as PMA, PopupMenuIte
 
 use super::types::{NewDocumentKind, SidebarSettingsInput};
 
+const NEW_DOCUMENT_MENU_WIDTH_LOGICAL: f32 = 200.0;
+const NEW_DOCUMENT_MENU_GAP_LOGICAL: f32 = 2.0;
+const NEW_DOCUMENT_MENU_PADDING_LOGICAL: f32 = 4.0;
+
 /// Build the typed new-document menu below the sidebar split button.
 pub fn build_new_document_menu(
-    split_button_rect: Rect,
+    button_rect: Rect,
     screen_size: (f32, f32),
     metrics: &crate::settings::UiMetrics,
     include_encrypted_markdown: bool,
-) -> PopupMenu {
-    build_document_menu(split_button_rect, screen_size, metrics, include_encrypted_markdown, false)
-}
-
-pub(super) fn build_document_menu(
-    split_button_rect: Rect,
-    screen_size: (f32, f32),
-    metrics: &crate::settings::UiMetrics,
-    include_encrypted_markdown: bool,
-    plain_text_only: bool,
 ) -> PopupMenu {
     let (screen_w, screen_h) = screen_size;
     let dpi = metrics.dpi;
     let item_h = constants::ROW_HEIGHT * dpi;
-    let menu_w = 200.0 * dpi;
-    let anchor_x = split_button_rect.x + split_button_rect.w / 2.0 - menu_w / 2.0;
-    let anchor_y = split_button_rect.bottom() + 2.0 * dpi;
-    let mut items =
-        vec![PopupMenuItem::action("新建 TXT", PMA::NewDocument(NewDocumentKind::Text))];
-    if !plain_text_only {
-        items.extend([
-            PopupMenuItem::action("新建 MMAP", PMA::NewDocument(NewDocumentKind::Mindmap)),
-            PopupMenuItem::action("新建 MD", PMA::NewDocument(NewDocumentKind::Markdown)),
-        ]);
-        if include_encrypted_markdown {
-            items.push(PopupMenuItem::action(
-                "加密笔记",
-                PMA::NewDocument(NewDocumentKind::EncryptedMarkdown),
-            ));
-        }
+    let menu_w = NEW_DOCUMENT_MENU_WIDTH_LOGICAL * dpi;
+    let gap = NEW_DOCUMENT_MENU_GAP_LOGICAL * dpi;
+    let padding = NEW_DOCUMENT_MENU_PADDING_LOGICAL * dpi;
+    let mut items = vec![
+        PopupMenuItem::action("新建 TXT", PMA::NewDocument(NewDocumentKind::Text)),
+        PopupMenuItem::action("新建 MMAP", PMA::NewDocument(NewDocumentKind::Mindmap)),
+        PopupMenuItem::action("新建 MD", PMA::NewDocument(NewDocumentKind::Markdown)),
+    ];
+    if include_encrypted_markdown {
+        items.push(PopupMenuItem::action(
+            "加密笔记",
+            PMA::NewDocument(NewDocumentKind::EncryptedMarkdown),
+        ));
     }
 
-    let menu_left = anchor_x.min(screen_w - menu_w).max(0.0);
-    let menu_right = menu_left + menu_w;
-    let pad_x = 4.0 * dpi;
-    let pad_y = 4.0 * dpi;
-    let mut top_px = anchor_y + pad_y;
-    let mut item_rects = Vec::with_capacity(items.len());
-    for item in &items {
-        let item_height = if item.is_separator() { 8.0 * dpi } else { item_h };
-        item_rects.push(Rect::new(
-            menu_left + pad_x,
-            top_px,
-            menu_right - menu_left - pad_x * 2.0,
-            item_height,
-        ));
-        top_px += item_height;
-    }
-    let menu_h = top_px - anchor_y + pad_y;
-    let final_top = if anchor_y + menu_h > screen_h - 4.0 * dpi {
-        (anchor_y - menu_h).max(4.0 * dpi)
+    let menu_left = button_rect.x.min(screen_w - menu_w).max(0.0);
+    let menu_h = items.len() as f32 * item_h + padding * 2.0;
+    let below_button = button_rect.bottom() + gap;
+    let menu_top = if below_button + menu_h > screen_h - padding {
+        (button_rect.y - gap - menu_h).max(padding)
     } else {
-        anchor_y
+        below_button
     };
-    let offset = final_top - anchor_y;
-    let adjusted_rects: Vec<Rect> =
-        item_rects.iter().map(|r| Rect::new(r.x, r.y + offset, r.w, r.h)).collect();
+    let item_rects = (0..items.len())
+        .map(|index| {
+            Rect::new(
+                menu_left + padding,
+                menu_top + padding + index as f32 * item_h,
+                menu_w - padding * 2.0,
+                item_h,
+            )
+        })
+        .collect();
 
     PopupMenu {
         items,
-        item_rects: adjusted_rects,
-        menu_rect: Rect::new(menu_left, final_top, menu_right - menu_left, menu_h),
+        item_rects,
+        menu_rect: Rect::new(menu_left, menu_top, menu_w, menu_h),
         screen_size,
         show_checkmarks: false,
     }
@@ -228,6 +212,6 @@ mod tests {
         let menu = build_new_document_menu(anchor, (800.0, 600.0), &metrics, true);
 
         assert!(menu.menu_rect.bottom() <= 600.0);
-        assert!(menu.menu_rect.y < anchor.y);
+        assert!(menu.menu_rect.bottom() < anchor.y);
     }
 }

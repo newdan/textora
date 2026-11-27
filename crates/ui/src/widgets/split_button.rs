@@ -33,6 +33,13 @@ enum SplitButtonRegion {
     Menu,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SplitButtonMenu {
+    Hidden,
+    Closed,
+    Open,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SplitButtonPresentation {
     #[default]
@@ -50,7 +57,7 @@ pub struct SplitButtonWidget {
     main_action_id: WidgetId,
     menu_action_id: WidgetId,
     icon: Option<String>,
-    menu_open: bool,
+    menu: SplitButtonMenu,
     hovered_region: Option<SplitButtonRegion>,
     pressed_region: Option<SplitButtonRegion>,
     focused: bool,
@@ -73,7 +80,7 @@ impl SplitButtonWidget {
             main_action_id: WidgetId(0),
             menu_action_id: WidgetId(0),
             icon: None,
-            menu_open: false,
+            menu: SplitButtonMenu::Closed,
             hovered_region: None,
             pressed_region: None,
             focused: false,
@@ -102,11 +109,30 @@ impl SplitButtonWidget {
         self.icon = icon;
     }
 
+    pub fn set_menu_visible(&mut self, visible: bool) {
+        match (visible, self.menu) {
+            (true, SplitButtonMenu::Hidden) => self.menu = SplitButtonMenu::Closed,
+            (false, _) => {
+                self.menu = SplitButtonMenu::Hidden;
+                self.hovered_region = self.hovered_region.filter(|r| *r == SplitButtonRegion::Main);
+                self.pressed_region = self.pressed_region.filter(|r| *r == SplitButtonRegion::Main);
+            }
+            _ => {}
+        }
+    }
+
     pub fn set_menu_open(&mut self, menu_open: bool) {
-        self.menu_open = menu_open;
+        if !self.has_menu() {
+            return;
+        }
+        self.menu = if menu_open { SplitButtonMenu::Open } else { SplitButtonMenu::Closed };
         if menu_open {
             self.pressed_region = None;
         }
+    }
+
+    fn has_menu(&self) -> bool {
+        self.menu != SplitButtonMenu::Hidden
     }
 
     pub fn main_rect(&self) -> Rect {
@@ -120,7 +146,7 @@ impl SplitButtonWidget {
     fn region_at(&self, px: f32, py: f32) -> Option<SplitButtonRegion> {
         if self.main_rect.contains(px, py) {
             Some(SplitButtonRegion::Main)
-        } else if self.menu_rect.contains(px, py) {
+        } else if self.has_menu() && self.menu_rect.contains(px, py) {
             Some(SplitButtonRegion::Menu)
         } else {
             None
@@ -138,7 +164,7 @@ impl SplitButtonWidget {
         if !self.input.enabled {
             return ButtonVisualState::Disabled;
         }
-        if region == SplitButtonRegion::Menu && self.menu_open {
+        if region == SplitButtonRegion::Menu && self.menu == SplitButtonMenu::Open {
             return ButtonVisualState::Selected;
         }
         if self.hovered_region != Some(region) {
@@ -155,7 +181,11 @@ impl SplitButtonWidget {
 impl Widget for SplitButtonWidget {
     fn set_rect(&mut self, rect: Rect, ctx: &mut LayoutCtx) {
         self.rect = rect;
-        let menu_width = (SPLIT_BUTTON_MENU_WIDTH_LOGICAL * ctx.dpi).min(rect.w);
+        let menu_width = if self.has_menu() {
+            (SPLIT_BUTTON_MENU_WIDTH_LOGICAL * ctx.dpi).min(rect.w)
+        } else {
+            0.0
+        };
         self.main_rect = Rect::new(rect.x, rect.y, (rect.w - menu_width).max(0.0), rect.h);
         self.menu_rect = Rect::new(rect.right() - menu_width, rect.y, menu_width, rect.h);
     }
@@ -181,6 +211,9 @@ impl Widget for SplitButtonWidget {
         for (region, rect) in
             [(SplitButtonRegion::Main, self.main_rect), (SplitButtonRegion::Menu, self.menu_rect)]
         {
+            if region == SplitButtonRegion::Menu && !self.has_menu() {
+                continue;
+            }
             if self.presentation == SplitButtonPresentation::Toolbar {
                 style.paint_background(ctx, rect, self.region_state(region));
                 continue;
@@ -194,7 +227,7 @@ impl Widget for SplitButtonWidget {
             });
         }
 
-        if self.presentation == SplitButtonPresentation::Standalone {
+        if self.has_menu() && self.presentation == SplitButtonPresentation::Standalone {
             let divider_color = base_style.border_color(state, alpha);
             let divider_inset = SPLIT_BUTTON_DIVIDER_INSET_LOGICAL * ctx.dpi;
             ctx.list.fill(
@@ -226,15 +259,17 @@ impl Widget for SplitButtonWidget {
             content_x
         };
         ctx.text(text_x, baseline, font_size, foreground, &self.input.label);
-        let center_x = self.menu_rect.x + self.menu_rect.w * 0.5;
-        let center_y = self.menu_rect.y + self.menu_rect.h * 0.5;
-        let arrow_radius = 4.0 * ctx.dpi;
-        ctx.list.fill_triangle(
-            [center_x - arrow_radius, center_y - arrow_radius * 0.4],
-            [center_x + arrow_radius, center_y - arrow_radius * 0.4],
-            [center_x, center_y + arrow_radius * 0.6],
-            foreground,
-        );
+        if self.has_menu() {
+            let center_x = self.menu_rect.x + self.menu_rect.w * 0.5;
+            let center_y = self.menu_rect.y + self.menu_rect.h * 0.5;
+            let arrow_radius = 4.0 * ctx.dpi;
+            ctx.list.fill_triangle(
+                [center_x - arrow_radius, center_y - arrow_radius * 0.4],
+                [center_x + arrow_radius, center_y - arrow_radius * 0.4],
+                [center_x, center_y + arrow_radius * 0.6],
+                foreground,
+            );
+        }
         style.paint_outline(ctx, self.rect, state);
         if self.focused && self.input.enabled {
             let mut focus_ring = ctx.theme.application_theme().focus_ring;
@@ -269,7 +304,6 @@ impl Widget for SplitButtonWidget {
         if self.rect.w <= 0.0 || self.rect.h <= 0.0 {
             return None;
         }
-        let root_id = AccessibilityId::from(main_id).named_child("split-button");
         let mut main = AccessibilityNode::new(
             AccessibilityId::from(main_id),
             AccessibilityRole::Button,
@@ -278,6 +312,14 @@ impl Widget for SplitButtonWidget {
         .with_name(self.input.label.clone())
         .with_disabled(!self.input.enabled)
         .with_focused(self.focused);
+        if self.input.enabled {
+            main = main
+                .with_action(AccessibilityAction::Focus)
+                .with_action(AccessibilityAction::Activate);
+        }
+        if !self.has_menu() {
+            return Some(main);
+        }
         let mut menu = AccessibilityNode::new(
             AccessibilityId::from(self.menu_action_id),
             AccessibilityRole::Button,
@@ -285,13 +327,11 @@ impl Widget for SplitButtonWidget {
         )
         .with_name(format!("{} 菜单", self.input.label))
         .with_disabled(!self.input.enabled)
-        .with_expanded(self.menu_open);
+        .with_expanded(self.menu == SplitButtonMenu::Open);
         if self.input.enabled {
-            main = main
-                .with_action(AccessibilityAction::Focus)
-                .with_action(AccessibilityAction::Activate);
             menu = menu.with_action(AccessibilityAction::Activate);
         }
+        let root_id = AccessibilityId::from(main_id).named_child("split-button");
         Some(
             AccessibilityNode::new(root_id, AccessibilityRole::Group, ctx.screen_bounds(self.rect))
                 .with_name(self.input.label.clone())
@@ -322,7 +362,8 @@ impl Widget for SplitButtonWidget {
                 _ => None,
             };
         }
-        (request.target == AccessibilityId::from(self.menu_action_id)
+        (self.has_menu()
+            && request.target == AccessibilityId::from(self.menu_action_id)
             && request.action == AccessibilityAction::Activate)
             .then_some(WidgetAction::Control(ControlAction::Activated { id: self.menu_action_id }))
     }
@@ -373,7 +414,7 @@ impl Widget for SplitButtonWidget {
                 Some(WidgetAction::Control(ControlAction::Activated { id: self.main_action_id }))
             }
             Event::KeyDown(KeyCode::Down, modifiers)
-                if self.focused && *modifiers == Modifiers::NONE =>
+                if self.has_menu() && self.focused && *modifiers == Modifiers::NONE =>
             {
                 Some(WidgetAction::Control(ControlAction::Activated { id: self.menu_action_id }))
             }
@@ -386,7 +427,7 @@ impl Widget for SplitButtonWidget {
     }
 
     fn tooltip_at(&self, px: f32, py: f32) -> Option<TooltipHint> {
-        self.menu_rect.contains(px, py).then(|| TooltipHint {
+        (self.has_menu() && self.menu_rect.contains(px, py)).then(|| TooltipHint {
             label: format!("更多{}选项", self.input.label),
             target_rect: self.menu_rect,
         })

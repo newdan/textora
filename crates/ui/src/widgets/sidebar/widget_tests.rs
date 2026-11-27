@@ -13,8 +13,8 @@ mod tests {
     use crate::theme::Theme;
     use crate::widgets::list::ListItemIndicator;
     use crate::widgets::sidebar::{
-        NewDocumentKind, SidebarAction, SidebarConfig, SidebarWidget, SidebarWidgetInput,
-        Visibility,
+        NewDocumentKind, SidebarAction, SidebarConfig, SidebarPopupKind, SidebarWidget,
+        SidebarWidgetInput, Visibility,
     };
 
     fn test_theme() -> Theme {
@@ -327,17 +327,61 @@ mod tests {
     }
 
     #[test]
-    fn new_document_dropdown_click_opens_menu() {
+    fn new_document_dropdown_opens_menu_aligned_to_the_new_button() {
         let mut widget = new_document_widget();
         let theme = test_theme();
         layout_new_document_widget(&mut widget, &theme);
-        let dropdown = widget.current_layout().expect("layout must exist").new_menu_btn_rect;
+        let layout = widget.current_layout().expect("layout must exist");
+        let new_button = layout.new_btn_rect;
+        let dropdown = layout.new_menu_btn_rect;
         let mut event_ctx = EventCtx::new(&theme, 1.0);
 
         let action = click_new_document_region(&mut widget, dropdown, &mut event_ctx);
 
         assert_eq!(action, Some(WidgetAction::Sidebar(SidebarAction::Hovered)));
-        assert!(widget.open_menu().is_some());
+        let menu = widget.open_menu().expect("dropdown must open the menu");
+        assert_eq!(menu.menu_rect.x, new_button.x);
+        assert!(menu.menu_rect.y > new_button.bottom());
+    }
+
+    #[test]
+    fn plain_text_sidebar_has_one_new_document_button() {
+        let mut widget = new_document_widget();
+        widget.set_plain_text_only(true);
+        let theme = test_theme();
+        layout_new_document_widget(&mut widget, &theme);
+        let layout = widget.current_layout().expect("sidebar layout must exist");
+        let new_button = layout.new_btn_rect;
+
+        assert_eq!(layout.new_menu_btn_rect.w, 0.0);
+        assert_eq!(widget.new_document_button.main_rect(), new_button);
+        assert_eq!(widget.new_document_button.menu_rect().w, 0.0);
+
+        let mut draw_list = DrawList::new();
+        widget.new_document_button.paint(&mut PaintCtx::new(&mut draw_list, &theme, 1.0));
+        let button_center_x = new_button.x + new_button.w * 0.5;
+        assert!(!draw_list.cmds.iter().any(|command| matches!(command,
+            DrawCmd::FillTriangle { p0, p1, p2, .. }
+                if [p0, p1, p2].iter().all(|point| point[0] > button_center_x)
+        )));
+
+        let mut event_ctx = EventCtx::new(&theme, 1.0);
+        assert_eq!(
+            click_new_document_region(&mut widget, new_button, &mut event_ctx),
+            Some(WidgetAction::Sidebar(SidebarAction::NewDocument(NewDocumentKind::Text)))
+        );
+        assert!(widget.open_menu().is_none());
+    }
+
+    #[test]
+    fn plain_text_sidebar_does_not_open_a_new_document_popup() {
+        let mut widget = new_document_widget();
+        widget.set_plain_text_only(true);
+        layout_new_document_widget(&mut widget, &test_theme());
+
+        widget.open_popup(SidebarPopupKind::NewDocument);
+
+        assert!(widget.open_menu().is_none());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use super::layout::*;
-use super::menu::build_document_menu;
+use super::menu::build_new_document_menu;
 use super::persistent::SidebarInteraction;
 use super::types::*;
 use crate::constants;
@@ -17,8 +17,10 @@ use crate::widgets::split_button::SPLIT_BUTTON_MENU_WIDTH_LOGICAL;
 
 const ACTION_ROW_INSET_LOGICAL: f32 = 12.0;
 const ACTION_ROW_GAP_LOGICAL: f32 = crate::button::ButtonMetrics::ACTION_GAP;
-const NEW_DOCUMENT_MIN_WIDTH_LOGICAL: f32 =
+const NEW_DOCUMENT_SPLIT_WIDTH_LOGICAL: f32 =
     crate::button::ButtonMetrics::split_icon_text_width(2, SIDEBAR_ICON_SIZE_LOGICAL);
+const NEW_DOCUMENT_SINGLE_WIDTH_LOGICAL: f32 =
+    crate::button::ButtonMetrics::icon_text_width(2, SIDEBAR_ICON_SIZE_LOGICAL);
 const OPEN_BUTTON_WIDTH_LOGICAL: f32 =
     crate::button::ButtonMetrics::icon_text_width(2, SIDEBAR_ICON_SIZE_LOGICAL);
 const COMPACT_OPEN_BUTTON_WIDTH_LOGICAL: f32 = 32.0;
@@ -223,15 +225,13 @@ impl SidebarState {
         screen_h: f32,
         metrics: &crate::settings::UiMetrics,
     ) {
-        let split_button_rect =
-            self.layout.as_ref().map(|layout| layout.new_menu_btn_rect).unwrap_or(Rect::ZERO);
-        self.open_menu = Some(build_document_menu(
-            split_button_rect,
-            (screen_w, screen_h),
-            metrics,
-            false,
-            self.plain_text_only,
-        ));
+        if self.plain_text_only {
+            return;
+        }
+        let new_button =
+            self.layout.as_ref().map(|layout| layout.new_btn_rect).unwrap_or(Rect::ZERO);
+        self.open_menu =
+            Some(build_new_document_menu(new_button, (screen_w, screen_h), metrics, false));
         self.menu_hovered_index = None;
     }
 
@@ -333,8 +333,12 @@ impl SidebarState {
         let action_start =
             if native_titlebar { menu_btn_rect.right() + action_gap } else { action_inset };
         let action_width = (w - action_start - action_inset).max(0.0);
-        let full_action_width =
-            (NEW_DOCUMENT_MIN_WIDTH_LOGICAL + OPEN_BUTTON_WIDTH_LOGICAL) * dpi + action_gap;
+        let (new_width_logical, new_menu_width_logical) = if self.plain_text_only {
+            (NEW_DOCUMENT_SINGLE_WIDTH_LOGICAL, 0.0)
+        } else {
+            (NEW_DOCUMENT_SPLIT_WIDTH_LOGICAL, SPLIT_BUTTON_MENU_WIDTH_LOGICAL)
+        };
+        let full_action_width = (new_width_logical + OPEN_BUTTON_WIDTH_LOGICAL) * dpi + action_gap;
         let open_width = if action_width >= full_action_width {
             OPEN_BUTTON_WIDTH_LOGICAL * dpi
         } else {
@@ -343,12 +347,10 @@ impl SidebarState {
         let new_row_rect = Rect::new(
             action_start,
             new_y,
-            (action_width - action_gap - open_width)
-                .max(0.0)
-                .min(NEW_DOCUMENT_MIN_WIDTH_LOGICAL * dpi),
+            (action_width - action_gap - open_width).max(0.0).min(new_width_logical * dpi),
             new_h,
         );
-        let new_menu_width = SPLIT_BUTTON_MENU_WIDTH_LOGICAL * dpi;
+        let new_menu_width = new_menu_width_logical * dpi;
         let new_btn_rect = Rect::new(
             new_row_rect.x,
             new_row_rect.y,

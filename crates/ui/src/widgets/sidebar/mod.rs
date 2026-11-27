@@ -194,6 +194,10 @@ impl SidebarWidget {
 
     pub fn set_plain_text_only(&mut self, plain_text_only: bool) {
         self.state.plain_text_only = plain_text_only;
+        self.new_document_button.set_menu_visible(!plain_text_only);
+        if plain_text_only && self.open_menu().is_some_and(is_new_document_menu) {
+            self.set_open_menu(None);
+        }
     }
 
     pub fn editor_left_offset(&self) -> f32 {
